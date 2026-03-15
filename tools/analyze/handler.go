@@ -61,6 +61,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input AnalyzeInput) (
 	if input.FilePath == "" {
 		return errorResult("file_path is required")
 	}
+	// Normalize before validation to prevent path traversal (e.g. "/../")
 	input.FilePath = filepath.Clean(input.FilePath)
 	if !filepath.IsAbs(input.FilePath) {
 		return errorResult("file_path must be an absolute path")

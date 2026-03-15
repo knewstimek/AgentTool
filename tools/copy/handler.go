@@ -292,8 +292,12 @@ func copyFileAtomic(src, dst string, mode os.FileMode) (copyResult, error) {
 	return copyResult{RenamedOld: oldRenamed}, nil
 }
 
-// windowsLockedFileFallback renames a locked destination file aside,
-// then moves the new file into place. Returns the path of the renamed old file.
+// windowsLockedFileFallback handles locked destination files on Windows.
+// Windows prevents overwriting running executables and loaded DLLs, but
+// allows renaming them — the rename only updates the directory entry without
+// touching file data or handles. This function renames the locked file aside
+// with a random suffix, then moves the new file into place.
+// Returns the path the old file was renamed to.
 func windowsLockedFileFallback(newTmpPath, dst string) (string, error) {
 	// Generate a short random suffix for the old file
 	var randBytes [4]byte

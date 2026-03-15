@@ -39,6 +39,7 @@ func opHexdump(input AnalyzeInput) (string, error) {
 	}
 
 	buf := make([]byte, length)
+	// Only fail if no bytes were read; partial read at EOF is valid data
 	n, err := f.Read(buf)
 	if err != nil && n == 0 {
 		return "", fmt.Errorf("cannot read at offset 0x%x: %w", offset, err)

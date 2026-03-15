@@ -56,6 +56,8 @@ func opDisassemble(input AnalyzeInput) (string, error) {
 	}
 	defer f.Close()
 	data := make([]byte, readSize)
+	// ReadAt returns io.EOF when fewer bytes are available than requested
+	// (e.g. near end of file). Partial data is still valid, so ignore EOF.
 	if _, err := f.ReadAt(data, int64(offset)); err != nil && err.Error() != "EOF" {
 		return "", fmt.Errorf("cannot read file: %w", err)
 	}

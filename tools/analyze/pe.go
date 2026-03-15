@@ -200,6 +200,8 @@ func parseExports(f *pe.File) []exportEntry {
 	addrOfNames := binary.LittleEndian.Uint32(sectionData[dirOff+32:])
 	addrOfOrdinals := binary.LittleEndian.Uint32(sectionData[dirOff+36:])
 
+	// Sanity check: malformed PE can have arbitrarily large numNames,
+	// which would cause excessive memory allocation
 	if numNames == 0 || numNames > 10000 {
 		return nil
 	}
