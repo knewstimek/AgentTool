@@ -104,17 +104,59 @@ Or just ask your AI agent to do it for you:
 
 Any capable AI coding agent (Claude Code, Codex, etc.) can handle the full download → install → restart flow automatically.
 
-### Recommended: Add to your CLAUDE.md / AGENTS.md
+### Recommended: Tell your agent to prefer agent-tool
 
-After installing, agents will have access to agent-tool but may still default to built-in tools (Read, Edit, etc.). To ensure agents **prefer** agent-tool's encoding-aware, indentation-smart tools, add one of the following to your project's `CLAUDE.md` or `AGENTS.md`:
+After installing, agents will have access to agent-tool but may still default to built-in tools (Read, Edit, etc.). To ensure agents **prefer** agent-tool's encoding-aware, indentation-smart tools, add one of the instructions below.
 
-**Strict mode** (recommended for projects with non-UTF-8 files or mixed indentation):
+Pick **Strict** or **Soft**:
 
-> ALWAYS use agent-tool MCP tools (mcp__agent-tool__*) instead of built-in file tools. agent-tool preserves file encoding and respects .editorconfig indentation settings.
+| Mode | When to use | Instruction |
+|------|-------------|-------------|
+| **Strict** | Projects with non-UTF-8 files or mixed indentation | `ALWAYS use agent-tool MCP tools (mcp__agent-tool__*) instead of built-in file tools. agent-tool preserves file encoding and respects .editorconfig indentation settings.` |
+| **Soft** | General projects | `Prefer agent-tool MCP tools (mcp__agent-tool__*) over built-in file tools when available.` |
 
-**Soft mode** (gentle nudge for general projects):
+**Where to put it:**
 
-> Prefer agent-tool MCP tools (mcp__agent-tool__*) over built-in file tools when available.
+<details>
+<summary><b>Claude Code</b> — CLAUDE.md (per-project) or global instructions</summary>
+
+**Per-project** — add to your project's `CLAUDE.md`:
+```
+ALWAYS use agent-tool MCP tools (mcp__agent-tool__*) instead of built-in file tools.
+```
+
+**Global** (all projects) — add to `~/.claude/CLAUDE.md`:
+```
+ALWAYS use agent-tool MCP tools (mcp__agent-tool__*) instead of built-in file tools.
+```
+</details>
+
+<details>
+<summary><b>Codex CLI</b> — model_instructions.md (global)</summary>
+
+1. Add to `~/.codex/config.toml` (top-level, **not** inside `[mcp_servers.*]`):
+```toml
+model_instructions_file = "~/.codex/model_instructions.md"
+```
+
+2. Create `~/.codex/model_instructions.md`:
+```
+ALWAYS use agent-tool MCP tools (mcp__agent-tool__*) instead of built-in file tools.
+```
+
+3. Restart Codex.
+
+**Per-project** — add to your project's `AGENTS.md` instead.
+</details>
+
+<details>
+<summary><b>Cursor / Windsurf / Cline</b> — .cursorrules or AGENTS.md</summary>
+
+Add to your project's `.cursorrules`, `.windsurfrules`, or `AGENTS.md`:
+```
+ALWAYS use agent-tool MCP tools (mcp__agent-tool__*) instead of built-in file tools.
+```
+</details>
 
 ## Installation
 

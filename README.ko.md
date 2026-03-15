@@ -104,17 +104,59 @@ UTF-8로 강제 변환하지 않고, 원본 파일 인코딩을 유지합니다.
 
 Claude Code, Codex 등 AI 코딩 에이전트가 다운로드 → 설치 → 재시작까지 알아서 처리합니다.
 
-### 권장: CLAUDE.md / AGENTS.md에 추가
+### 권장: 에이전트에게 agent-tool 우선 사용 지시
 
-설치 후 에이전트가 agent-tool을 사용할 수 있게 되지만, 기본 내장 도구(Read, Edit 등)를 계속 쓸 수 있습니다. 에이전트가 agent-tool을 **우선 사용**하게 하려면, 프로젝트의 `CLAUDE.md` 또는 `AGENTS.md`에 다음 중 하나를 추가하세요:
+설치 후 에이전트가 agent-tool을 사용할 수 있게 되지만, 기본 내장 도구(Read, Edit 등)를 계속 쓸 수 있습니다. 에이전트가 agent-tool을 **우선 사용**하게 하려면 아래 지시를 추가하세요.
 
-**Strict 모드** (비 UTF-8 파일이나 혼합 들여쓰기가 있는 프로젝트에 권장):
+**Strict** 또는 **Soft** 선택:
 
-> ALWAYS use agent-tool MCP tools (mcp__agent-tool__*) instead of built-in file tools. agent-tool preserves file encoding and respects .editorconfig indentation settings.
+| 모드 | 사용 시점 | 지시문 |
+|------|----------|--------|
+| **Strict** | 비 UTF-8 파일이나 혼합 들여쓰기 프로젝트 | `ALWAYS use agent-tool MCP tools (mcp__agent-tool__*) instead of built-in file tools. agent-tool preserves file encoding and respects .editorconfig indentation settings.` |
+| **Soft** | 일반 프로젝트 | `Prefer agent-tool MCP tools (mcp__agent-tool__*) over built-in file tools when available.` |
 
-**Soft 모드** (일반 프로젝트용):
+**어디에 넣을까:**
 
-> Prefer agent-tool MCP tools (mcp__agent-tool__*) over built-in file tools when available.
+<details>
+<summary><b>Claude Code</b> — CLAUDE.md (프로젝트별) 또는 전역 설정</summary>
+
+**프로젝트별** — 프로젝트의 `CLAUDE.md`에 추가:
+```
+ALWAYS use agent-tool MCP tools (mcp__agent-tool__*) instead of built-in file tools.
+```
+
+**전역** (모든 프로젝트) — `~/.claude/CLAUDE.md`에 추가:
+```
+ALWAYS use agent-tool MCP tools (mcp__agent-tool__*) instead of built-in file tools.
+```
+</details>
+
+<details>
+<summary><b>Codex CLI</b> — model_instructions.md (전역)</summary>
+
+1. `~/.codex/config.toml`에 추가 (최상위 레벨, `[mcp_servers.*]` 안이 **아님**):
+```toml
+model_instructions_file = "~/.codex/model_instructions.md"
+```
+
+2. `~/.codex/model_instructions.md` 파일 생성:
+```
+ALWAYS use agent-tool MCP tools (mcp__agent-tool__*) instead of built-in file tools.
+```
+
+3. Codex 재시작.
+
+**프로젝트별** — 프로젝트의 `AGENTS.md`에 추가해도 됩니다.
+</details>
+
+<details>
+<summary><b>Cursor / Windsurf / Cline</b> — .cursorrules 또는 AGENTS.md</summary>
+
+프로젝트의 `.cursorrules`, `.windsurfrules`, 또는 `AGENTS.md`에 추가:
+```
+ALWAYS use agent-tool MCP tools (mcp__agent-tool__*) instead of built-in file tools.
+```
+</details>
 
 ## 설치
 
