@@ -10,6 +10,7 @@ import (
 	"agent-tool/common"
 	"agent-tool/install"
 	bashtool "agent-tool/tools/bash"
+	"agent-tool/tools/analyze"
 	"agent-tool/tools/backup"
 	"agent-tool/tools/download"
 	"agent-tool/tools/checksum"
@@ -195,6 +196,7 @@ func main() {
 	externalip.Register(server)
 	sloc.Register(server)
 	debug.Register(server)
+	analyze.Register(server)
 	help.Register(server)
 
 	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {

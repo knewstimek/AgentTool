@@ -14,6 +14,29 @@ const defaultTimeout = 30 * time.Second
 const maxTimeout = 120 * time.Second
 const handshakeTimeout = 5 * time.Second // fast-fail for initialize/launch/attach
 
+// buildInitializeArgs creates DAP initialize arguments that match VS Code's
+// capability set. Some adapters (vsdbg) fingerprint these fields to verify
+// the client is a genuine VS Code instance and reject connections with
+// minimal capabilities.
+func buildInitializeArgs(clientID, clientName, adapterID string) dap.InitializeRequestArguments {
+	return dap.InitializeRequestArguments{
+		ClientID:                      clientID,
+		ClientName:                    clientName,
+		AdapterID:                     adapterID,
+		PathFormat:                    "path",
+		Locale:                        "en",
+		LinesStartAt1:                 true,
+		ColumnsStartAt1:               true,
+		SupportsVariableType:          true,
+		SupportsRunInTerminalRequest:  true,
+		SupportsProgressReporting:     true,
+		SupportsInvalidatedEvent:      true,
+		SupportsMemoryReferences:      true,
+		SupportsMemoryEvent:           true,
+		SupportsStartDebuggingRequest: true,
+	}
+}
+
 // resolveTimeout clamps the user-provided timeout to [default, max] range.
 func resolveTimeout(timeoutSec int) time.Duration {
 	if timeoutSec <= 0 {
@@ -111,15 +134,7 @@ func opLaunch(input DebugInput) (string, error) {
 	if input.ClientName != "" {
 		clientName = input.ClientName
 	}
-	initReq.Arguments = dap.InitializeRequestArguments{
-		ClientID:                     clientID,
-		ClientName:                   clientName,
-		AdapterID:                    adapterID,
-		PathFormat:                   "path",
-		LinesStartAt1:               true,
-		ColumnsStartAt1:             true,
-		SupportsRunInTerminalRequest: false,
-	}
+	initReq.Arguments = buildInitializeArgs(clientID, clientName, adapterID)
 
 	resp, err := session.client.sendRequest(initReq, handshakeTimeout)
 	if err != nil {
@@ -255,15 +270,7 @@ func opAttach(input DebugInput) (string, error) {
 
 	initReq := &dap.InitializeRequest{}
 	initReq.Seq = session.client.nextSeq()
-	initReq.Arguments = dap.InitializeRequestArguments{
-		ClientID:                     clientID,
-		ClientName:                   clientName,
-		AdapterID:                    adapterID,
-		PathFormat:                   "path",
-		LinesStartAt1:               true,
-		ColumnsStartAt1:             true,
-		SupportsRunInTerminalRequest: false,
-	}
+	initReq.Arguments = buildInitializeArgs(clientID, clientName, adapterID)
 
 	resp, err := session.client.sendRequest(initReq, handshakeTimeout)
 	if err != nil {

@@ -2,6 +2,8 @@ package copy
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"io/fs"
@@ -175,7 +177,7 @@ func handleDirCopy(src, dst string, dryRun, overwrite bool) (*mcp.CallToolResult
 		if err != nil {
 			return err
 		}
-		if err := copyFileAtomic(path, dstPath, info.Mode()); err != nil {
+		if _, err := copyFileAtomic(path, dstPath, info.Mode()); err != nil {
 			return fmt.Errorf("copy %s: %w", relPath, err)
 		}
 		copiedFiles++
@@ -208,28 +210,41 @@ func handleFileCopy(src, dst string, srcInfo os.FileInfo, dryRun bool) (*mcp.Cal
 		return errorResult(fmt.Sprintf("create directory: %v", err))
 	}
 
-	if err := copyFileAtomic(src, dst, srcInfo.Mode()); err != nil {
+	cr, err := copyFileAtomic(src, dst, srcInfo.Mode())
+	if err != nil {
 		return errorResult(fmt.Sprintf("copy failed: %v", err))
 	}
 
 	msg := fmt.Sprintf("OK: copied file %s → %s (%s)", src, dst, formatSize(srcInfo.Size()))
+	if cr.RenamedOld != "" {
+		msg += fmt.Sprintf("\nWARNING: destination was locked (in use). Old file renamed to: %s", cr.RenamedOld)
+	}
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: msg}},
 	}, CopyOutput{Result: msg}, nil
 }
 
+// copyResult holds the result of a file copy, including any fallback info.
+type copyResult struct {
+	// RenamedOld is set when the destination was locked and had to be renamed.
+	// Contains the path the old file was moved to.
+	RenamedOld string
+}
+
 // copyFileAtomic copies a file using temp file + rename for atomicity.
-func copyFileAtomic(src, dst string, mode os.FileMode) error {
+// On Windows, if the destination is locked (e.g. running executable),
+// it falls back to renaming the locked file aside before replacing it.
+func copyFileAtomic(src, dst string, mode os.FileMode) (copyResult, error) {
 	srcFile, err := os.Open(src)
 	if err != nil {
-		return err
+		return copyResult{}, err
 	}
 	defer srcFile.Close()
 
 	dstDir := filepath.Dir(dst)
 	tmpFile, err := os.CreateTemp(dstDir, ".agent-tool-copy-*.tmp")
 	if err != nil {
-		return err
+		return copyResult{}, err
 	}
 	tmpPath := tmpFile.Name()
 	renamed := false
@@ -244,24 +259,64 @@ func copyFileAtomic(src, dst string, mode os.FileMode) error {
 	}()
 
 	if _, err := io.Copy(tmpFile, srcFile); err != nil {
-		return err
+		return copyResult{}, err
 	}
 	// Explicit close before chmod/rename — check error to catch deferred write failures
 	if err := tmpFile.Close(); err != nil {
-		return err
+		return copyResult{}, err
 	}
 	closed = true
 
 	// Preserve source permissions
 	if err := os.Chmod(tmpPath, mode); err != nil {
-		return err
+		return copyResult{}, err
 	}
 
-	if err := os.Rename(tmpPath, dst); err != nil {
-		return err
+	renameErr := os.Rename(tmpPath, dst)
+	if renameErr == nil {
+		renamed = true
+		return copyResult{}, nil
+	}
+
+	// On Windows, running executables and loaded DLLs cannot be overwritten,
+	// but they CAN be renamed. Move the locked file aside, then place the new file.
+	if runtime.GOOS != "windows" {
+		return copyResult{}, renameErr
+	}
+
+	oldRenamed, fallbackErr := windowsLockedFileFallback(tmpPath, dst)
+	if fallbackErr != nil {
+		return copyResult{}, fmt.Errorf("overwrite failed (file may be locked/in use): %w", renameErr)
 	}
 	renamed = true
-	return nil
+	return copyResult{RenamedOld: oldRenamed}, nil
+}
+
+// windowsLockedFileFallback renames a locked destination file aside,
+// then moves the new file into place. Returns the path of the renamed old file.
+func windowsLockedFileFallback(newTmpPath, dst string) (string, error) {
+	// Generate a short random suffix for the old file
+	var randBytes [4]byte
+	rand.Read(randBytes[:])
+	suffix := hex.EncodeToString(randBytes[:])
+
+	ext := filepath.Ext(dst)
+	base := strings.TrimSuffix(dst, ext)
+	oldPath := fmt.Sprintf("%s_old_%s%s", base, suffix, ext)
+
+	// Rename the locked file aside (Windows allows rename of running executables)
+	if err := os.Rename(dst, oldPath); err != nil {
+		return "", err
+	}
+
+	// Now place the new file at the original path
+	if err := os.Rename(newTmpPath, dst); err != nil {
+		// Rollback: try to restore the original
+		os.Rename(oldPath, dst)
+		return "", err
+	}
+
+	return oldPath, nil
 }
 
 func Register(server *mcp.Server) {

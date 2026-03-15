@@ -11,7 +11,7 @@ import (
 )
 
 type HelpInput struct {
-	Topic string `json:"topic,omitempty" jsonschema:"Help topic. Available: overview, encoding, indentation, tools, debug, troubleshooting. Empty = overview"`
+	Topic string `json:"topic,omitempty" jsonschema:"Help topic. Available: overview, encoding, indentation, tools, debug, analyze, troubleshooting. Empty = overview"`
 }
 
 type HelpOutput struct {
@@ -36,11 +36,13 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input HelpInput) (*mc
 		text = helpTools()
 	case "debug", "debugger", "dap":
 		text = helpDebug()
+	case "analyze", "binary", "disassemble", "pe":
+		text = helpAnalyze()
 	case "troubleshooting", "trouble":
 		text = helpTroubleshooting()
 	default:
 		text = "Unknown topic: " + topic + "\n\n" +
-			"Available topics: overview, encoding, indentation, tools, debug, troubleshooting"
+			"Available topics: overview, encoding, indentation, tools, debug, analyze, troubleshooting"
 	}
 
 	return &mcp.CallToolResult{
@@ -53,7 +55,7 @@ func Register(server *mcp.Server) {
 		Name: "agent_tool_help",
 		Description: `Returns usage guide for agent-tool.
 Call this when you encounter encoding warnings, garbled text, or need to understand agent-tool features.
-Topics: overview, encoding, indentation, tools, debug, troubleshooting.`,
+Topics: overview, encoding, indentation, tools, debug, analyze, troubleshooting.`,
 	}, Handle)
 }
 
@@ -112,6 +114,7 @@ It auto-detects file encoding and indentation style, preserving them across edit
 - externalip: Get your external (public) IP address
 - sloc: Count source lines of code (SLOC) with per-language summary
 - debug: Interactive debugger via DAP (breakpoints, stepping, variables, stack traces)
+- analyze: Static binary analysis (x86/x64 disassembly, PE header parsing, string extraction, hexdump)
 - set_config: Change runtime settings (encoding, file size, SSRF policy, DoH/ECH toggle)
 - agent_tool_help: This help tool
 
@@ -477,6 +480,16 @@ Parameters: session_id, operation, adapter_command, adapter_args, address, launc
   source_path, breakpoints (JSON array), thread_id, frame_id, variables_reference,
   expression, context, timeout_sec
 
+## analyze
+Static binary analysis tool with 4 operations:
+- disassemble: x86/x64 disassembly using Intel syntax (pure Go, no CGO)
+- pe_info: PE header parsing (sections, imports, exports, RVA↔file offset)
+- strings: Extract printable strings from binaries (ASCII and UTF-8 modes)
+- hexdump: Hex + ASCII dump of file regions
+Parameters: operation, file_path, offset, count, mode (32/64), base_addr,
+  min_length, max_results, length, section
+Use topic='analyze' for detailed guide with examples.
+
 ## set_config
 Change agent-tool runtime configuration.
 Supports: fallback_encoding, encoding_warnings, max_file_size_mb, allow_symlinks, workspace.
@@ -484,6 +497,107 @@ SSRF policy: allow_http_private (default false), allow_mysql_private, allow_redi
 Network: enable_doh (DNS over HTTPS, default true), enable_ech (Encrypted Client Hello, default true).
 Call with no arguments to view current config.
 Parameters: fallback_encoding, encoding_warnings, max_file_size_mb, allow_symlinks, workspace, allow_http_private, allow_mysql_private, allow_redis_private, allow_ssh_private, enable_doh, enable_ech`
+}
+
+func helpAnalyze() string {
+	return `# Static Binary Analysis Tool
+
+## Overview
+The analyze tool provides static binary analysis without executing the target file.
+Uses a single tool with operation parameter (like debug/sftp).
+Pure Go implementation — no CGO, no external dependencies for disassembly.
+
+## Operations
+
+### disassemble
+Disassemble x86/x64 machine code using Intel syntax.
+  analyze(operation="disassemble", file_path="/path/to/binary",
+          offset=4096, count=50, mode=64, base_addr="0x140001000")
+
+  Parameters:
+    offset: Byte offset in the file to start from (default: 0)
+    count: Number of instructions to decode (default: 50, max: 200)
+    mode: CPU mode — 16, 32, or 64 (default: 64)
+    base_addr: Base address for display (hex string, default: "0")
+
+  Output: address: hex_bytes    assembly
+  Failed decodes show "db 0xNN" and skip 1 byte (continues decoding).
+
+### pe_info
+Parse PE (Portable Executable) headers — Windows EXE, DLL, .node files.
+  analyze(operation="pe_info", file_path="/path/to/file.dll")
+  analyze(operation="pe_info", file_path="/path/to/file.dll", section=".text")
+
+  Output includes:
+    - Machine type, image base, entry point, number of sections
+    - Section table: Name, VirtualAddress, VirtualSize, RawOffset, RawSize, Characteristics
+    - Imports: grouped by DLL with function names
+    - Exports: function names with RVAs (if present)
+    - RVA→FileOffset conversion table for each section
+
+  Parameters:
+    section: Filter to show only a specific section (e.g. ".text", ".rdata")
+
+  Use the RVA→FileOffset table to convert runtime addresses to file offsets
+  for targeted disassembly or hexdump.
+
+### strings
+Extract printable strings from a binary file.
+  analyze(operation="strings", file_path="/path/to/binary",
+          min_length=6, max_results=100)
+
+  Two extraction modes:
+    mode="" (default): ASCII strings (bytes 0x20-0x7E)
+    mode="utf8": UTF-8 strings (multi-byte aware, filters non-printable runes)
+
+  Parameters:
+    min_length: Minimum string length (default: 4)
+    max_results: Maximum number of results (default: 500, max: 2000)
+    mode: Extraction mode — "" for ASCII (default), "utf8" for UTF-8
+
+  Output: offset: "string content"
+
+### hexdump
+Display raw bytes in hex + ASCII format.
+  analyze(operation="hexdump", file_path="/path/to/binary",
+          offset=8192, length=512)
+
+  Standard hexdump format: offset  hex hex hex ... |ASCII...|
+  16 bytes per line. Non-printable bytes shown as '.' in ASCII column.
+
+  Parameters:
+    offset: Byte offset to start from (default: 0)
+    length: Number of bytes to dump (default: 256, max: 4096)
+
+## Typical Workflow
+
+1. pe_info → Get section layout, find code/data sections, note RVA offsets
+2. strings → Find interesting strings, API names, error messages
+3. hexdump → Examine specific data regions at file offsets
+4. disassemble → Decode machine code at specific offsets
+
+### Example: Analyzing a DLL
+  # Step 1: Get PE layout
+  analyze(operation="pe_info", file_path="C:/path/to/target.dll")
+  # Note: .text section at RawOffset=0x400, .rdata at RawOffset=0x27C00
+
+  # Step 2: Find interesting strings
+  analyze(operation="strings", file_path="C:/path/to/target.dll", min_length=8)
+
+  # Step 3: Disassemble code section
+  analyze(operation="disassemble", file_path="C:/path/to/target.dll",
+          offset=1024, count=100, mode=64, base_addr="0x180001000")
+
+  # Step 4: Examine data at specific offset
+  analyze(operation="hexdump", file_path="C:/path/to/target.dll",
+          offset=163840, length=256)
+
+## Notes
+- File size limit follows max_file_size_mb setting (default 50 MB)
+- Symlinks are rejected for security
+- Disassembly uses golang.org/x/arch/x86/x86asm (pure Go, Intel syntax)
+- PE parsing uses Go standard library debug/pe (no extra dependencies)
+- All operations are read-only — the target file is never modified`
 }
 
 func helpDebug() string {

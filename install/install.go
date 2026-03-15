@@ -441,6 +441,7 @@ var safePermissionEntries = []string{
 	// externalip excluded from safe: makes external HTTP requests
 	// set_config excluded from safe: can change SSRF policy
 	"mcp__agent-tool__agent_tool_help",
+	"mcp__agent-tool__analyze",
 }
 
 // addClaudePermission adds agent-tool entries to ~/.claude/settings.json
