@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.knewstimek/agent-tool",
   "title": "agent-tool",
-  "description": "Encoding-aware, indentation-smart MCP tool server for AI coding agents. 45 tools: file ops, shell, SSH/SFTP, web/HTTP, MySQL, Redis, DNS, TLS, SLOC, process management, DAP debugger, static binary analysis, and more.",
+  "description": "Encoding-aware, indentation-smart MCP tool server for AI coding agents. 46 tools: file ops, shell, SSH/SFTP, web/HTTP, MySQL, Redis, DNS, TLS, SLOC, process management, DAP debugger, static binary analysis, process memory scanner, and more.",
   "repository": {
     "url": "https://github.com/knewstimek/agent-tool",
     "source": "github"
@@ -11,8 +11,8 @@
   "packages": [
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/knewstimek/agent-tool/releases/download/v0.7.0/agent-tool.mcpb",
-      "fileSha256": "a4ce54481cabf23103566c433ec7cbc7d01442ca9ec37c8f1fd473a134eb8db0",
+      "identifier": "https://github.com/knewstimek/agent-tool/releases/download/v0.7.1/agent-tool-0.7.1.mcpb",
+      "fileSha256": "ac41fe72743428973ac6f35a7cb95e8879262e7111840d3e4ebd6533d340e476",
       "transport": {
         "type": "stdio"
       }
