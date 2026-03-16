@@ -11,7 +11,7 @@ import (
 )
 
 type HelpInput struct {
-	Topic string `json:"topic,omitempty" jsonschema:"Help topic. Available: overview, encoding, indentation, tools, debug, analyze, troubleshooting. Empty = overview"`
+	Topic string `json:"topic,omitempty" jsonschema:"Help topic. Available: overview, encoding, indentation, tools, debug, analyze, memtool, troubleshooting. Empty = overview"`
 }
 
 type HelpOutput struct {
@@ -38,11 +38,13 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input HelpInput) (*mc
 		text = helpDebug()
 	case "analyze", "binary", "disassemble", "pe":
 		text = helpAnalyze()
+	case "memtool", "memscan", "memory", "scan":
+		text = helpMemtool()
 	case "troubleshooting", "trouble":
 		text = helpTroubleshooting()
 	default:
 		text = "Unknown topic: " + topic + "\n\n" +
-			"Available topics: overview, encoding, indentation, tools, debug, analyze, troubleshooting"
+			"Available topics: overview, encoding, indentation, tools, debug, analyze, memtool, troubleshooting"
 	}
 
 	return &mcp.CallToolResult{
@@ -114,7 +116,7 @@ It auto-detects file encoding and indentation style, preserving them across edit
 - externalip: Get your external (public) IP address
 - sloc: Count source lines of code (SLOC) with per-language summary
 - debug: Interactive debugger via DAP (breakpoints, stepping, variables, stack traces)
-- analyze: Static binary analysis (x86/x64 disassembly, PE header parsing, string extraction, hexdump)
+- analyze: Static binary analysis (14 operations: disassemble, PE/ELF/Mach-O parsing, imphash, Rich header, resources, DWARF, strings, hexdump, pattern search, entropy, overlay, binary diff)
 - set_config: Change runtime settings (encoding, file size, SSRF policy, DoH/ECH toggle)
 - agent_tool_help: This help tool
 
@@ -481,13 +483,23 @@ Parameters: session_id, operation, adapter_command, adapter_args, address, launc
   expression, context, timeout_sec
 
 ## analyze
-Static binary analysis tool with 4 operations:
-- disassemble: x86/x64 disassembly using Intel syntax (pure Go, no CGO)
-- pe_info: PE header parsing (sections, imports, exports, RVA↔file offset)
-- strings: Extract printable strings from binaries (ASCII and UTF-8 modes)
+Static binary analysis tool with 14 operations:
+- disassemble: x86/x64/ARM/ARM64 disassembly (pure Go, no CGO)
+- pe_info: PE header parsing with RWX section warnings
+- elf_info: ELF header/sections/segments/symbols with RWX warnings
+- macho_info: Mach-O header/segments/sections/symbols (fat binary support)
+- strings: Extract printable strings (ASCII and UTF-8)
 - hexdump: Hex + ASCII dump of file regions
-Parameters: operation, file_path, offset, count, mode (32/64), base_addr,
-  min_length, max_results, length, section
+- pattern_search: Hex byte pattern matching with ?? wildcards
+- entropy: Shannon entropy per section (detects packed/encrypted regions)
+- bin_diff: Two-file byte comparison
+- resource_info: PE resource directory and version info extraction
+- imphash: PE import hash (MD5) for malware classification
+- rich_header: PE Rich header — build tool fingerprinting
+- overlay_detect: Detect data appended after last section
+- dwarf_info: DWARF debug info (compilation units, functions, types)
+Parameters: operation, file_path, offset, count, mode, arch (x86/arm),
+  base_addr, min_length, max_results, length, section, pattern, file_path_b
 Use topic='analyze' for detailed guide with examples.
 
 ## set_config
@@ -510,18 +522,23 @@ Pure Go implementation — no CGO, no external dependencies for disassembly.
 ## Operations
 
 ### disassemble
-Disassemble x86/x64 machine code using Intel syntax.
+Disassemble machine code. Supports x86 (16/32/64-bit) and ARM (32/64-bit).
   analyze(operation="disassemble", file_path="/path/to/binary",
-          offset=4096, count=50, mode=64, base_addr="0x140001000")
+          offset=4096, count=50, mode=64, arch="x86", base_addr="0x140001000")
+
+  # ARM64 example:
+  analyze(operation="disassemble", file_path="/path/to/arm_binary",
+          offset=0, count=50, mode=64, arch="arm")
 
   Parameters:
+    arch: CPU architecture — "x86" (default) or "arm"
     offset: Byte offset in the file to start from (default: 0)
     count: Number of instructions to decode (default: 50, max: 200)
-    mode: CPU mode — 16, 32, or 64 (default: 64)
+    mode: CPU mode — x86: 16/32/64, arm: 32/64 (default: 64)
     base_addr: Base address for display (hex string, default: "0")
 
   Output: address: hex_bytes    assembly
-  Failed decodes show "db 0xNN" and skip 1 byte (continues decoding).
+  x86 uses Intel syntax. Failed decodes show "db 0xNN" / ".word" and skip.
 
 ### pe_info
 Parse PE (Portable Executable) headers — Windows EXE, DLL, .node files.
@@ -530,16 +547,48 @@ Parse PE (Portable Executable) headers — Windows EXE, DLL, .node files.
 
   Output includes:
     - Machine type, image base, entry point, number of sections
-    - Section table: Name, VirtualAddress, VirtualSize, RawOffset, RawSize, Characteristics
+    - Section table: Name, VirtualAddress, VirtualSize, RawOffset, RawSize, Permissions
+    - Section permissions (R/W/X, CODE/DATA) with ⚠ W+X warnings for suspicious sections
     - Imports: grouped by DLL with function names
     - Exports: function names with RVAs (if present)
     - RVA→FileOffset conversion table for each section
 
   Parameters:
     section: Filter to show only a specific section (e.g. ".text", ".rdata")
+    rva: Convert an RVA to file offset (hex string, e.g. "0x36A20")
 
   Use the RVA→FileOffset table to convert runtime addresses to file offsets
   for targeted disassembly or hexdump.
+
+### elf_info
+Parse ELF (Executable and Linkable Format) binaries — Linux shared objects, executables.
+  analyze(operation="elf_info", file_path="/path/to/binary")
+
+  Output includes:
+    - Class, OS/ABI, type, machine, entry point
+    - Section table with permissions and ⚠ W+X warnings
+    - Program headers (segments) with R/W/X flags and ⚠ W+X warnings
+    - Imported libraries and symbols
+    - Exported (dynamic) symbols
+
+  Parameters:
+    section: Filter to show only a specific section
+
+### macho_info
+Parse Mach-O binaries — macOS/iOS executables, dylibs, frameworks.
+  analyze(operation="macho_info", file_path="/path/to/binary")
+
+  Output includes:
+    - CPU type, binary type, flags (PIE, DYLDLINK, etc.)
+    - Load commands
+    - Section table
+    - Segments with MaxProt/InitProt and ⚠ W+X warnings
+    - Imported libraries and symbols
+
+  Supports Universal (Fat) binaries — shows all architectures.
+
+  Parameters:
+    section: Filter to show only a specific section
 
 ### strings
 Extract printable strings from a binary file.
@@ -569,12 +618,112 @@ Display raw bytes in hex + ASCII format.
     offset: Byte offset to start from (default: 0)
     length: Number of bytes to dump (default: 256, max: 4096)
 
+### pattern_search
+Search for hex byte patterns with wildcard support.
+  analyze(operation="pattern_search", file_path="/path/to/binary",
+          pattern="4D 5A ?? ?? 50 45")
+
+  Pattern format: hex bytes separated by spaces, "??" for any byte wildcard.
+  Example: "48 89 5C 24 ??" matches MOV [rsp+??], rbx with any offset.
+
+  Parameters:
+    pattern: Hex byte pattern (e.g. "4D 5A ?? ?? 50 45")
+    max_results: Maximum matches to return (default: 100, max: 500)
+
+  Uses chunked file reading with overlap — handles multi-GB files efficiently.
+
+### entropy
+Calculate Shannon entropy per section.
+  analyze(operation="entropy", file_path="/path/to/binary")
+
+  Shows overall file entropy (0-8 bits/byte) and per-section breakdown.
+  Auto-detects PE, ELF, and Mach-O formats for section boundaries.
+  Falls back to 4KB block-based analysis for unknown formats.
+
+  Entropy interpretation:
+    < 1.0: Very low (padding, zeroes)
+    1-3: Low (structured data, headers)
+    3-5: Medium (code, text)
+    5-7: High (compiled code)
+    > 7: Very high (compressed, encrypted, or random data)
+
+  High-entropy sections in otherwise normal binaries suggest packing or encryption.
+
+### bin_diff
+Compare two binary files byte-by-byte and report differences.
+  analyze(operation="bin_diff", file_path="/path/to/file_a",
+          file_path_b="/path/to/file_b", max_results=50)
+
+  Reports:
+    - File sizes and size difference
+    - Per-byte differences: offset, value in file A, value in file B
+    - Total count of differing bytes
+
+  Useful for: finding patched bytes, comparing versions, detecting tampering.
+
+  Parameters:
+    file_path_b: Second file to compare (required for bin_diff)
+    max_results: Maximum differences to show (default: 100, max: 500)
+
+### resource_info
+Extract PE resource directory and version information.
+  analyze(operation="resource_info", file_path="/path/to/file.exe")
+
+  Output includes:
+    - Resource type counts (RT_ICON, RT_VERSION, RT_MANIFEST, etc.)
+    - Individual entries with type, ID, language, size
+    - Version strings (CompanyName, ProductName, FileVersion, etc.)
+
+### imphash
+Compute the PE import hash (MD5 of normalized import table).
+  analyze(operation="imphash", file_path="/path/to/file.exe")
+
+  Imphash is a standard for malware classification — binaries built from
+  the same source share the same imphash. Used by VirusTotal, MISP, Mandiant.
+
+  Output: hash value + first 20 normalized imports (dll.function format).
+
+### rich_header
+Parse the PE Rich header (undocumented Microsoft build tool fingerprint).
+  analyze(operation="rich_header", file_path="/path/to/file.exe")
+
+  Shows which compiler/linker/assembler versions built each object file.
+  Useful for attribution and build environment identification.
+  Includes Rich header MD5 hash for clustering.
+
+### overlay_detect
+Check for data appended after the last section of a binary.
+  analyze(operation="overlay_detect", file_path="/path/to/file.exe")
+
+  Detects overlays in PE, ELF, and Mach-O files.
+  Reports overlay size, percentage, hex preview, and signature identification
+  (ZIP, GZIP, RAR, 7z, embedded PE/ELF/Mach-O).
+
+  Common in: packed executables, droppers, self-extracting archives.
+
+### dwarf_info
+Extract DWARF debug information from PE, ELF, or Mach-O binaries.
+  analyze(operation="dwarf_info", file_path="/path/to/binary")
+
+  Output includes:
+    - Compilation units (source files)
+    - Functions with addresses (low PC / high PC)
+    - Variable/parameter and type counts
+    - "Binary appears stripped" if no DWARF data found
+
 ## Typical Workflow
 
-1. pe_info → Get section layout, find code/data sections, note RVA offsets
-2. strings → Find interesting strings, API names, error messages
-3. hexdump → Examine specific data regions at file offsets
-4. disassemble → Decode machine code at specific offsets
+1. pe_info/elf_info/macho_info → Get section layout, check for W+X sections
+2. entropy → Identify packed/encrypted sections (entropy > 7.0)
+3. overlay_detect → Check for appended payloads
+4. imphash → Classify by import table fingerprint
+5. rich_header → Identify build tools (PE only)
+6. strings → Find interesting strings, API names, error messages
+7. pattern_search → Locate specific byte sequences (signatures, opcodes)
+8. hexdump → Examine specific data regions at file offsets
+9. disassemble → Decode machine code at specific offsets
+10. dwarf_info → Extract debug symbols and function names
+11. bin_diff → Compare original vs patched versions
 
 ### Example: Analyzing a DLL
   # Step 1: Get PE layout
@@ -595,9 +744,11 @@ Display raw bytes in hex + ASCII format.
 ## Notes
 - File size limit follows max_file_size_mb setting (default 50 MB)
 - Symlinks are rejected for security
-- Disassembly uses golang.org/x/arch/x86/x86asm (pure Go, Intel syntax)
-- PE parsing uses Go standard library debug/pe (no extra dependencies)
-- All operations are read-only — the target file is never modified`
+- x86 disassembly: golang.org/x/arch/x86/x86asm (Intel syntax)
+- ARM disassembly: golang.org/x/arch/arm/armasm + arm64/arm64asm
+- Binary parsing: Go standard library (debug/pe, debug/elf, debug/macho, debug/dwarf)
+- All 14 operations are read-only — the target file is never modified
+- Zero external dependencies beyond golang.org/x/arch`
 }
 
 func helpDebug() string {
@@ -876,4 +1027,95 @@ If it does, check:
 - Max file size: ` + fmt.Sprintf("%d MB", common.GetMaxFileSize()/(1024*1024)) + `
 - Allow symlinks: ` + fmt.Sprintf("%v", common.GetAllowSymlinks()) + `
 - Use set_config to change at runtime, or --fallback-encoding <CHARSET> at startup`
+}
+
+func helpMemtool() string {
+	return `# Memory Tool (memtool)
+
+Process memory tool for reverse engineering and game hacking.
+CheatEngine-style: search, filter, write, pointer scan, struct search, diff.
+
+## Platform Support
+- Windows: OpenProcess + ReadProcessMemory/WriteProcessMemory + VirtualQueryEx
+- Linux: /proc/pid/maps + /proc/pid/mem (read/write)
+- macOS: Not supported (SIP)
+
+## Operations
+
+### regions - List memory regions
+  memtool(operation="regions", pid=1234)
+  memtool(operation="regions", pid=1234, protection="rw")
+
+### search - Initial value scan (creates session)
+  memtool(operation="search", pid=1234, value_type="int32", value="100")
+  memtool(operation="search", pid=1234, value_type="bytes", value="4D 5A 90 00")
+  memtool(operation="search", pid=1234, value_type="int32")  # unknown initial value
+  Omit 'value' for unknown initial value scan — takes a full snapshot and
+  lets you filter by changed/unchanged/increased/decreased.
+
+### filter - Narrow matches (requires session_id)
+  memtool(operation="filter", session_id="abc", filter_type="decreased")
+  memtool(operation="filter", session_id="abc", filter_type="exact", value="95")
+  Types: exact, changed, unchanged, increased, decreased
+
+### undo - Restore previous filter state
+  memtool(operation="undo", session_id="abc")
+
+### read - Hex dump at address
+  memtool(operation="read", pid=1234, address="0x7FF6A1B20000", length=128)
+
+### write - Modify memory at address
+  memtool(operation="write", pid=1234, address="0x...", value_type="int32", value="999")
+  memtool(operation="write", pid=1234, address="0x...", value_type="bytes", value="90 90 90 90")
+
+### disasm - Disassemble live process memory
+  memtool(operation="disasm", pid=1234, address="0x7FF6A1B20000")
+  memtool(operation="disasm", pid=1234, address="0x...", count=100, arch="x86", mode=64)
+  memtool(operation="disasm", pid=1234, address="0x...", arch="arm", mode=64)
+  Reads memory from the process and disassembles in-place.
+  Uses the same disassembly engine as the analyze tool (x86/x64/ARM/ARM64).
+
+### struct_search - Multi-field pattern search
+  memtool(operation="struct_search", pid=1234,
+	struct_pattern='[{"offset":0,"type":"int32","value":"100"},{"offset":4,"type":"int32","value":"50"}]')
+
+### pointer_scan - Find pointer chains to an address
+  memtool(operation="pointer_scan", pid=1234, address="0x...", max_depth=3, max_offset=4096)
+
+### diff - Compare memory snapshots
+  memtool(operation="diff", pid=1234)             # take first snapshot
+  memtool(operation="diff", session_id="abc")      # compare with current
+
+### info / close - Session management
+  memtool(operation="info", session_id="abc")
+  memtool(operation="close", session_id="abc")
+
+## CheatEngine Workflow
+
+### Known value:
+  1. search(pid, value_type="int32", value="100") -> session, N matches
+  2. [value changes] -> filter(session, filter_type="decreased")
+  3. [value changes] -> filter(session, filter_type="exact", value="95")
+  4. info(session) -> addresses + current values
+  5. write(pid, address, value_type="int32", value="999") -> modify
+  6. close(session)
+
+### Unknown initial value:
+  1. search(pid, value_type="int32") -> session (snapshot taken)
+  2. [value changes] -> filter(session, filter_type="changed") -> N matches
+  3. [value stable]  -> filter(session, filter_type="unchanged")
+  4. [value changes] -> filter(session, filter_type="decreased")
+  5. info(session) -> narrowed addresses
+  6. write + close
+
+## Session/Performance
+  - Max 3 sessions (oldest evicted), 10min idle timeout
+  - Hybrid storage: in-memory up to 10M matches, auto disk-backed beyond (up to 100M)
+  - Parallel search (multi-core), batched filter reads (64KB groups)
+  - Disk-backed snapshots for diff (handles multi-GB processes)
+  - Undo stack: up to 5 levels
+
+## Permissions
+  - Windows: may require Administrator (OpenProcess)
+  - Linux: same-user or root, or CAP_SYS_PTRACE`
 }

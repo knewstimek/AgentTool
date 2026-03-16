@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 
+	"golang.org/x/arch/arm/armasm"
+	"golang.org/x/arch/arm64/arm64asm"
 	"golang.org/x/arch/x86/x86asm"
 )
 
@@ -14,7 +16,8 @@ const (
 	maxDisasmCount     = 200
 )
 
-// opDisassemble disassembles x86/x64 machine code from a binary file.
+// opDisassemble disassembles machine code from a binary file.
+// Supports x86 (16/32/64-bit) and ARM (32/64-bit).
 // Reads only the needed portion instead of the entire file to save memory.
 func opDisassemble(input AnalyzeInput) (string, error) {
 	fi, err := os.Stat(input.FilePath)
@@ -40,16 +43,38 @@ func opDisassemble(input AnalyzeInput) (string, error) {
 	if mode == 0 {
 		mode = 64
 	}
-	if mode != 16 && mode != 32 && mode != 64 {
-		return "", fmt.Errorf("invalid mode: %d (must be 16, 32, or 64)", mode)
+
+	arch := strings.ToLower(strings.TrimSpace(input.Arch))
+	if arch == "" {
+		arch = "x86"
 	}
 
-	// Read only the needed portion: count * 15 (max x86 instruction length)
-	// This avoids loading entire 50MB files when only a small section is needed.
-	readSize := int64(count) * 15
+	switch arch {
+	case "x86":
+		if mode != 16 && mode != 32 && mode != 64 {
+			return "", fmt.Errorf("invalid mode for x86: %d (must be 16, 32, or 64)", mode)
+		}
+	case "arm":
+		if mode != 32 && mode != 64 {
+			return "", fmt.Errorf("invalid mode for arm: %d (must be 32 or 64)", mode)
+		}
+	default:
+		return "", fmt.Errorf("unsupported arch: %s (available: x86, arm)", arch)
+	}
+
+	// Determine read size based on architecture
+	// x86: up to 15 bytes per instruction, ARM: fixed 4 bytes per instruction
+	var maxInstLen int64
+	if arch == "arm" {
+		maxInstLen = 4
+	} else {
+		maxInstLen = 15
+	}
+	readSize := int64(count) * maxInstLen
 	if int64(offset)+readSize > fileSize {
 		readSize = fileSize - int64(offset)
 	}
+
 	f, err := os.Open(input.FilePath)
 	if err != nil {
 		return "", fmt.Errorf("cannot open file: %w", err)
@@ -73,6 +98,44 @@ func opDisassemble(input AnalyzeInput) (string, error) {
 		}
 	}
 
+	switch arch {
+	case "arm":
+		if mode == 64 {
+			return disasmARM64(data, baseAddr, offset, count)
+		}
+		return disasmARM32(data, baseAddr, offset, count)
+	default:
+		return disasmX86(data, baseAddr, offset, count, mode)
+	}
+}
+
+// DisasmBytes disassembles raw machine code bytes.
+// Exported for use by other packages (e.g., memtool for live process memory).
+func DisasmBytes(data []byte, baseAddr uint64, arch string, mode int, count int) (string, error) {
+	if count <= 0 {
+		count = defaultDisasmCount
+	}
+	if count > maxDisasmCount {
+		count = maxDisasmCount
+	}
+	if arch == "" {
+		arch = "x86"
+	}
+	switch arch {
+	case "arm":
+		if mode == 64 {
+			return disasmARM64(data, baseAddr, 0, count)
+		}
+		return disasmARM32(data, baseAddr, 0, count)
+	default:
+		if mode == 0 {
+			mode = 64
+		}
+		return disasmX86(data, baseAddr, 0, count, mode)
+	}
+}
+
+func disasmX86(data []byte, baseAddr uint64, offset, count, mode int) (string, error) {
 	var sb strings.Builder
 	pos := 0
 	decoded := 0
@@ -92,7 +155,6 @@ func opDisassemble(input AnalyzeInput) (string, error) {
 		addr := baseAddr + uint64(offset) + uint64(pos)
 		instBytes := data[pos : pos+inst.Len]
 
-		// Format hex bytes (padded to ~30 chars for alignment)
 		var hexParts []string
 		for _, b := range instBytes {
 			hexParts = append(hexParts, fmt.Sprintf("%02x", b))
@@ -108,7 +170,62 @@ func opDisassemble(input AnalyzeInput) (string, error) {
 		decoded++
 	}
 
-	sb.WriteString(fmt.Sprintf("\n(%d instructions from offset 0x%x, mode=%d)", decoded, offset, mode))
+	sb.WriteString(fmt.Sprintf("\n(%d instructions from offset 0x%x, arch=x86, mode=%d)", decoded, offset, mode))
+	return sb.String(), nil
+}
 
+func disasmARM64(data []byte, baseAddr uint64, offset, count int) (string, error) {
+	var sb strings.Builder
+	decoded := 0
+
+	// ARM64 instructions are fixed 4 bytes
+	for pos := 0; decoded < count && pos+4 <= len(data); pos += 4 {
+		addr := baseAddr + uint64(offset) + uint64(pos)
+
+		inst, err := arm64asm.Decode(data[pos : pos+4])
+		if err != nil {
+			sb.WriteString(fmt.Sprintf("0x%x:  %02x %02x %02x %02x                   .word 0x%08x\n",
+				addr, data[pos], data[pos+1], data[pos+2], data[pos+3],
+				uint32(data[pos])|uint32(data[pos+1])<<8|uint32(data[pos+2])<<16|uint32(data[pos+3])<<24))
+			decoded++
+			continue
+		}
+
+		hexStr := fmt.Sprintf("%02x %02x %02x %02x", data[pos], data[pos+1], data[pos+2], data[pos+3])
+		asmStr := inst.String()
+
+		sb.WriteString(fmt.Sprintf("0x%x:  %-30s %s\n", addr, hexStr, asmStr))
+		decoded++
+	}
+
+	sb.WriteString(fmt.Sprintf("\n(%d instructions from offset 0x%x, arch=arm, mode=64)", decoded, offset))
+	return sb.String(), nil
+}
+
+func disasmARM32(data []byte, baseAddr uint64, offset, count int) (string, error) {
+	var sb strings.Builder
+	decoded := 0
+
+	// ARM32 instructions are fixed 4 bytes (ARM mode, not Thumb)
+	for pos := 0; decoded < count && pos+4 <= len(data); pos += 4 {
+		addr := baseAddr + uint64(offset) + uint64(pos)
+
+		inst, err := armasm.Decode(data[pos:pos+4], armasm.ModeARM)
+		if err != nil {
+			sb.WriteString(fmt.Sprintf("0x%x:  %02x %02x %02x %02x                   .word 0x%08x\n",
+				addr, data[pos], data[pos+1], data[pos+2], data[pos+3],
+				uint32(data[pos])|uint32(data[pos+1])<<8|uint32(data[pos+2])<<16|uint32(data[pos+3])<<24))
+			decoded++
+			continue
+		}
+
+		hexStr := fmt.Sprintf("%02x %02x %02x %02x", data[pos], data[pos+1], data[pos+2], data[pos+3])
+		asmStr := inst.String()
+
+		sb.WriteString(fmt.Sprintf("0x%x:  %-30s %s\n", addr, hexStr, asmStr))
+		decoded++
+	}
+
+	sb.WriteString(fmt.Sprintf("\n(%d instructions from offset 0x%x, arch=arm, mode=32)", decoded, offset))
 	return sb.String(), nil
 }

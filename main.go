@@ -35,6 +35,7 @@ import (
 	"agent-tool/tools/jsonquery"
 	"agent-tool/tools/listdir"
 	"agent-tool/tools/mkdir"
+	"agent-tool/tools/memtool"
 	mysqltool "agent-tool/tools/mysql"
 	"agent-tool/tools/multiread"
 	"agent-tool/tools/tomlquery"
@@ -197,6 +198,7 @@ func main() {
 	sloc.Register(server)
 	debug.Register(server)
 	analyze.Register(server)
+	memtool.Register(server)
 	help.Register(server)
 
 	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
