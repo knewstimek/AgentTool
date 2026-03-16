@@ -11,7 +11,8 @@ var (
 	modKernel32        = windows.NewLazySystemDLL("kernel32.dll")
 	procVirtualQueryEx = modKernel32.NewProc("VirtualQueryEx")
 	procReadProcessMem = modKernel32.NewProc("ReadProcessMemory")
-	procWriteProcessMem = modKernel32.NewProc("WriteProcessMemory")
+	procWriteProcessMem  = modKernel32.NewProc("WriteProcessMemory")
+	procVirtualProtectEx = modKernel32.NewProc("VirtualProtectEx")
 )
 
 // MEMORY_BASIC_INFORMATION for 64-bit Windows.
@@ -154,8 +155,41 @@ func (r *windowsReader) WriteMemory(address uint64, data []byte) (int, error) {
 		uintptr(len(data)),
 		uintptr(unsafe.Pointer(&bytesWritten)),
 	)
-	if ret == 0 {
+	if ret != 0 {
+		return int(bytesWritten), nil
+	}
+
+	// Write failed — try changing page protection to PAGE_READWRITE,
+	// retry write, then restore original protection.
+	var oldProtect uint32
+	vpRet, _, _ := procVirtualProtectEx.Call(
+		uintptr(r.handle), uintptr(address),
+		uintptr(len(data)), uintptr(pageReadWrite),
+		uintptr(unsafe.Pointer(&oldProtect)),
+	)
+	if vpRet == 0 {
+		// VirtualProtectEx also failed — return original write error
 		return int(bytesWritten), fmt.Errorf("WriteProcessMemory at 0x%X: %w", address, err)
+	}
+
+	// Retry write with relaxed protection
+	ret, _, err = procWriteProcessMem.Call(
+		uintptr(r.handle), uintptr(address),
+		uintptr(unsafe.Pointer(&data[0])),
+		uintptr(len(data)),
+		uintptr(unsafe.Pointer(&bytesWritten)),
+	)
+
+	// Restore original protection regardless of write result
+	var ignored uint32
+	procVirtualProtectEx.Call(
+		uintptr(r.handle), uintptr(address),
+		uintptr(len(data)), uintptr(oldProtect),
+		uintptr(unsafe.Pointer(&ignored)),
+	)
+
+	if ret == 0 {
+		return int(bytesWritten), fmt.Errorf("WriteProcessMemory at 0x%X (after VirtualProtectEx): %w", address, err)
 	}
 	return int(bytesWritten), nil
 }
