@@ -68,7 +68,7 @@ func Replace(content, oldStr, newStr string, replaceAll bool, fileStyle IndentSt
 	// LLMs often use a different indent size than the file's actual tab stops,
 	// causing deep nesting (6-7 levels) to mismatch after conversion.
 	if fileStyle.UseTabs && HasLeadingSpaces(normalizedOld) {
-		for _, trySize := range []int{2, 3, 4, 8} {
+		for _, trySize := range []int{2, 3, 4, 5, 6, 7, 8} {
 			convertedOld := SpacesToTabs(normalizedOld, trySize)
 			if convertedOld == normalizedOld {
 				continue // no change, skip
@@ -83,7 +83,7 @@ func Replace(content, oldStr, newStr string, replaceAll bool, fileStyle IndentSt
 
 	// 5th pass: reverse — file uses spaces but old_string has tabs
 	if !fileStyle.UseTabs && hasLeadingTabs(normalizedOld) {
-		for _, trySize := range []int{2, 3, 4, 8} {
+		for _, trySize := range []int{2, 3, 4, 5, 6, 7, 8} {
 			convertedOld := TabsToSpaces(normalizedOld, trySize)
 			count = strings.Count(content, convertedOld)
 			if count > 0 {

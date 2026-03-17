@@ -23,10 +23,46 @@ const maxFiles = 50
 // maxTotalBytes caps total memory consumption across all files in a single request.
 const maxTotalBytes int64 = 100 * 1024 * 1024 // 100MB
 
+// fileEntry holds per-file read parameters resolved from input.
+type fileEntry struct {
+	Path   string
+	Offset int
+	Limit  int
+}
+
+// FileRange specifies per-file read range. Used in the "files" parameter.
+type FileRange struct {
+	Path   string `json:"path" jsonschema:"Absolute file path"`
+	Offset int    `json:"offset,omitempty" jsonschema:"Line offset (1-based, negative = from end). Default: 1"`
+	Limit  int    `json:"limit,omitempty" jsonschema:"Max lines to read. Default: 0 (all)"`
+}
+
 type MultiReadInput struct {
-	FilePaths []string `json:"file_paths" jsonschema:"List of absolute file paths to read,required"`
+	// Simple mode: list of paths, all using the same offset/limit
+	FilePaths []string `json:"file_paths,omitempty" jsonschema:"List of absolute file paths to read. All files use the global offset/limit. Use 'files' instead for per-file ranges"`
 	Offset    int      `json:"offset,omitempty" jsonschema:"Line number to start reading from (1-based). Negative = from end (e.g. -5 = last 5 lines). Default: 1"`
 	Limit     int      `json:"limit,omitempty" jsonschema:"Maximum number of lines to read per file. Default: 0 (all)"`
+
+	// Advanced mode: per-file offset/limit. Takes priority over file_paths if both are provided
+	Files []FileRange `json:"files,omitempty" jsonschema:"Per-file read ranges. Each entry has path, offset, limit. Takes priority over file_paths"`
+}
+
+// resolveEntries converts input to a unified list of fileEntry.
+func resolveEntries(input MultiReadInput) []fileEntry {
+	// "files" takes priority
+	if len(input.Files) > 0 {
+		entries := make([]fileEntry, len(input.Files))
+		for i, f := range input.Files {
+			entries[i] = fileEntry{Path: f.Path, Offset: f.Offset, Limit: f.Limit}
+		}
+		return entries
+	}
+	// Fallback to file_paths with global offset/limit
+	entries := make([]fileEntry, len(input.FilePaths))
+	for i, p := range input.FilePaths {
+		entries[i] = fileEntry{Path: p, Offset: input.Offset, Limit: input.Limit}
+	}
+	return entries
 }
 
 type MultiReadOutput struct {
@@ -36,18 +72,20 @@ type MultiReadOutput struct {
 }
 
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input MultiReadInput) (*mcp.CallToolResult, MultiReadOutput, error) {
-	if len(input.FilePaths) == 0 {
+	entries := resolveEntries(input)
+	if len(entries) == 0 {
 		return errorResult("file_paths is required and must not be empty")
 	}
-	if len(input.FilePaths) > maxFiles {
-		return errorResult(fmt.Sprintf("too many files: %d (maximum %d)", len(input.FilePaths), maxFiles))
+	if len(entries) > maxFiles {
+		return errorResult(fmt.Sprintf("too many files: %d (maximum %d)", len(entries), maxFiles))
 	}
 
 	var sb strings.Builder
 	var errorCount int
 	var totalBytesRead int64
 
-	for i, filePath := range input.FilePaths {
+	for i, entry := range entries {
+		filePath := entry.Path
 		if i > 0 {
 			sb.WriteString("\n")
 		}
@@ -110,15 +148,15 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input MultiReadInput)
 		// Count total lines
 		totalLines := strings.Count(content, "\n") + 1
 
-		// Calculate offset range (same logic as tools/read)
+		// Calculate offset range using per-file values
 		var startIdx, endIdx int
-		if input.Offset < 0 {
-			startIdx = totalLines + input.Offset
+		if entry.Offset < 0 {
+			startIdx = totalLines + entry.Offset
 			if startIdx < 0 {
 				startIdx = 0
 			}
 		} else {
-			offset := input.Offset
+			offset := entry.Offset
 			if offset < 1 {
 				offset = 1
 			}
@@ -129,8 +167,8 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input MultiReadInput)
 		}
 
 		endIdx = totalLines
-		if input.Limit > 0 && startIdx+input.Limit < endIdx {
-			endIdx = startIdx + input.Limit
+		if entry.Limit > 0 && startIdx+entry.Limit < endIdx {
+			endIdx = startIdx + entry.Limit
 		}
 
 		// Format with line numbers
@@ -162,7 +200,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input MultiReadInput)
 		fmt.Fprintf(&sb, "\n[encoding: %s, lines: %d]", encInfo.Charset, totalLines)
 	}
 
-	filesRead := len(input.FilePaths) - errorCount
+	filesRead := len(entries) - errorCount
 	summary := fmt.Sprintf("\n\n--- Read %d files (%d errors) ---", filesRead, errorCount)
 	sb.WriteString(summary)
 
@@ -182,7 +220,8 @@ func Register(server *mcp.Server) {
 		Name: "multiread",
 		Description: `Reads multiple files in a single call to reduce API round-trips.
 Encoding-aware: auto-detects file encoding for each file.
-Supports offset/limit for reading specific line ranges (applied to all files).
+Supports offset/limit for reading specific line ranges.
+Use file_paths (string array) with global offset/limit, or files (object array) for per-file offset/limit.
 If a file fails, the error is included in output and remaining files continue.
 Maximum 50 files per request.`,
 	}, Handle)
