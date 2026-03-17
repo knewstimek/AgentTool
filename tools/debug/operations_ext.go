@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1076,4 +1077,121 @@ func formatBreakpointsResponse(label string, bps []dap.Breakpoint) string {
 		sb.WriteString("\n")
 	}
 	return sb.String()
+}
+
+// opResolveAddress maps an address to its containing module + offset.
+// Fetches all modules via DAP, parses each module's AddressRange, and finds
+// which module contains the given address.
+func opResolveAddress(session *debugSession, input DebugInput) (string, error) {
+	if input.MemoryReference == "" {
+		return "", fmt.Errorf("memory_reference is required (hex address to resolve, e.g. '0x7ffe5488')")
+	}
+
+	addr, err := strconv.ParseUint(strings.TrimPrefix(input.MemoryReference, "0x"), 16, 64)
+	if err != nil {
+		return "", fmt.Errorf("invalid address %q: %w", input.MemoryReference, err)
+	}
+
+	timeout := resolveTimeout(input.TimeoutSec)
+
+	// Fetch all modules (moduleCount=0 means all)
+	req := &dap.ModulesRequest{}
+	req.Seq = session.client.nextSeq()
+	req.Arguments = dap.ModulesArguments{
+		StartModule: 0,
+		ModuleCount: 0,
+	}
+
+	resp, err := session.client.sendRequest(req, timeout)
+	if err != nil {
+		return "", fmt.Errorf("modules request failed: %w", err)
+	}
+	if ok, msg := isResponseSuccess(resp); !ok {
+		return "", fmt.Errorf("modules request failed: %s", msg)
+	}
+
+	modResp, ok := resp.(*dap.ModulesResponse)
+	if !ok {
+		return "", fmt.Errorf("unexpected response type for modules")
+	}
+
+	// Try to find the module containing the address
+	for _, m := range modResp.Body.Modules {
+		base, size, ok := parseAddressRange(m.AddressRange)
+		if !ok {
+			continue
+		}
+		if addr >= base && addr < base+size {
+			offset := addr - base
+			return fmt.Sprintf("0x%X → %s+0x%X (base: 0x%X, size: 0x%X, path: %s)",
+				addr, m.Name, offset, base, size, m.Path), nil
+		}
+	}
+
+	// Not found — still return module list for context
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("0x%X → no matching module found\n\nLoaded modules (%d):\n", addr, len(modResp.Body.Modules)))
+	for _, m := range modResp.Body.Modules {
+		sb.WriteString(fmt.Sprintf("  %s", m.Name))
+		if m.AddressRange != "" {
+			sb.WriteString(fmt.Sprintf("  range: %s", m.AddressRange))
+		}
+		if m.Path != "" {
+			sb.WriteString(fmt.Sprintf("  (%s)", m.Path))
+		}
+		sb.WriteString("\n")
+	}
+	return sb.String(), nil
+}
+
+// parseAddressRange parses a module's AddressRange string into base and size.
+// Supports common formats from DAP adapters:
+//   - "0x7ffe0000-0x7fff0000"       (base-end range, codelldb/lldb-dap)
+//   - "0x7ffe0000[0x10000]"         (base[size])
+//   - "7ffe0000-7fff0000"           (without 0x prefix)
+//   - "0x7FFE0000 - 0x7FFF0000"     (with spaces)
+func parseAddressRange(s string) (base, size uint64, ok bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, 0, false
+	}
+
+	// Format: "base[size]"
+	if idx := strings.Index(s, "["); idx >= 0 {
+		endIdx := strings.Index(s, "]")
+		if endIdx <= idx {
+			return 0, 0, false
+		}
+		baseStr := strings.TrimSpace(s[:idx])
+		sizeStr := strings.TrimSpace(s[idx+1 : endIdx])
+		base, err1 := parseHexAddr(baseStr)
+		sz, err2 := parseHexAddr(sizeStr)
+		if err1 != nil || err2 != nil {
+			return 0, 0, false
+		}
+		return base, sz, true
+	}
+
+	// Format: "base-end" or "base - end"
+	if idx := strings.Index(s, "-"); idx >= 0 {
+		// Handle "0x7ffe0000-0x7fff0000" — need to find '-' that isn't inside "0x"
+		// Split on last '-' to avoid issues with addresses containing '-'
+		baseStr := strings.TrimSpace(s[:idx])
+		endStr := strings.TrimSpace(s[idx+1:])
+		base, err1 := parseHexAddr(baseStr)
+		end, err2 := parseHexAddr(endStr)
+		if err1 != nil || err2 != nil || end <= base {
+			return 0, 0, false
+		}
+		return base, end - base, true
+	}
+
+	return 0, 0, false
+}
+
+func parseHexAddr(s string) (uint64, error) {
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "0x")
+	s = strings.TrimPrefix(s, "0X")
+	return strconv.ParseUint(s, 16, 64)
 }

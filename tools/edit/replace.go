@@ -64,6 +64,35 @@ func Replace(content, oldStr, newStr string, replaceAll bool, fileStyle IndentSt
 		}
 	}
 
+	// 4th pass: brute-force indent sizes (2, 3, 4, 8) when auto-detection fails.
+	// LLMs often use a different indent size than the file's actual tab stops,
+	// causing deep nesting (6-7 levels) to mismatch after conversion.
+	if fileStyle.UseTabs && HasLeadingSpaces(normalizedOld) {
+		for _, trySize := range []int{2, 3, 4, 8} {
+			convertedOld := SpacesToTabs(normalizedOld, trySize)
+			if convertedOld == normalizedOld {
+				continue // no change, skip
+			}
+			count = strings.Count(content, convertedOld)
+			if count > 0 {
+				convertedNew := SpacesToTabs(normalizedNew, trySize)
+				return applyReplace(content, convertedOld, convertedNew, count, replaceAll)
+			}
+		}
+	}
+
+	// 5th pass: reverse — file uses spaces but old_string has tabs
+	if !fileStyle.UseTabs && hasLeadingTabs(normalizedOld) {
+		for _, trySize := range []int{2, 3, 4, 8} {
+			convertedOld := TabsToSpaces(normalizedOld, trySize)
+			count = strings.Count(content, convertedOld)
+			if count > 0 {
+				convertedNew := TabsToSpaces(normalizedNew, trySize)
+				return applyReplace(content, convertedOld, convertedNew, count, replaceAll)
+			}
+		}
+	}
+
 	return ReplaceResult{
 		Applied: false,
 		Message: "old_string not found in file",
@@ -93,6 +122,16 @@ func applyReplace(content, oldStr, newStr string, count int, replaceAll bool) Re
 		Applied:    true,
 		Message:    fmt.Sprintf("replaced %d occurrence(s)", count),
 	}
+}
+
+// hasLeadingTabs returns true if any line in text starts with a tab.
+func hasLeadingTabs(text string) bool {
+	for _, line := range strings.Split(text, "\n") {
+		if len(line) > 0 && line[0] == '\t' {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeLineEnding(s, target string) string {

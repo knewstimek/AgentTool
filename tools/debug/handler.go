@@ -14,7 +14,7 @@ type DebugInput struct {
 	SessionID string `json:"session_id,omitempty" jsonschema:"Debug session ID. Auto-generated if empty on launch"`
 
 	// Operation
-	Operation string `json:"operation" jsonschema:"Debug operation: launch, attach, set_breakpoints, continue, next, step_in, step_out, pause, threads, stack_trace, scopes, variables, evaluate, disconnect, status, set_function_breakpoints, set_exception_breakpoints, set_data_breakpoints, data_breakpoint_info, set_instruction_breakpoints, disassemble, read_memory, write_memory, set_variable, set_expression, goto, goto_targets, step_back, reverse_continue, restart_frame, modules, loaded_sources, exception_info, completions, source, terminate, restart, cancel, step_in_targets, terminate_threads,required"`
+	Operation string `json:"operation" jsonschema:"Debug operation: launch, attach, set_breakpoints, continue, next, step_in, step_out, pause, threads, stack_trace, scopes, variables, evaluate, disconnect, status, set_function_breakpoints, set_exception_breakpoints, set_data_breakpoints, data_breakpoint_info, set_instruction_breakpoints, disassemble, read_memory, write_memory, set_variable, set_expression, goto, goto_targets, step_back, reverse_continue, restart_frame, modules, loaded_sources, exception_info, completions, source, terminate, restart, cancel, step_in_targets, terminate_threads, resolve_address,required"`
 
 	// launch/attach: adapter configuration
 	AdapterCommand string   `json:"adapter_command,omitempty" jsonschema:"Debug adapter executable path or command (e.g. dlv, debugpy, codelldb)"`
@@ -100,6 +100,7 @@ var validOperations = map[string]bool{
 	"disassemble": true, "read_memory": true, "write_memory": true,
 	"terminate": true, "restart": true, "cancel": true,
 	"terminate_threads": true,
+	"resolve_address":   true,
 	"disconnect": true, "status": true,
 }
 
@@ -212,6 +213,8 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input DebugInput) (*m
 		result, err = opReadMemory(session, input)
 	case "write_memory":
 		result, err = opWriteMemory(session, input)
+	case "resolve_address":
+		result, err = opResolveAddress(session, input)
 	// Session lifecycle
 	case "terminate":
 		result, err = opTerminate(session, input)
@@ -243,7 +246,7 @@ Launch and control debug sessions for any language with a DAP-compatible adapter
 Supports breakpoints, stepping, variable inspection, expression evaluation, stack traces.
 Adapters: dlv (Go), debugpy (Python), codelldb/lldb-dap (C/C++/Rust), and more.
 Operations: launch, attach, set_breakpoints, continue, next, step_in, step_out, pause, threads, stack_trace, scopes, variables, evaluate, disconnect, status.
-Extended: breakpoint_locations, set_function_breakpoints, set_exception_breakpoints, set_data_breakpoints, data_breakpoint_info, set_instruction_breakpoints, disassemble, read_memory, write_memory, set_variable, set_expression, goto, goto_targets, step_back, reverse_continue, restart_frame, modules, loaded_sources, exception_info, completions, source, terminate, restart, cancel, step_in_targets, terminate_threads.
+Extended: breakpoint_locations, set_function_breakpoints, set_exception_breakpoints, set_data_breakpoints, data_breakpoint_info, set_instruction_breakpoints, disassemble, read_memory, write_memory, set_variable, set_expression, goto, goto_targets, step_back, reverse_continue, restart_frame, modules, loaded_sources, exception_info, completions, source, terminate, restart, cancel, step_in_targets, terminate_threads, resolve_address.
 Requires a DAP adapter executable installed on the system (e.g. 'dlv dap' for Go, 'python -m debugpy' for Python).`,
 	}, Handle)
 }

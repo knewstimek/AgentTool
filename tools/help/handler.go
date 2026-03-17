@@ -11,7 +11,7 @@ import (
 )
 
 type HelpInput struct {
-	Topic string `json:"topic,omitempty" jsonschema:"Help topic. Available: overview, encoding, indentation, tools, debug, analyze, memtool, troubleshooting. Empty = overview"`
+	Topic string `json:"topic,omitempty" jsonschema:"Help topic. Available: overview, encoding, indentation, tools, debug, analyze, memtool, wintool, troubleshooting. Empty = overview"`
 }
 
 type HelpOutput struct {
@@ -40,11 +40,13 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input HelpInput) (*mc
 		text = helpAnalyze()
 	case "memtool", "memscan", "memory", "scan":
 		text = helpMemtool()
+	case "wintool", "window", "win", "gui":
+		text = helpWintool()
 	case "troubleshooting", "trouble":
 		text = helpTroubleshooting()
 	default:
 		text = "Unknown topic: " + topic + "\n\n" +
-			"Available topics: overview, encoding, indentation, tools, debug, analyze, memtool, troubleshooting"
+			"Available topics: overview, encoding, indentation, tools, debug, analyze, memtool, wintool, troubleshooting"
 	}
 
 	return &mcp.CallToolResult{
@@ -869,6 +871,7 @@ It works with any language that has a DAP-compatible debug adapter.
 
   Info:
     modules: loaded modules/libraries (with symbol status)
+    resolve_address: map address to module+offset (memory_reference='0x7ffe5488')
     loaded_sources: all loaded source files
     source: get source code by source_reference
     exception_info: current exception details (thread_id)
@@ -1118,4 +1121,61 @@ CheatEngine-style: search, filter, write, pointer scan, struct search, diff.
 ## Permissions
   - Windows: may require Administrator (OpenProcess)
   - Linux: same-user or root, or CAP_SYS_PTRACE`
+}
+
+func helpWintool() string {
+	return `# wintool — Windows GUI Automation
+
+Windows-only tool for finding, inspecting, and controlling windows.
+macOS and Linux are not supported.
+
+## Operations
+
+### Discovery
+  - list: Enumerate all top-level windows (HWND, PID, title, class, rect, visible)
+    Supports filters: title, class, pid
+  - find: Search windows by title/class/PID (at least one required)
+  - tree: Show child window/control hierarchy of a specific window
+  - inspect: Detailed info (styles, rect, client area, children count)
+
+### Observation
+  - screenshot: Capture a window as base64 PNG (works even if occluded)
+    Uses PrintWindow (PW_RENDERFULLCONTENT), falls back to BitBlt
+    Max resolution: 4096x4096. Returns data:image/png;base64,...
+  - gettext: Read text from a window/control via WM_GETTEXT
+
+### Interaction
+  - settext: Set text on a window/control via WM_SETTEXT
+  - click: Click at client-relative coordinates (left/right/middle)
+  - type: Send keyboard characters via WM_CHAR
+  - send: Raw SendMessage/PostMessage with custom msg/wParam/lParam
+  - close: Send WM_CLOSE to a window
+  - focus: Bring window to foreground (SetForegroundWindow)
+  - show: Change window state (show/hide/minimize/maximize/restore)
+  - move: Move and/or resize a window
+
+## Workflow Examples
+
+### Find and screenshot a window:
+  1. list (or find title="Notepad") -> get HWND (e.g. 0x1A2B3C)
+  2. screenshot(hwnd="0x1A2B3C") -> base64 PNG (agent can "see" it)
+  3. tree(hwnd="0x1A2B3C") -> find Edit control HWND
+  4. gettext(hwnd=edit_hwnd) -> read current text
+
+### Automate a GUI application:
+  1. find(title="MyApp") -> HWND
+  2. tree -> find button/edit controls
+  3. settext(hwnd=edit_ctrl, text="input value")
+  4. click(hwnd=button_ctrl, x=10, y=10) -> click the button
+  5. screenshot -> verify result
+
+### Low-level message control:
+  send(hwnd, msg=0x0111, wparam=button_id) -> WM_COMMAND
+  send(hwnd, msg=0x0010) -> WM_CLOSE
+
+## Notes
+  - HWND is specified as hex string: "0x1A2B3C" or "1A2B3C"
+  - Coordinates for click are client-relative (not screen coordinates)
+  - SetForegroundWindow may fail if agent-tool is not the foreground process
+  - screenshot returns base64-encoded PNG suitable for multimodal AI analysis`
 }

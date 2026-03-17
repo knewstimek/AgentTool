@@ -56,12 +56,13 @@ import (
 	"agent-tool/tools/webfetch"
 	"agent-tool/tools/websearch"
 	"agent-tool/tools/yamlquery"
+	"agent-tool/tools/wintool"
 	"agent-tool/tools/write"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-const Version = "v0.7.1"
+const Version = "v0.7.2"
 
 func main() {
 	args := os.Args[1:]
@@ -199,6 +200,7 @@ func main() {
 	debug.Register(server)
 	analyze.Register(server)
 	memtool.Register(server)
+	wintool.Register(server)
 	help.Register(server)
 
 	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
