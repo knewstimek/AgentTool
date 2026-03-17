@@ -135,6 +135,9 @@ func (s *debugSession) eventLoop() {
 		case *dap.StoppedEvent:
 			s.mu.Lock()
 			s.state = "stopped"
+			if se, ok := msg.(*dap.StoppedEvent); ok {
+				s.lastStoppedTID = se.Body.ThreadId
+			}
 			s.mu.Unlock()
 			s.signalStopped(msg)
 

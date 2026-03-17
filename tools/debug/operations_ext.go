@@ -217,7 +217,9 @@ func opDataBreakpointInfo(session *debugSession, input DebugInput) (string, erro
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Variable: %s\n", input.Name))
 	sb.WriteString(fmt.Sprintf("DataId: %v\n", infoResp.Body.DataId))
-	sb.WriteString(fmt.Sprintf("Description: %s\n", infoResp.Body.Description))
+	if infoResp.Body.Description != "" {
+		sb.WriteString(fmt.Sprintf("Description: %s\n", infoResp.Body.Description))
+	}
 	if len(infoResp.Body.AccessTypes) > 0 {
 		types := make([]string, len(infoResp.Body.AccessTypes))
 		for i, t := range infoResp.Body.AccessTypes {
@@ -285,10 +287,7 @@ func opStepBack(session *debugSession, input DebugInput) (string, error) {
 		return "", err
 	}
 	timeout := resolveTimeout(input.TimeoutSec)
-	threadID := input.ThreadID
-	if threadID == 0 {
-		threadID = 1
-	}
+	threadID := resolveThreadID(session, input.ThreadID)
 
 	select {
 	case <-session.stoppedCh:
@@ -317,10 +316,7 @@ func opReverseContinue(session *debugSession, input DebugInput) (string, error) 
 		return "", err
 	}
 	timeout := resolveTimeout(input.TimeoutSec)
-	threadID := input.ThreadID
-	if threadID == 0 {
-		threadID = 1
-	}
+	threadID := resolveThreadID(session, input.ThreadID)
 
 	select {
 	case <-session.stoppedCh:
@@ -377,10 +373,7 @@ func opGoto(session *debugSession, input DebugInput) (string, error) {
 		return "", err
 	}
 	timeout := resolveTimeout(input.TimeoutSec)
-	threadID := input.ThreadID
-	if threadID == 0 {
-		threadID = 1
-	}
+	threadID := resolveThreadID(session, input.ThreadID)
 	if input.TargetID == 0 {
 		return "", fmt.Errorf("target_id is required for goto (use goto_targets to get available targets)")
 	}
@@ -632,10 +625,7 @@ func opCompletions(session *debugSession, input DebugInput) (string, error) {
 // opExceptionInfo retrieves details about the current exception.
 func opExceptionInfo(session *debugSession, input DebugInput) (string, error) {
 	timeout := resolveTimeout(input.TimeoutSec)
-	threadID := input.ThreadID
-	if threadID == 0 {
-		threadID = 1
-	}
+	threadID := resolveThreadID(session, input.ThreadID)
 
 	req := &dap.ExceptionInfoRequest{}
 	req.Seq = session.client.nextSeq()
@@ -1070,7 +1060,14 @@ func formatBreakpointsResponse(label string, bps []dap.Breakpoint) string {
 		if bp.Verified {
 			verified = "verified"
 		}
-		sb.WriteString(fmt.Sprintf("  Line %d: %s", bp.Line, verified))
+		// DAP spec: Line is optional. Show ID or index-based label when line is 0.
+		if bp.Line > 0 {
+			sb.WriteString(fmt.Sprintf("  Line %d: %s", bp.Line, verified))
+		} else if bp.Id > 0 {
+			sb.WriteString(fmt.Sprintf("  BP #%d: %s", bp.Id, verified))
+		} else {
+			sb.WriteString(fmt.Sprintf("  BP: %s", verified))
+		}
 		if bp.Message != "" {
 			sb.WriteString(fmt.Sprintf(" (%s)", bp.Message))
 		}

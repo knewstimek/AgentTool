@@ -46,9 +46,10 @@ type debugSession struct {
 	conn net.Conn
 
 	// Session state
-	mu         sync.Mutex
-	state      string // "initializing", "running", "stopped", "exited", "terminated"
-	configDone bool   // true after configurationDone has been sent
+	mu              sync.Mutex
+	state           string // "initializing", "running", "stopped", "exited", "terminated"
+	configDone      bool   // true after configurationDone has been sent
+	lastStoppedTID  int    // thread ID from the most recent StoppedEvent (for default threadId in continue/step)
 
 	// Event handling
 	events        *eventBuffer

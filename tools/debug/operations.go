@@ -388,12 +388,17 @@ func opSetBreakpoints(session *debugSession, input DebugInput) (string, error) {
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Breakpoints set for %s:\n", input.SourcePath))
-	for _, bp := range bpResp.Body.Breakpoints {
+	for i, bp := range bpResp.Body.Breakpoints {
 		verified := "unverified"
 		if bp.Verified {
 			verified = "verified"
 		}
-		sb.WriteString(fmt.Sprintf("  Line %d: %s", bp.Line, verified))
+		// DAP spec: Line is optional in response. Fall back to requested line.
+		line := bp.Line
+		if line == 0 && i < len(bps) {
+			line = bps[i].Line
+		}
+		sb.WriteString(fmt.Sprintf("  Line %d: %s", line, verified))
 		if bp.Message != "" {
 			sb.WriteString(fmt.Sprintf(" (%s)", bp.Message))
 		}
@@ -465,10 +470,7 @@ func opContinue(session *debugSession, input DebugInput) (string, error) {
 	}
 
 	timeout := resolveTimeout(input.TimeoutSec)
-	threadID := input.ThreadID
-	if threadID == 0 {
-		threadID = 1 // default thread
-	}
+	threadID := resolveThreadID(session, input.ThreadID)
 
 	// Drain stale stopped event to avoid receiving a previous stop
 	select {
@@ -536,10 +538,7 @@ func stepOperation(session *debugSession, input DebugInput, kind string) (string
 	}
 
 	timeout := resolveTimeout(input.TimeoutSec)
-	threadID := input.ThreadID
-	if threadID == 0 {
-		threadID = 1
-	}
+	threadID := resolveThreadID(session, input.ThreadID)
 
 	// Drain stale stopped event to avoid receiving a previous stop
 	select {
@@ -617,10 +616,7 @@ func opPause(session *debugSession, input DebugInput) (string, error) {
 		return "", err
 	}
 	timeout := resolveTimeout(input.TimeoutSec)
-	threadID := input.ThreadID
-	if threadID == 0 {
-		threadID = 1
-	}
+	threadID := resolveThreadID(session, input.ThreadID)
 
 	// Drain stale stopped event
 	select {
@@ -668,10 +664,7 @@ func opThreads(session *debugSession, input DebugInput) (string, error) {
 // opStackTrace returns the call stack for a thread.
 func opStackTrace(session *debugSession, input DebugInput) (string, error) {
 	timeout := resolveTimeout(input.TimeoutSec)
-	threadID := input.ThreadID
-	if threadID == 0 {
-		threadID = 1
-	}
+	threadID := resolveThreadID(session, input.ThreadID)
 
 	req := &dap.StackTraceRequest{}
 	req.Seq = session.client.nextSeq()
@@ -986,6 +979,22 @@ type breakpointSpec struct {
 	Condition    string `json:"condition,omitempty"`
 	HitCondition string `json:"hit_condition,omitempty"`
 	LogMessage   string `json:"log_message,omitempty"`
+}
+
+// resolveThreadID returns the thread ID to use for continue/step/pause.
+// Uses the explicitly provided ID if non-zero, falls back to the last
+// StoppedEvent's thread ID, and finally defaults to 1.
+func resolveThreadID(session *debugSession, inputTID int) int {
+	if inputTID != 0 {
+		return inputTID
+	}
+	session.mu.Lock()
+	tid := session.lastStoppedTID
+	session.mu.Unlock()
+	if tid != 0 {
+		return tid
+	}
+	return 1
 }
 
 // formatStoppedEvent renders a stopped event into a human-readable summary.
