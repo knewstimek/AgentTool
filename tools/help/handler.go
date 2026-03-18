@@ -537,7 +537,9 @@ Disassemble machine code. Supports x86 (16/32/64-bit) and ARM (32/64-bit).
     offset: Byte offset in the file to start from (default: 0)
     count: Number of instructions to decode (default: 50, max: 200)
     mode: CPU mode — x86: 16/32/64, arm: 32/64 (default: 64)
-    base_addr: Base address for display (hex string, default: "0")
+    base_addr: Base address mapped to file offset 0 (hex string, default: "0").
+               Displayed address = base_addr + offset + position.
+               For PE files, use ImageBase (e.g. 0x140000000), not section VA.
 
   Output: address: hex_bytes    assembly
   x86 uses Intel syntax. Failed decodes show "db 0xNN" / ".word" and skip.

@@ -21,7 +21,7 @@ type AnalyzeInput struct {
 	Offset   int    `json:"offset,omitempty" jsonschema:"Byte offset to start from. Default: 0"`
 	Count    int    `json:"count,omitempty" jsonschema:"Number of instructions (disassemble). Default: 50, Max: 200"`
 	Mode     int    `json:"mode,omitempty" jsonschema:"CPU mode: 32 or 64. Default: 64"`
-	BaseAddr string `json:"base_addr,omitempty" jsonschema:"Base address for display (hex string, e.g. '0x140001000'). Default: 0x0"`
+	BaseAddr string `json:"base_addr,omitempty" jsonschema:"Base address for display (hex string, e.g. '0x140001000'). Default: 0x0. This maps to file offset 0, so displayed address = base_addr + offset + instruction_position. For PE .text section: use ImageBase (not section VA) for correct addresses."`
 	Arch     string `json:"arch,omitempty" jsonschema:"CPU architecture: x86 (default) or arm. For disassemble"`
 
 	// strings parameters

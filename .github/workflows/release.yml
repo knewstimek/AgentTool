@@ -1,0 +1,109 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Verify version matches tag
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION=$(grep 'const Version' main.go | grep -o '"v[^"]*"' | tr -d '"')
+          if [ "$TAG" != "$VERSION" ]; then
+            echo "ERROR: tag ($TAG) does not match Version in main.go ($VERSION)"
+            exit 1
+          fi
+
+      - name: Cross-compile
+        run: |
+          mkdir -p dist
+          GOOS=linux   GOARCH=amd64 go build -o dist/agent-tool-linux-amd64 .
+          GOOS=linux   GOARCH=arm64 go build -o dist/agent-tool-linux-arm64 .
+          GOOS=darwin  GOARCH=amd64 go build -o dist/agent-tool-darwin-amd64 .
+          GOOS=darwin  GOARCH=arm64 go build -o dist/agent-tool-darwin-arm64 .
+          GOOS=windows GOARCH=amd64 go build -o dist/agent-tool-windows-amd64.exe .
+
+      - name: Build mcpb
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+          cat > dist/manifest.json << MEOF
+          {
+            "mcpb": "1.0",
+            "name": "agent-tool",
+            "version": "${VERSION}",
+            "binaries": {
+              "linux-amd64": "agent-tool-linux-amd64",
+              "linux-arm64": "agent-tool-linux-arm64",
+              "darwin-amd64": "agent-tool-darwin-amd64",
+              "darwin-arm64": "agent-tool-darwin-arm64",
+              "windows-amd64": "agent-tool-windows-amd64.exe"
+            }
+          }
+          MEOF
+          cd dist && zip agent-tool.mcpb manifest.json \
+            agent-tool-linux-amd64 agent-tool-linux-arm64 \
+            agent-tool-darwin-amd64 agent-tool-darwin-arm64 \
+            agent-tool-windows-amd64.exe
+
+      - name: Compute mcpb SHA256
+        id: sha
+        run: |
+          SHA=$(sha256sum dist/agent-tool.mcpb | awk '{print $1}')
+          echo "mcpb_sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "mcpb SHA256: ${SHA}"
+
+      - name: Update server.json
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+          SHA="${{ steps.sha.outputs.mcpb_sha }}"
+
+          # Update version
+          sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${VERSION}\"/" server.json
+
+          # Update mcpb URL
+          sed -i "s|releases/download/v[^/]*/agent-tool.mcpb|releases/download/${TAG}/agent-tool.mcpb|" server.json
+
+          # Update SHA256
+          sed -i "s/\"fileSha256\": \"[^\"]*\"/\"fileSha256\": \"${SHA}\"/" server.json
+
+          echo "Updated server.json:"
+          cat server.json
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          gh release create "${TAG}" \
+            dist/agent-tool-linux-amd64 \
+            dist/agent-tool-linux-arm64 \
+            dist/agent-tool-darwin-amd64 \
+            dist/agent-tool-darwin-arm64 \
+            dist/agent-tool-windows-amd64.exe \
+            dist/agent-tool.mcpb \
+            --title "${TAG}" \
+            --generate-notes
+
+      - name: Commit server.json
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout master
+          git add server.json
+          git commit -m "chore: update server.json for ${GITHUB_REF#refs/tags/} release [skip ci]"
+          git push
