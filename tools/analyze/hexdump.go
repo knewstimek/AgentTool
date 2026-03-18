@@ -21,6 +21,19 @@ func opHexdump(input AnalyzeInput) (string, error) {
 	defer f.Close()
 
 	offset := int64(input.Offset)
+	displayBase := uint64(0) // base address for display (file offset by default)
+
+	// VA parameter: convert VA to file offset for PE files
+	if input.VA != "" {
+		resolved, err := resolveVA(input.FilePath, input.VA)
+		if err != nil {
+			return "", err
+		}
+		defer resolved.PEFile.Close()
+		offset = resolved.FileOffset
+		displayBase = resolved.DisplayBase
+	}
+
 	if offset < 0 {
 		return "", fmt.Errorf("offset must be non-negative")
 	}
@@ -49,7 +62,7 @@ func opHexdump(input AnalyzeInput) (string, error) {
 	var sb strings.Builder
 
 	for i := 0; i < n; i += bytesPerLine {
-		addr := uint64(offset) + uint64(i)
+		addr := displayBase + uint64(offset) + uint64(i)
 
 		// Hex part
 		var hexParts []string
@@ -79,7 +92,11 @@ func opHexdump(input AnalyzeInput) (string, error) {
 		sb.WriteString(fmt.Sprintf("0x%08x  %s  %s  |%s|\n", addr, hexLeft, hexRight, ascii.String()))
 	}
 
-	sb.WriteString(fmt.Sprintf("\n(%d bytes from offset 0x%x)", n, offset))
+	if displayBase != 0 {
+		sb.WriteString(fmt.Sprintf("\n(%d bytes from VA 0x%x, file offset 0x%x)", n, displayBase+uint64(offset), offset))
+	} else {
+		sb.WriteString(fmt.Sprintf("\n(%d bytes from offset 0x%x)", n, offset))
+	}
 
 	return sb.String(), nil
 }

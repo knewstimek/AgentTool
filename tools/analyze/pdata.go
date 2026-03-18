@@ -93,7 +93,9 @@ func pdataFuncEndOffset(f *pe.File, queryRVA uint32) (uint32, bool) {
 }
 
 // opFunctionAt finds the function containing a given VA using .pdata (Exception Table).
-// Only works with x64 PE files that have a .pdata section.
+// Does NOT use resolveVA() because it needs the full PE file for .pdata traversal,
+// heuristic fallback, neighbor function suggestions in error messages, and
+// target_va parameter aliasing -- these are too specialized for the common helper.
 func opFunctionAt(input AnalyzeInput) (string, error) {
 	vaStr := input.VA
 	if vaStr == "" && input.TargetVA != "" {

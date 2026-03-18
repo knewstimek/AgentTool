@@ -1370,6 +1370,62 @@ func peSymbolMap(f *pe.File, imageBase uint64) map[uint64]string {
 	return syms
 }
 
+// vaResolved holds the result of resolving a VA parameter to a file offset.
+// Shared by disassemble, hexdump, and any offset-based operation that accepts VA input.
+// Operations with complex VA handling (e.g. function_at with .pdata traversal and
+// neighbor suggestions) do their own parsing instead.
+type vaResolved struct {
+	FileOffset  int64    // file offset corresponding to the VA
+	DisplayBase uint64   // for address display: addr = displayBase + fileOffset + pos
+	RVA         uint32   // RVA = VA - ImageBase
+	ImageBase   uint64   // PE ImageBase
+	PEFile      *pe.File // caller must defer Close()
+}
+
+// resolveVA converts a VA string to a file offset using PE headers.
+// Returns a vaResolved with the PE file kept open (caller must close PEFile).
+// Validates: hex parse, PE format, imageBase bounds, RVA 4GB limit, section mapping.
+func resolveVA(filePath, vaStr string) (*vaResolved, error) {
+	va, err := parseHexAddr(vaStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid va: %s", vaStr)
+	}
+
+	f, err := pe.Open(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("va parameter requires a PE file: %w", err)
+	}
+
+	imageBase := peImageBase(f)
+	if va < imageBase {
+		f.Close()
+		return nil, fmt.Errorf("va 0x%x is below image base 0x%x", va, imageBase)
+	}
+	if va-imageBase > 0xFFFFFFFF {
+		f.Close()
+		return nil, fmt.Errorf("va 0x%x is too far from image base 0x%x (RVA exceeds 4GB)", va, imageBase)
+	}
+
+	rva := uint32(va - imageBase)
+	fileOff, _, err := rvaToFileOffset(f, rva)
+	if err != nil {
+		f.Close()
+		return nil, fmt.Errorf("va 0x%x: %w. Try using offset parameter instead", va, err)
+	}
+
+	// displayBase: maps file offset 0 to the correct VA range
+	// so that displayBase + fileOffset = VA
+	displayBase := va - uint64(fileOff)
+
+	return &vaResolved{
+		FileOffset:  int64(fileOff),
+		DisplayBase: displayBase,
+		RVA:         rva,
+		ImageBase:   imageBase,
+		PEFile:      f,
+	}, nil
+}
+
 // peImageBase extracts ImageBase from PE OptionalHeader (32 or 64-bit).
 func peImageBase(f *pe.File) uint64 {
 	switch oh := f.OptionalHeader.(type) {

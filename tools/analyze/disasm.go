@@ -1,7 +1,6 @@
 package analyze
 
 import (
-	"debug/pe"
 	"fmt"
 	"os"
 	"strconv"
@@ -21,42 +20,25 @@ const (
 // Supports x86 (16/32/64-bit) and ARM (32/64-bit).
 // Reads only the needed portion instead of the entire file to save memory.
 func opDisassemble(input AnalyzeInput) (string, error) {
-	// VA-to-offset: auto-convert virtual address to file offset using PE headers
-	var funcEndFileOff int64 = -1 // function boundary from .pdata (if available)
-	var symbolMap map[uint64]string // VA -> symbol name for annotations
+	// VA-to-offset: uses shared resolveVA() for PE VA validation and conversion,
+	// then adds disassemble-specific extras (CPU mode, function boundary, symbol map).
+	var funcEndFileOff int64 = -1 // function boundary from .pdata or heuristic
+	var symbolMap map[uint64]string // VA -> symbol name for inline annotations
 	if input.VA != "" {
-		va, err := parseHexAddr(input.VA)
+		resolved, err := resolveVA(input.FilePath, input.VA)
 		if err != nil {
-			return "", fmt.Errorf("invalid va: %s", input.VA)
+			return "", err
 		}
-		f, err := pe.Open(input.FilePath)
-		if err != nil {
-			return "", fmt.Errorf("va parameter requires a PE file: %w", err)
-		}
-		defer f.Close()
+		defer resolved.PEFile.Close()
 
-		imageBase := peImageBase(f)
-		if va < imageBase {
-			return "", fmt.Errorf("va 0x%x is below image base 0x%x", va, imageBase)
-		}
-		if va-imageBase > 0xFFFFFFFF {
-			return "", fmt.Errorf("va 0x%x is too far from image base 0x%x (RVA exceeds 4GB)", va, imageBase)
-		}
-		rva := uint32(va - imageBase)
-		fileOff, _, err := rvaToFileOffset(f, rva)
-		if err != nil {
-			return "", fmt.Errorf("va 0x%x: %w", va, err)
-		}
-		input.Offset = int(fileOff)
-
+		input.Offset = int(resolved.FileOffset)
 		if input.BaseAddr == "" {
-			// base_addr maps to file offset 0: displayed_addr = base_addr + fileOffset + pos
-			// For correct VA display: base_addr = VA - fileOffset
-			input.BaseAddr = fmt.Sprintf("0x%x", va-uint64(fileOff))
+			input.BaseAddr = fmt.Sprintf("0x%x", resolved.DisplayBase)
 		}
+
 		// Auto-detect CPU mode from PE Machine field
 		if input.Mode == 0 {
-			switch f.FileHeader.Machine {
+			switch resolved.PEFile.FileHeader.Machine {
 			case 0x14c: // IMAGE_FILE_MACHINE_I386
 				input.Mode = 32
 			case 0x8664: // IMAGE_FILE_MACHINE_AMD64
@@ -65,12 +47,11 @@ func opDisassemble(input AnalyzeInput) (string, error) {
 		}
 
 		// Auto-stop at function boundary: .pdata first, heuristic fallback
-		if endOff, _, found := pdataOrHeuristicEndOffset(f, rva, uint32(fileOff)); found {
+		if endOff, _, found := pdataOrHeuristicEndOffset(resolved.PEFile, resolved.RVA, uint32(resolved.FileOffset)); found {
 			funcEndFileOff = int64(endOff)
 		}
 
-		// Build symbol map for inline annotations
-		symbolMap = peSymbolMap(f, imageBase)
+		symbolMap = peSymbolMap(resolved.PEFile, resolved.ImageBase)
 	}
 
 	fi, err := os.Stat(input.FilePath)
