@@ -64,8 +64,8 @@ func opDisassemble(input AnalyzeInput) (string, error) {
 			}
 		}
 
-		// Auto-stop at function boundary: look up .pdata for function end
-		if endOff, ok := pdataFuncEndOffset(f, rva); ok {
+		// Auto-stop at function boundary: .pdata first, heuristic fallback
+		if endOff, _, found := pdataOrHeuristicEndOffset(f, rva, uint32(fileOff)); found {
 			funcEndFileOff = int64(endOff)
 		}
 

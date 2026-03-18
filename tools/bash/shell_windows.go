@@ -198,7 +198,9 @@ func wrapWithTokenize(command string) string {
 	w.WriteString("$__e=$null; ")
 	w.WriteString("[void][System.Management.Automation.PSParser]::Tokenize($__cmd,[ref]$__e); ")
 	w.WriteString("if($__e.Count -gt 0){ ")
-	w.WriteString("Write-Host \"PS syntax error: $($__e[0].Message)\"; ")
+	// Use string concatenation instead of expandable string to avoid
+	// quote injection if error message contains double quotes.
+	w.WriteString("Write-Host ('PS syntax error: ' + $__e[0].Message); ")
 	w.WriteString("$global:LASTEXITCODE=1 ")
 	// Reset $LASTEXITCODE before execution so the sentinel's $null check
 	// can fall back to $? for PS cmdlets that don't set $LASTEXITCODE.
@@ -210,9 +212,10 @@ func wrapWithTokenize(command string) string {
 func buildSentinelCmd(kind shellKind, command string, sentinel string) string {
 	switch kind {
 	case kindPwsh:
-		// PowerShell 7+ supports && and || natively — pass through as-is.
+		// PowerShell 7+ supports && and || natively.
+		// Use newline to separate command from sentinel (same heredoc/here-string fix as bash).
 		return fmt.Sprintf(
-			"%s; $__ec = $LASTEXITCODE; if ($null -eq $__ec) { $__ec = if ($?) {0} else {1} }; Write-Host \"\"; Write-Host \"%s$__ec%s\"",
+			"%s\n$__ec = $LASTEXITCODE; if ($null -eq $__ec) { $__ec = if ($?) {0} else {1} }; Write-Host \"\"; Write-Host \"%s$__ec%s\"",
 			command, sentinel, sentinelSuffix,
 		)
 	case kindPowerShell:
@@ -240,13 +243,14 @@ func buildSentinelCmd(kind shellKind, command string, sentinel string) string {
 		// the sentinel always runs even if the command has unexpected syntax.
 		userCmd = wrapWithTokenize(userCmd)
 		return fmt.Sprintf(
-			"%s; $__ec = $LASTEXITCODE; if ($null -eq $__ec) { $__ec = if ($?) {0} else {1} }; Write-Host \"\"; Write-Host \"%s$__ec%s\"",
+			"%s\n$__ec = $LASTEXITCODE; if ($null -eq $__ec) { $__ec = if ($?) {0} else {1} }; Write-Host \"\"; Write-Host \"%s$__ec%s\"",
 			userCmd, sentinel, sentinelSuffix,
 		)
 	case kindGitBash:
-		// Same pattern as Unix bash
+		// Use newline (not ;) to separate user command from sentinel.
+		// Semicolon breaks heredocs: "EOF; EXIT_CODE=..." is not a valid heredoc terminator.
 		return fmt.Sprintf(
-			"%s; EXIT_CODE=$?; echo \"\"; echo \"%s${EXIT_CODE}%s\"",
+			"%s\nEXIT_CODE=$?; echo \"\"; echo \"%s${EXIT_CODE}%s\"",
 			command, sentinel, sentinelSuffix,
 		)
 	default: // kindCmd

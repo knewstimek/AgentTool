@@ -43,6 +43,9 @@ func pdataFuncEndOffset(f *pe.File, queryRVA uint32) (uint32, bool) {
 				return 0, false
 			}
 			off := excDir.VirtualAddress - s.VirtualAddress
+			if uint64(off) >= uint64(len(secData)) {
+				return 0, false // .pdata offset beyond section raw data
+			}
 			end := off + excDir.Size
 			if int(end) > len(secData) {
 				end = uint32(len(secData))
@@ -120,11 +123,26 @@ func opFunctionAt(input AnalyzeInput) (string, error) {
 	}
 	queryRVA := uint32(va - imageBase)
 
-	// DataDirectory[3] = Exception Table (.pdata) -- x64 only
+	// Try .pdata first (x64 only), fall back to heuristic for x86 or stripped binaries
+	usePdata := peHasPdata(f)
+	if !usePdata {
+		// No .pdata available -- use heuristic detection
+		bounds := heuristicFuncBoundsFromPE(f, imageBase, queryRVA)
+		if bounds == nil {
+			if f.FileHeader.Machine == 0x14c {
+				return "", fmt.Errorf("function_at: no .pdata (x86 PE) and heuristic detection failed for 0x%x. "+
+					"Try using disassemble with va=\"0x%x\" instead -- it will show instructions from that address "+
+					"and you can identify the function boundary by looking for ret (C3) followed by int3/nop padding", va, va)
+			}
+			return "", fmt.Errorf("function_at: no .pdata (x64 PE, possibly stripped) and heuristic detection failed for 0x%x. "+
+				"Try using disassemble with va=\"0x%x\" instead -- it will show instructions from that address "+
+				"and you can identify the function boundary by looking for ret (C3) followed by int3/nop padding", va, va)
+		}
+		return formatHeuristicResult(f, imageBase, va, bounds, input)
+	}
+
 	var excDir pe.DataDirectory
 	switch oh := f.OptionalHeader.(type) {
-	case *pe.OptionalHeader32:
-		return "", fmt.Errorf("function_at requires x64 PE (.pdata not available in x86 PE files)")
 	case *pe.OptionalHeader64:
 		if len(oh.DataDirectory) > 3 {
 			excDir = oh.DataDirectory[3]
@@ -134,7 +152,7 @@ func opFunctionAt(input AnalyzeInput) (string, error) {
 	}
 
 	if excDir.VirtualAddress == 0 || excDir.Size == 0 {
-		return "", fmt.Errorf("no .pdata section (Exception Table not present -- binary may be stripped)")
+		return "", fmt.Errorf("no .pdata section (Exception Table not present)")
 	}
 
 	// Each RUNTIME_FUNCTION entry is 12 bytes
@@ -153,8 +171,8 @@ func opFunctionAt(input AnalyzeInput) (string, error) {
 		return "", fmt.Errorf("cannot locate .pdata: %w", err)
 	}
 
-	// Read .pdata raw bytes
-	pdataSize := entryCount * 12
+	// Read .pdata raw bytes (use int to avoid uint32 overflow in multiplication)
+	pdataSize := int(entryCount) * 12
 	pdataData := make([]byte, pdataSize)
 
 	fh, err := os.Open(input.FilePath)
@@ -198,20 +216,26 @@ func opFunctionAt(input AnalyzeInput) (string, error) {
 
 	if idx < 0 {
 		nearest := entries[0]
-		return "", fmt.Errorf("address 0x%x is before all functions (first function starts at 0x%x)",
-			va, imageBase+uint64(nearest.BeginAddress))
+		return "", fmt.Errorf("address 0x%x is before all .pdata functions (first function starts at 0x%x). "+
+			"This address may be in a jump stub or padding area. Try function_at with va=\"0x%x\" instead",
+			va, imageBase+uint64(nearest.BeginAddress), imageBase+uint64(nearest.BeginAddress))
 	}
 
 	entry := entries[idx]
 	if queryRVA < entry.BeginAddress || queryRVA >= entry.EndAddress {
-		// Not inside this function -- find nearest for a helpful error
-		msg := fmt.Sprintf("address 0x%x not found in any .pdata entry", va)
-		msg += fmt.Sprintf(" (nearest: 0x%x-0x%x)",
+		// Not inside this function -- provide nearest entries and actionable guidance
+		msg := fmt.Sprintf("address 0x%x is between .pdata functions", va)
+		msg += fmt.Sprintf(" (prev: 0x%x-0x%x",
 			imageBase+uint64(entry.BeginAddress), imageBase+uint64(entry.EndAddress))
 		if idx+1 < len(entries) {
 			next := entries[idx+1]
-			msg += fmt.Sprintf(", next: 0x%x-0x%x",
-				imageBase+uint64(next.BeginAddress), imageBase+uint64(next.EndAddress))
+			msg += fmt.Sprintf(", next: 0x%x-0x%x). ", imageBase+uint64(next.BeginAddress), imageBase+uint64(next.EndAddress))
+			msg += fmt.Sprintf("Try function_at with va=\"0x%x\" or va=\"0x%x\" for the neighboring functions",
+				imageBase+uint64(entry.BeginAddress), imageBase+uint64(next.BeginAddress))
+		} else {
+			msg += "). "
+			msg += fmt.Sprintf("Try function_at with va=\"0x%x\" for the previous function",
+				imageBase+uint64(entry.BeginAddress))
 		}
 		return "", fmt.Errorf("%s", msg)
 	}
@@ -255,6 +279,55 @@ func opFunctionAt(input AnalyzeInput) (string, error) {
 				if line != "" {
 					sb.WriteString("  " + line + "\n")
 				}
+			}
+		}
+	}
+
+	return sb.String(), nil
+}
+
+// formatHeuristicResult formats function_at output when using heuristic detection.
+func formatHeuristicResult(f *pe.File, imageBase, va uint64, bounds *heuristicBounds, input AnalyzeInput) (string, error) {
+	funcStartVA := imageBase + uint64(bounds.StartRVA)
+	funcEndVA := imageBase + uint64(bounds.EndRVA)
+	funcSize := bounds.EndRVA - bounds.StartRVA
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Function containing 0x%x:\n", va))
+	sb.WriteString(fmt.Sprintf("  Start:  0x%x (RVA: 0x%x)\n", funcStartVA, bounds.StartRVA))
+	sb.WriteString(fmt.Sprintf("  End:    0x%x (RVA: 0x%x)\n", funcEndVA, bounds.EndRVA))
+	sb.WriteString(fmt.Sprintf("  Size:   %d bytes\n", funcSize))
+	sb.WriteString(formatHeuristicWarning(bounds.Confidence))
+
+	// Auto-disassemble
+	count := input.Count
+	if count <= 0 {
+		count = defaultDisasmCount
+	}
+	if count > maxDisasmCount {
+		count = maxDisasmCount
+	}
+
+	mode := 64
+	if f.FileHeader.Machine == 0x14c {
+		mode = 32
+	}
+
+	disasmInput := AnalyzeInput{
+		FilePath: input.FilePath,
+		Offset:   int(bounds.StartFileOff),
+		Count:    count,
+		Mode:     mode,
+		Arch:     "x86",
+		VA:       fmt.Sprintf("0x%x", funcStartVA),
+	}
+
+	disasm, disErr := opDisassemble(disasmInput)
+	if disErr == nil {
+		sb.WriteString(fmt.Sprintf("\nDisassembly (first %d instructions):\n", count))
+		for _, line := range strings.Split(disasm, "\n") {
+			if line != "" {
+				sb.WriteString("  " + line + "\n")
 			}
 		}
 	}

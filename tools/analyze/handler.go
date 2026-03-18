@@ -174,7 +174,7 @@ bin_diff (two-file byte comparison), resource_info (PE resources and version inf
 imphash (PE import hash for malware classification), rich_header (PE build tool fingerprint),
 overlay_detect (detect appended data after last section), dwarf_info (debug symbol info),
 xref (find all code references to a target address in PE),
-function_at (find function boundaries via PE .pdata).
+function_at (find function boundaries via PE .pdata or heuristic prologue/epilogue scan).
 Pure Go implementation -- no external tools needed. Supports x86, x64, ARM, ARM64.
 For PE files: use 'va' parameter instead of 'offset' for auto VA display, symbol annotation, and function boundary detection.
 PE strings/pattern_search automatically show VA alongside file offsets.

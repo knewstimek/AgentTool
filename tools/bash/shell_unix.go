@@ -67,5 +67,9 @@ func decodeOutput(_ shellKind, raw string) string {
 
 // buildSentinelCmd wraps a command with exit code capture and sentinel marker.
 func buildSentinelCmd(_ shellKind, command string, sentinel string) string {
-	return fmt.Sprintf("%s; EXIT_CODE=$?; echo \"\"; echo \"%s${EXIT_CODE}%s\"", command, sentinel, sentinelSuffix)
+	// Use newline (not ;) to separate user command from sentinel.
+	// Semicolon breaks heredocs: "EOF; EXIT_CODE=..." is not recognized as heredoc terminator.
+	// Newline ensures heredoc terminators, trailing comments, and backslash continuations
+	// all resolve before the sentinel runs.
+	return fmt.Sprintf("%s\nEXIT_CODE=$?; echo \"\"; echo \"%s${EXIT_CODE}%s\"", command, sentinel, sentinelSuffix)
 }

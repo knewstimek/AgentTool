@@ -744,19 +744,24 @@ Find all code locations that reference a target address (PE only).
   Auto-detects x86 vs x64 from PE Machine field.
 
 ### function_at
-Find function boundaries using PE .pdata (Exception Table). x64 PE only.
+Find function boundaries in PE files.
   analyze(operation="function_at", file_path="/path/to/binary.exe",
           va="0x140001000")
 
-  Uses RUNTIME_FUNCTION entries in .pdata to determine function start/end.
+  Detection methods (automatic):
+  1. .pdata (Exception Table) -- reliable, x64 PE with unwind info
+  2. Heuristic (prologue/epilogue pattern scan) -- fallback for x86 PE,
+     stripped x64, or binaries without .pdata
+
   Also auto-disassembles the function (use count to control instruction limit).
 
   Parameters:
     va: Virtual address inside the function (hex, required)
     count: Max instructions to disassemble (default: 50, max: 200)
 
-  Note: .pdata is x64-only. Leaf functions may not have entries.
-  Returns function start, end, size, unwind RVA, and disassembly.
+  Heuristic scans for prologue patterns (push rbp/ebp; mov rbp/ebp, rsp/esp)
+  and epilogue (ret + int3/nop padding). Results are marked with confidence level.
+  Returns function start, end, size, and disassembly.
 
 ## Typical Workflow
 
@@ -769,7 +774,7 @@ Find function boundaries using PE .pdata (Exception Table). x64 PE only.
 7. pattern_search -- Locate specific byte sequences (signatures, opcodes)
 8. hexdump -- Examine specific data regions at file offsets
 9. disassemble -- Decode machine code (use va= for PE virtual addresses)
-10. function_at -- Find function boundaries via .pdata (PE x64)
+10. function_at -- Find function boundaries (.pdata or heuristic fallback)
 11. xref -- Find all call/jump/data references to an address (PE)
 12. dwarf_info -- Extract debug symbols and function names
 13. bin_diff -- Compare original vs patched versions
