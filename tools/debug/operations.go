@@ -346,7 +346,7 @@ func opSetBreakpoints(session *debugSession, input DebugInput) (string, error) {
 	// Parse breakpoints JSON
 	var bps []breakpointSpec
 	if input.Breakpoints != "" {
-		if err := json.Unmarshal([]byte(input.Breakpoints), &bps); err != nil {
+		if err := json.Unmarshal(normalizeBPJSON([]byte(input.Breakpoints)), &bps); err != nil {
 			return "", fmt.Errorf("invalid breakpoints JSON: %w", err)
 		}
 	}
@@ -974,11 +974,53 @@ func checkSessionAlive(session *debugSession) error {
 // --- Helper types and functions ---
 
 // breakpointSpec is the JSON schema for user-provided breakpoint entries.
+// JSON tags use camelCase (DAP standard). snake_case is also accepted
+// via normalizeBPJSON preprocessing.
 type breakpointSpec struct {
 	Line         int    `json:"line"`
 	Condition    string `json:"condition,omitempty"`
-	HitCondition string `json:"hit_condition,omitempty"`
-	LogMessage   string `json:"log_message,omitempty"`
+	HitCondition string `json:"hitCondition,omitempty"`
+	LogMessage   string `json:"logMessage,omitempty"`
+}
+
+// snakeToCamelBP maps snake_case breakpoint JSON keys to their DAP camelCase
+// equivalents. Both conventions are accepted for user convenience.
+var snakeToCamelBP = map[string]string{
+	"hit_condition":         "hitCondition",
+	"log_message":           "logMessage",
+	"instruction_reference": "instructionReference",
+	"data_id":               "dataId",
+	"access_type":           "accessType",
+}
+
+// normalizeBPJSON converts snake_case keys in a breakpoint JSON array to
+// camelCase so both conventions are accepted. Returns original data on error.
+func normalizeBPJSON(data []byte) []byte {
+	var items []map[string]json.RawMessage
+	if err := json.Unmarshal(data, &items); err != nil {
+		return data
+	}
+	changed := false
+	for i, item := range items {
+		for snake, camel := range snakeToCamelBP {
+			if v, ok := item[snake]; ok {
+				if _, exists := item[camel]; !exists {
+					item[camel] = v
+				}
+				delete(item, snake)
+				changed = true
+			}
+		}
+		items[i] = item
+	}
+	if !changed {
+		return data
+	}
+	result, err := json.Marshal(items)
+	if err != nil {
+		return data
+	}
+	return result
 }
 
 // resolveThreadID returns the thread ID to use for continue/step/pause.

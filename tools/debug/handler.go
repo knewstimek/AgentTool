@@ -28,7 +28,7 @@ type DebugInput struct {
 
 	// set_breakpoints: breakpoint configuration
 	SourcePath  string `json:"source_path,omitempty" jsonschema:"Absolute source file path for breakpoints"`
-	Breakpoints string `json:"breakpoints,omitempty" jsonschema:"JSON array of breakpoints: [{line: N, condition: '...', hit_condition: '...', log_message: '...'}]"`
+	Breakpoints string `json:"breakpoints,omitempty" jsonschema:"JSON array of breakpoints: [{line: N, condition: '...', hitCondition: '...', logMessage: '...'}]"`
 
 	// set_exception_breakpoints
 	Filters string `json:"filters,omitempty" jsonschema:"JSON array of exception filter IDs for set_exception_breakpoints (e.g. [\"raised\",\"uncaught\"])"`

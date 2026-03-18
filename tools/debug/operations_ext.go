@@ -69,10 +69,10 @@ func opSetFunctionBreakpoints(session *debugSession, input DebugInput) (string, 
 	var bps []struct {
 		Name         string `json:"name"`
 		Condition    string `json:"condition,omitempty"`
-		HitCondition string `json:"hit_condition,omitempty"`
+		HitCondition string `json:"hitCondition,omitempty"`
 	}
 	if input.Breakpoints != "" {
-		if err := json.Unmarshal([]byte(input.Breakpoints), &bps); err != nil {
+		if err := json.Unmarshal(normalizeBPJSON([]byte(input.Breakpoints)), &bps); err != nil {
 			return "", fmt.Errorf("invalid breakpoints JSON: %w", err)
 		}
 	}
@@ -142,13 +142,13 @@ func opSetDataBreakpoints(session *debugSession, input DebugInput) (string, erro
 	timeout := resolveTimeout(input.TimeoutSec)
 
 	var bps []struct {
-		DataID       string `json:"data_id"`
-		AccessType   string `json:"access_type,omitempty"`
+		DataID       string `json:"dataId"`
+		AccessType   string `json:"accessType,omitempty"`
 		Condition    string `json:"condition,omitempty"`
-		HitCondition string `json:"hit_condition,omitempty"`
+		HitCondition string `json:"hitCondition,omitempty"`
 	}
 	if input.Breakpoints != "" {
-		if err := json.Unmarshal([]byte(input.Breakpoints), &bps); err != nil {
+		if err := json.Unmarshal(normalizeBPJSON([]byte(input.Breakpoints)), &bps); err != nil {
 			return "", fmt.Errorf("invalid breakpoints JSON: %w", err)
 		}
 	}
@@ -236,13 +236,13 @@ func opSetInstructionBreakpoints(session *debugSession, input DebugInput) (strin
 	timeout := resolveTimeout(input.TimeoutSec)
 
 	var bps []struct {
-		InstructionReference string `json:"instruction_reference"`
+		InstructionReference string `json:"instructionReference"`
 		Offset               int    `json:"offset,omitempty"`
 		Condition            string `json:"condition,omitempty"`
-		HitCondition         string `json:"hit_condition,omitempty"`
+		HitCondition         string `json:"hitCondition,omitempty"`
 	}
 	if input.Breakpoints != "" {
-		if err := json.Unmarshal([]byte(input.Breakpoints), &bps); err != nil {
+		if err := json.Unmarshal(normalizeBPJSON([]byte(input.Breakpoints)), &bps); err != nil {
 			return "", fmt.Errorf("invalid breakpoints JSON: %w", err)
 		}
 	}

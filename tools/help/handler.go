@@ -848,9 +848,9 @@ It works with any language that has a DAP-compatible debug adapter.
   Breakpoints:
     set_function_breakpoints: breakpoints='[{"name":"main.Run"}]'
     set_exception_breakpoints: filters='["raised","uncaught"]'
-    set_data_breakpoints: breakpoints='[{"data_id":"...","access_type":"write"}]'
+    set_data_breakpoints: breakpoints='[{"dataId":"...","accessType":"write"}]'
     data_breakpoint_info: query if data breakpoint can be set (name + variables_reference)
-    set_instruction_breakpoints: breakpoints='[{"instruction_reference":"0x4000"}]'
+    set_instruction_breakpoints: breakpoints='[{"instructionReference":"0x4000"}]'
 
   Execution control:
     step_back / reverse_continue: reverse debugging (adapter must support)
