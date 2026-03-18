@@ -183,7 +183,8 @@ func opFunctionAt(input AnalyzeInput) (string, error) {
 
 	n, err := fh.ReadAt(pdataData, int64(fileOff))
 	if err != nil && n == 0 {
-		return "", fmt.Errorf("cannot read .pdata: %w", err)
+		return "", fmt.Errorf("cannot read .pdata at file offset 0x%x (expected %d bytes). "+
+			"The PE may be truncated or packed. Try using disassemble with va parameter instead", fileOff, pdataSize)
 	}
 	pdataData = pdataData[:n]
 	actualEntries := uint32(n) / 12
