@@ -1,6 +1,7 @@
 package analyze
 
 import (
+	"debug/pe"
 	"fmt"
 	"os"
 	"strconv"
@@ -20,6 +21,58 @@ const (
 // Supports x86 (16/32/64-bit) and ARM (32/64-bit).
 // Reads only the needed portion instead of the entire file to save memory.
 func opDisassemble(input AnalyzeInput) (string, error) {
+	// VA-to-offset: auto-convert virtual address to file offset using PE headers
+	var funcEndFileOff int64 = -1 // function boundary from .pdata (if available)
+	var symbolMap map[uint64]string // VA -> symbol name for annotations
+	if input.VA != "" {
+		va, err := parseHexAddr(input.VA)
+		if err != nil {
+			return "", fmt.Errorf("invalid va: %s", input.VA)
+		}
+		f, err := pe.Open(input.FilePath)
+		if err != nil {
+			return "", fmt.Errorf("va parameter requires a PE file: %w", err)
+		}
+		defer f.Close()
+
+		imageBase := peImageBase(f)
+		if va < imageBase {
+			return "", fmt.Errorf("va 0x%x is below image base 0x%x", va, imageBase)
+		}
+		if va-imageBase > 0xFFFFFFFF {
+			return "", fmt.Errorf("va 0x%x is too far from image base 0x%x (RVA exceeds 4GB)", va, imageBase)
+		}
+		rva := uint32(va - imageBase)
+		fileOff, _, err := rvaToFileOffset(f, rva)
+		if err != nil {
+			return "", fmt.Errorf("va 0x%x: %w", va, err)
+		}
+		input.Offset = int(fileOff)
+
+		if input.BaseAddr == "" {
+			// base_addr maps to file offset 0: displayed_addr = base_addr + fileOffset + pos
+			// For correct VA display: base_addr = VA - fileOffset
+			input.BaseAddr = fmt.Sprintf("0x%x", va-uint64(fileOff))
+		}
+		// Auto-detect CPU mode from PE Machine field
+		if input.Mode == 0 {
+			switch f.FileHeader.Machine {
+			case 0x14c: // IMAGE_FILE_MACHINE_I386
+				input.Mode = 32
+			case 0x8664: // IMAGE_FILE_MACHINE_AMD64
+				input.Mode = 64
+			}
+		}
+
+		// Auto-stop at function boundary: look up .pdata for function end
+		if endOff, ok := pdataFuncEndOffset(f, rva); ok {
+			funcEndFileOff = int64(endOff)
+		}
+
+		// Build symbol map for inline annotations
+		symbolMap = peSymbolMap(f, imageBase)
+	}
+
 	fi, err := os.Stat(input.FilePath)
 	if err != nil {
 		return "", fmt.Errorf("cannot access file: %w", err)
@@ -74,6 +127,13 @@ func opDisassemble(input AnalyzeInput) (string, error) {
 	if int64(offset)+readSize > fileSize {
 		readSize = fileSize - int64(offset)
 	}
+	// Clamp read to function boundary from .pdata (prevents disassembly past function end)
+	if funcEndFileOff > 0 && int64(offset) < funcEndFileOff {
+		funcReadSize := funcEndFileOff - int64(offset)
+		if funcReadSize < readSize {
+			readSize = funcReadSize
+		}
+	}
 
 	f, err := os.Open(input.FilePath)
 	if err != nil {
@@ -105,7 +165,7 @@ func opDisassemble(input AnalyzeInput) (string, error) {
 		}
 		return disasmARM32(data, baseAddr, offset, count)
 	default:
-		return disasmX86(data, baseAddr, offset, count, mode)
+		return disasmX86(data, baseAddr, offset, count, mode, symbolMap)
 	}
 }
 
@@ -131,11 +191,11 @@ func DisasmBytes(data []byte, baseAddr uint64, arch string, mode int, count int)
 		if mode == 0 {
 			mode = 64
 		}
-		return disasmX86(data, baseAddr, 0, count, mode)
+		return disasmX86(data, baseAddr, 0, count, mode, nil)
 	}
 }
 
-func disasmX86(data []byte, baseAddr uint64, offset, count, mode int) (string, error) {
+func disasmX86(data []byte, baseAddr uint64, offset, count, mode int, symbols map[uint64]string) (string, error) {
 	var sb strings.Builder
 	pos := 0
 	decoded := 0
@@ -164,7 +224,13 @@ func disasmX86(data []byte, baseAddr uint64, offset, count, mode int) (string, e
 		// Intel syntax with address context for RIP-relative resolution
 		asmStr := x86asm.IntelSyntax(inst, addr, nil)
 
-		sb.WriteString(fmt.Sprintf("0x%x:  %-30s %s\n", addr, hexStr, asmStr))
+		// Symbol annotation: resolve target addresses to import/export names
+		annotation := resolveSymbol(inst, addr, symbols, mode)
+		if annotation != "" {
+			sb.WriteString(fmt.Sprintf("0x%x:  %-30s %s  ; %s\n", addr, hexStr, asmStr, annotation))
+		} else {
+			sb.WriteString(fmt.Sprintf("0x%x:  %-30s %s\n", addr, hexStr, asmStr))
+		}
 
 		pos += inst.Len
 		decoded++
@@ -228,4 +294,43 @@ func disasmARM32(data []byte, baseAddr uint64, offset, count int) (string, error
 
 	sb.WriteString(fmt.Sprintf("\n(%d instructions from offset 0x%x, arch=arm, mode=32)", decoded, offset))
 	return sb.String(), nil
+}
+
+// resolveSymbol looks up target addresses in the symbol map for CALL/JMP/LEA instructions.
+// Returns the symbol name if found, empty string otherwise.
+func resolveSymbol(inst x86asm.Inst, instrAddr uint64, symbols map[uint64]string, mode int) string {
+	if len(symbols) == 0 {
+		return ""
+	}
+
+	nextAddr := instrAddr + uint64(inst.Len)
+
+	for _, arg := range inst.Args {
+		if arg == nil {
+			break
+		}
+		switch a := arg.(type) {
+		case x86asm.Rel:
+			// E8/E9 relative CALL/JMP: target = instrAddr + instLen + rel
+			target := nextAddr + uint64(int64(a))
+			if name, ok := symbols[target]; ok {
+				return name
+			}
+		case x86asm.Mem:
+			// RIP-relative memory: FF 15 [rip+disp32], LEA reg, [rip+disp32]
+			if mode == 64 && a.Base == x86asm.RIP && a.Index == 0 && a.Scale == 0 {
+				target := nextAddr + uint64(int64(a.Disp))
+				if name, ok := symbols[target]; ok {
+					return name
+				}
+			}
+		case x86asm.Imm:
+			// Immediate address (32-bit mode): PUSH addr, CALL addr
+			target := uint64(a)
+			if name, ok := symbols[target]; ok {
+				return name
+			}
+		}
+	}
+	return ""
 }

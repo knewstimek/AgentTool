@@ -533,19 +533,26 @@ Disassemble machine code. Supports x86 (16/32/64-bit) and ARM (32/64-bit).
           offset=0, count=50, mode=64, arch="arm")
 
   Parameters:
-    arch: CPU architecture — "x86" (default) or "arm"
+    arch: CPU architecture -- "x86" (default) or "arm"
     offset: Byte offset in the file to start from (default: 0)
+    va: Virtual address (hex) -- auto-converts to file offset using PE headers.
+        Also auto-sets base_addr to ImageBase and mode from PE Machine field.
+        Example: va="0x140001000" (PE only)
     count: Number of instructions to decode (default: 50, max: 200)
-    mode: CPU mode — x86: 16/32/64, arm: 32/64 (default: 64)
+    mode: CPU mode -- x86: 16/32/64, arm: 32/64 (default: 64)
     base_addr: Base address mapped to file offset 0 (hex string, default: "0").
                Displayed address = base_addr + offset + position.
                For PE files, use ImageBase (e.g. 0x140000000), not section VA.
 
-  Output: address: hex_bytes    assembly
+  When using va=, disassembly auto-stops at the function boundary (via .pdata)
+  if available, preventing disassembly into the next function.
+  Import/export symbols are annotated inline (e.g. "call [rip+0x1234]  ; CreateFileW").
+
+  Output: address: hex_bytes    assembly  [; symbol]
   x86 uses Intel syntax. Failed decodes show "db 0xNN" / ".word" and skip.
 
 ### pe_info
-Parse PE (Portable Executable) headers — Windows EXE, DLL, .node files.
+Parse PE (Portable Executable) headers -- Windows EXE, DLL, .node files.
   analyze(operation="pe_info", file_path="/path/to/file.dll")
   analyze(operation="pe_info", file_path="/path/to/file.dll", section=".text")
 
@@ -553,15 +560,18 @@ Parse PE (Portable Executable) headers — Windows EXE, DLL, .node files.
     - Machine type, image base, entry point, number of sections
     - Section table: Name, VirtualAddress, VirtualSize, RawOffset, RawSize, Permissions
     - Section permissions (R/W/X, CODE/DATA) with ⚠ W+X warnings for suspicious sections
-    - Imports: grouped by DLL with function names
+    - Imports: grouped by DLL with IAT slot VAs (for xref cross-referencing)
     - Exports: function names with RVAs (if present)
-    - RVA→FileOffset conversion table for each section
+    - RVA->FileOffset conversion table for each section
 
   Parameters:
     section: Filter to show only a specific section (e.g. ".text", ".rdata")
+             Use section=".pdata" to show all RUNTIME_FUNCTION entries as a
+             function table with Start VA, End VA, Size, and Unwind RVA.
+             Use section=".text" to auto-disassemble from the entry point.
     rva: Convert an RVA to file offset (hex string, e.g. "0x36A20")
 
-  Use the RVA→FileOffset table to convert runtime addresses to file offsets
+  Use the RVA->FileOffset table to convert runtime addresses to file offsets
   for targeted disassembly or hexdump.
 
 ### elf_info
@@ -600,15 +610,16 @@ Extract printable strings from a binary file.
           min_length=6, max_results=100)
 
   Two extraction modes:
-    mode="" (default): ASCII strings (bytes 0x20-0x7E)
-    mode="utf8": UTF-8 strings (multi-byte aware, filters non-printable runes)
+    encoding="ascii" (default): ASCII strings (bytes 0x20-0x7E)
+    encoding="utf8": UTF-8 strings (multi-byte aware, filters non-printable runes)
 
   Parameters:
     min_length: Minimum string length (default: 4)
     max_results: Maximum number of results (default: 500, max: 2000)
-    mode: Extraction mode — "" for ASCII (default), "utf8" for UTF-8
+    encoding: String encoding -- "ascii" (default) or "utf8"
 
   Output: offset: "string content"
+  For PE files, VA is shown alongside file offset: offset (VA): "string"
 
 ### hexdump
 Display raw bytes in hex + ASCII format.
@@ -634,7 +645,8 @@ Search for hex byte patterns with wildcard support.
     pattern: Hex byte pattern (e.g. "4D 5A ?? ?? 50 45")
     max_results: Maximum matches to return (default: 100, max: 500)
 
-  Uses chunked file reading with overlap — handles multi-GB files efficiently.
+  For PE files, VA is shown alongside file offset in results.
+  Uses chunked file reading with overlap -- handles multi-GB files efficiently.
 
 ### entropy
 Calculate Shannon entropy per section.
@@ -715,19 +727,52 @@ Extract DWARF debug information from PE, ELF, or Mach-O binaries.
     - Variable/parameter and type counts
     - "Binary appears stripped" if no DWARF data found
 
+### xref
+Find all code locations that reference a target address (PE only).
+  analyze(operation="xref", file_path="/path/to/binary.exe",
+          target_va="0x140001000")
+
+  Scans executable sections for instruction patterns that reference the target:
+    x64: E8/E9 (CALL/JMP relative), 0F 8x (Jcc), LEA [rip+disp32],
+         FF 15/25 (indirect CALL/JMP [rip+disp32]), MOV [rip+disp32]
+    x86: E8/E9 (relative), 0F 8x (Jcc), 68 imm32 (PUSH absolute)
+
+  Parameters:
+    target_va: Virtual address to find references to (hex, required)
+    max_results: Maximum results (default: 200, max: 1000)
+
+  Auto-detects x86 vs x64 from PE Machine field.
+
+### function_at
+Find function boundaries using PE .pdata (Exception Table). x64 PE only.
+  analyze(operation="function_at", file_path="/path/to/binary.exe",
+          va="0x140001000")
+
+  Uses RUNTIME_FUNCTION entries in .pdata to determine function start/end.
+  Also auto-disassembles the function (use count to control instruction limit).
+
+  Parameters:
+    va: Virtual address inside the function (hex, required)
+    count: Max instructions to disassemble (default: 50, max: 200)
+
+  Note: .pdata is x64-only. Leaf functions may not have entries.
+  Returns function start, end, size, unwind RVA, and disassembly.
+
 ## Typical Workflow
 
-1. pe_info/elf_info/macho_info → Get section layout, check for W+X sections
-2. entropy → Identify packed/encrypted sections (entropy > 7.0)
-3. overlay_detect → Check for appended payloads
-4. imphash → Classify by import table fingerprint
-5. rich_header → Identify build tools (PE only)
-6. strings → Find interesting strings, API names, error messages
-7. pattern_search → Locate specific byte sequences (signatures, opcodes)
-8. hexdump → Examine specific data regions at file offsets
-9. disassemble → Decode machine code at specific offsets
-10. dwarf_info → Extract debug symbols and function names
-11. bin_diff → Compare original vs patched versions
+1. pe_info/elf_info/macho_info -- Get section layout, check for W+X sections
+2. entropy -- Identify packed/encrypted sections (entropy > 7.0)
+3. overlay_detect -- Check for appended payloads
+4. imphash -- Classify by import table fingerprint
+5. rich_header -- Identify build tools (PE only)
+6. strings -- Find interesting strings, API names, error messages
+7. pattern_search -- Locate specific byte sequences (signatures, opcodes)
+8. hexdump -- Examine specific data regions at file offsets
+9. disassemble -- Decode machine code (use va= for PE virtual addresses)
+10. function_at -- Find function boundaries via .pdata (PE x64)
+11. xref -- Find all call/jump/data references to an address (PE)
+12. dwarf_info -- Extract debug symbols and function names
+13. bin_diff -- Compare original vs patched versions
 
 ### Example: Analyzing a DLL
   # Step 1: Get PE layout

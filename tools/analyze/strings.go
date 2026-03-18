@@ -1,11 +1,51 @@
 package analyze
 
 import (
+	"debug/pe"
 	"fmt"
 	"os"
 	"strings"
 	"unicode/utf8"
 )
+
+// peVAMapper provides file-offset-to-VA conversion for PE files.
+// nil means no PE mapping (non-PE file or parse failure).
+type peVAMapper struct {
+	file      *pe.File
+	imageBase uint64
+}
+
+// toVA converts a file offset to a VA string. Returns "" if unmappable.
+func (m *peVAMapper) toVA(fileOff int) string {
+	if m == nil {
+		return ""
+	}
+	rva, ok := fileOffsetToRVA(m.file, uint32(fileOff))
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf("0x%x", m.imageBase+uint64(rva))
+}
+
+// tryPEMapper attempts to open the file as PE and create a VA mapper.
+func tryPEMapper(filePath string) *peVAMapper {
+	f, err := pe.Open(filePath)
+	if err != nil {
+		return nil
+	}
+	ib := peImageBase(f)
+	if ib == 0 {
+		f.Close()
+		return nil
+	}
+	return &peVAMapper{file: f, imageBase: ib}
+}
+
+func (m *peVAMapper) close() {
+	if m != nil && m.file != nil {
+		m.file.Close()
+	}
+}
 
 const (
 	defaultMinLength  = 4
@@ -39,28 +79,32 @@ func opStrings(input AnalyzeInput) (string, error) {
 		enc = "ascii"
 	}
 
+	// PE VA mapping: show VA alongside file offset for PE files
+	mapper := tryPEMapper(input.FilePath)
+	defer mapper.close()
+
 	var sb strings.Builder
 	var found int
 
 	switch enc {
 	case "ascii":
-		found = extractASCII(data, minLen, maxRes, &sb)
+		found = extractASCII(data, minLen, maxRes, mapper, &sb)
 	case "utf8", "utf-8":
-		found = extractUTF8(data, minLen, maxRes, &sb)
+		found = extractUTF8(data, minLen, maxRes, mapper, &sb)
 	default:
 		return "", fmt.Errorf("unsupported encoding: %s (use ascii or utf8)", enc)
 	}
 
 	sb.WriteString(fmt.Sprintf("\n(%d strings found, min_length=%d, encoding=%s)", found, minLen, enc))
 	if found >= maxRes {
-		sb.WriteString(fmt.Sprintf(" — truncated at max_results=%d", maxRes))
+		sb.WriteString(fmt.Sprintf(" -- truncated at max_results=%d", maxRes))
 	}
 
 	return sb.String(), nil
 }
 
 // extractASCII finds runs of printable ASCII characters (0x20-0x7E).
-func extractASCII(data []byte, minLen, maxRes int, sb *strings.Builder) int {
+func extractASCII(data []byte, minLen, maxRes int, mapper *peVAMapper, sb *strings.Builder) int {
 	found := 0
 	start := -1
 
@@ -73,7 +117,7 @@ func extractASCII(data []byte, minLen, maxRes int, sb *strings.Builder) int {
 			if start >= 0 {
 				length := i - start
 				if length >= minLen {
-					sb.WriteString(fmt.Sprintf("0x%06x: %s\n", start, string(data[start:i])))
+					writeStringEntry(sb, start, string(data[start:i]), mapper)
 					found++
 					if found >= maxRes {
 						return found
@@ -87,7 +131,7 @@ func extractASCII(data []byte, minLen, maxRes int, sb *strings.Builder) int {
 	if start >= 0 {
 		length := len(data) - start
 		if length >= minLen {
-			sb.WriteString(fmt.Sprintf("0x%06x: %s\n", start, string(data[start:])))
+			writeStringEntry(sb, start, string(data[start:]), mapper)
 			found++
 		}
 	}
@@ -96,7 +140,7 @@ func extractASCII(data []byte, minLen, maxRes int, sb *strings.Builder) int {
 
 // extractUTF8 finds runs of valid UTF-8 characters (excluding control chars).
 // This catches non-ASCII strings like CJK, Cyrillic, etc.
-func extractUTF8(data []byte, minLen, maxRes int, sb *strings.Builder) int {
+func extractUTF8(data []byte, minLen, maxRes int, mapper *peVAMapper, sb *strings.Builder) int {
 	found := 0
 	start := -1
 	charCount := 0 // count in runes, not bytes
@@ -114,7 +158,7 @@ func extractUTF8(data []byte, minLen, maxRes int, sb *strings.Builder) int {
 			i += size
 		} else {
 			if start >= 0 && charCount >= minLen {
-				sb.WriteString(fmt.Sprintf("0x%06x: %s\n", start, string(data[start:i])))
+				writeStringEntry(sb, start, string(data[start:i]), mapper)
 				found++
 				if found >= maxRes {
 					return found
@@ -126,10 +170,20 @@ func extractUTF8(data []byte, minLen, maxRes int, sb *strings.Builder) int {
 		}
 	}
 	if start >= 0 && charCount >= minLen {
-		sb.WriteString(fmt.Sprintf("0x%06x: %s\n", start, string(data[start:])))
+		writeStringEntry(sb, start, string(data[start:]), mapper)
 		found++
 	}
 	return found
+}
+
+// writeStringEntry formats a string entry with optional VA mapping for PE files.
+func writeStringEntry(sb *strings.Builder, fileOff int, s string, mapper *peVAMapper) {
+	va := mapper.toVA(fileOff)
+	if va != "" {
+		sb.WriteString(fmt.Sprintf("0x%06x (%s): %s\n", fileOff, va, s))
+	} else {
+		sb.WriteString(fmt.Sprintf("0x%06x: %s\n", fileOff, s))
+	}
 }
 
 // isPrintableRune returns true for printable characters (excluding ASCII control chars).

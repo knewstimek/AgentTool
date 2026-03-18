@@ -14,14 +14,15 @@ import (
 
 // AnalyzeInput defines parameters for the static binary analysis tool.
 type AnalyzeInput struct {
-	Operation string `json:"operation" jsonschema:"Operation: disassemble, pe_info, elf_info, macho_info, strings, hexdump, pattern_search, entropy, bin_diff, resource_info, imphash, rich_header, overlay_detect, dwarf_info,required"`
+	Operation string `json:"operation" jsonschema:"Operation: disassemble, pe_info, elf_info, macho_info, strings, hexdump, pattern_search, entropy, bin_diff, resource_info, imphash, rich_header, overlay_detect, dwarf_info, xref, function_at,required"`
 	FilePath  string `json:"file_path" jsonschema:"Absolute path to the binary file,required"`
 
-	// disassemble parameters
+	// disassemble / function_at parameters
 	Offset   int    `json:"offset,omitempty" jsonschema:"Byte offset to start from. Default: 0"`
+	VA       string `json:"va,omitempty" jsonschema:"Virtual address for PE files (hex, e.g. '0x140001000'). Auto-converts to file offset. For disassemble and function_at. Preferred over offset+base_addr for PE analysis: enables correct VA display, symbol annotation, and auto-stop at function boundary."`
 	Count    int    `json:"count,omitempty" jsonschema:"Number of instructions (disassemble). Default: 50, Max: 200"`
 	Mode     int    `json:"mode,omitempty" jsonschema:"CPU mode: 32 or 64. Default: 64"`
-	BaseAddr string `json:"base_addr,omitempty" jsonschema:"Base address for display (hex string, e.g. '0x140001000'). Default: 0x0. This maps to file offset 0, so displayed address = base_addr + offset + instruction_position. For PE .text section: use ImageBase (not section VA) for correct addresses."`
+	BaseAddr string `json:"base_addr,omitempty" jsonschema:"Base address for display (hex string, e.g. '0x140001000'). Default: 0x0. This maps to file offset 0, so displayed address = base_addr + offset + instruction_position. For PE files, prefer 'va' parameter instead -- it auto-calculates the correct base_addr."`
 	Arch     string `json:"arch,omitempty" jsonschema:"CPU architecture: x86 (default) or arm. For disassemble"`
 
 	// strings parameters
@@ -38,6 +39,9 @@ type AnalyzeInput struct {
 
 	// pattern_search parameters
 	Pattern string `json:"pattern,omitempty" jsonschema:"Hex byte pattern with ?? wildcards (e.g. '4D 5A ?? ?? 50 45'). For pattern_search"`
+
+	// xref parameters
+	TargetVA string `json:"target_va,omitempty" jsonschema:"Target virtual address to find references to (hex). For xref operation."`
 
 	// bin_diff parameters
 	FilePathB string `json:"file_path_b,omitempty" jsonschema:"Absolute path to the second file for bin_diff comparison"`
@@ -63,12 +67,14 @@ var validOperations = map[string]bool{
 	"rich_header":    true,
 	"overlay_detect": true,
 	"dwarf_info":     true,
+	"xref":           true,
+	"function_at":    true,
 }
 
 // Handle dispatches to the appropriate operation.
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input AnalyzeInput) (*mcp.CallToolResult, AnalyzeOutput, error) {
 	op := strings.ToLower(strings.TrimSpace(input.Operation))
-	allOps := "disassemble, pe_info, elf_info, macho_info, strings, hexdump, pattern_search, entropy, bin_diff, resource_info, imphash, rich_header, overlay_detect, dwarf_info"
+	allOps := "disassemble, pe_info, elf_info, macho_info, strings, hexdump, pattern_search, entropy, bin_diff, resource_info, imphash, rich_header, overlay_detect, dwarf_info, xref, function_at"
 	if op == "" {
 		return errorResult("operation is required (" + allOps + ")")
 	}
@@ -140,6 +146,10 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input AnalyzeInput) (
 		result, err = opOverlayDetect(input)
 	case "dwarf_info":
 		result, err = opDWARFInfo(input)
+	case "xref":
+		result, err = opXref(input)
+	case "function_at":
+		result, err = opFunctionAt(input)
 	}
 
 	if err != nil {
@@ -162,8 +172,12 @@ strings (extract printable strings from binary), hexdump (hex+ASCII view),
 pattern_search (hex byte pattern with ?? wildcards), entropy (Shannon entropy per section),
 bin_diff (two-file byte comparison), resource_info (PE resources and version info),
 imphash (PE import hash for malware classification), rich_header (PE build tool fingerprint),
-overlay_detect (detect appended data after last section), dwarf_info (debug symbol info).
-Pure Go implementation — no external tools needed. Supports x86, x64, ARM, ARM64.
+overlay_detect (detect appended data after last section), dwarf_info (debug symbol info),
+xref (find all code references to a target address in PE),
+function_at (find function boundaries via PE .pdata).
+Pure Go implementation -- no external tools needed. Supports x86, x64, ARM, ARM64.
+For PE files: use 'va' parameter instead of 'offset' for auto VA display, symbol annotation, and function boundary detection.
+PE strings/pattern_search automatically show VA alongside file offsets.
 For runtime debugging, use the debug tool instead.`,
 	}, Handle)
 }

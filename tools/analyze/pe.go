@@ -118,39 +118,8 @@ func opPEInfo(input AnalyzeInput) (string, error) {
 		}
 	}
 
-	// Imports
-	imports, err := f.ImportedSymbols()
-	if err == nil && len(imports) > 0 {
-		// Group by DLL
-		dllMap := make(map[string][]string)
-		var dllOrder []string
-		for _, sym := range imports {
-			// Format: "DLLName:FunctionName"
-			parts := strings.SplitN(sym, ":", 2)
-			if len(parts) == 2 {
-				dll := parts[0]
-				fn := parts[1]
-				if _, exists := dllMap[dll]; !exists {
-					dllOrder = append(dllOrder, dll)
-				}
-				dllMap[dll] = append(dllMap[dll], fn)
-			}
-		}
-
-		sb.WriteString(fmt.Sprintf("\nImports (%d DLLs, %d functions):\n", len(dllOrder), len(imports)))
-		for _, dll := range dllOrder {
-			fns := dllMap[dll]
-			sb.WriteString(fmt.Sprintf("  %s (%d):", dll, len(fns)))
-			// Show first few functions inline, rest as count
-			if len(fns) <= 5 {
-				sb.WriteString(" " + strings.Join(fns, ", "))
-			} else {
-				sb.WriteString(" " + strings.Join(fns[:5], ", "))
-				sb.WriteString(fmt.Sprintf(" ... +%d more", len(fns)-5))
-			}
-			sb.WriteString("\n")
-		}
-	}
+	// Imports with IAT VA -- parse Import Directory for per-function IAT slot addresses
+	parseImportsWithIAT(f, imageBase, &sb)
 
 	// Exports (manually parse export directory for DLLs)
 	exports := parseExports(f)
@@ -167,19 +136,151 @@ func opPEInfo(input AnalyzeInput) (string, error) {
 		}
 	}
 
-	// Delay imports — DLLs loaded on first call, not at startup
+	// Delay imports -- DLLs loaded on first call, not at startup
 	parseDelayImports(f, &sb)
 
-	// TLS callbacks — code that runs before main(), often used for anti-debug
+	// TLS callbacks -- code that runs before main(), often used for anti-debug
 	parseTLSCallbacks(f, imageBase, &sb)
 
-	// Debug directory — PDB path, GUID, age for symbol server lookups
+	// Debug directory -- PDB path, GUID, age for symbol server lookups
 	parseDebugDirectory(f, &sb)
 
-	// Load config — SEH, CFG, security cookie
+	// Load config -- SEH, CFG, security cookie
 	parseLoadConfig(f, &sb)
 
+	// .pdata function list when section=".pdata" is requested
+	if strings.EqualFold(filterSection, ".pdata") {
+		parsePdataFunctionList(f, imageBase, &sb)
+	}
+
+	// Auto-disassemble entry point when section=".text" is requested
+	if strings.EqualFold(filterSection, ".text") {
+		parseTextEntryDisasm(f, imageBase, input, &sb)
+	}
+
 	return sb.String(), nil
+}
+
+// parseTextEntryDisasm auto-disassembles from the entry point when section=".text" is filtered.
+func parseTextEntryDisasm(f *pe.File, imageBase uint64, input AnalyzeInput, sb *strings.Builder) {
+	var entryRVA uint32
+	switch oh := f.OptionalHeader.(type) {
+	case *pe.OptionalHeader32:
+		entryRVA = oh.AddressOfEntryPoint
+	case *pe.OptionalHeader64:
+		entryRVA = oh.AddressOfEntryPoint
+	}
+	if entryRVA == 0 {
+		return
+	}
+
+	count := input.Count
+	if count <= 0 {
+		count = 30 // fewer by default for pe_info context
+	}
+	if count > maxDisasmCount {
+		count = maxDisasmCount
+	}
+
+	mode := 64
+	if f.FileHeader.Machine == 0x14c {
+		mode = 32
+	}
+
+	fileOff, _, err := rvaToFileOffset(f, entryRVA)
+	if err != nil {
+		return
+	}
+
+	disasmInput := AnalyzeInput{
+		FilePath: input.FilePath,
+		Offset:   int(fileOff),
+		Count:    count,
+		Mode:     mode,
+		Arch:     "x86",
+		VA:       fmt.Sprintf("0x%x", imageBase+uint64(entryRVA)),
+	}
+
+	disasm, disErr := opDisassemble(disasmInput)
+	if disErr != nil {
+		return
+	}
+
+	sb.WriteString(fmt.Sprintf("\nEntry Point Disassembly (VA: 0x%x, first %d instructions):\n", imageBase+uint64(entryRVA), count))
+	for _, line := range strings.Split(disasm, "\n") {
+		if line != "" && !strings.HasPrefix(line, "(") {
+			sb.WriteString("  " + line + "\n")
+		}
+	}
+}
+
+// parsePdataFunctionList outputs all RUNTIME_FUNCTION entries from .pdata as a function table.
+func parsePdataFunctionList(f *pe.File, imageBase uint64, sb *strings.Builder) {
+	oh64, ok := f.OptionalHeader.(*pe.OptionalHeader64)
+	if !ok {
+		sb.WriteString("\n.pdata function table requires x64 PE\n")
+		return
+	}
+	if len(oh64.DataDirectory) <= 3 {
+		sb.WriteString("\nNo Exception Table in PE\n")
+		return
+	}
+	excDir := oh64.DataDirectory[3]
+	if excDir.VirtualAddress == 0 || excDir.Size == 0 {
+		sb.WriteString("\nException Table (.pdata) is empty\n")
+		return
+	}
+
+	// Find section containing .pdata
+	var pdataData []byte
+	for _, s := range f.Sections {
+		if excDir.VirtualAddress >= s.VirtualAddress &&
+			excDir.VirtualAddress < s.VirtualAddress+s.VirtualSize {
+			secData, err := s.Data()
+			if err != nil {
+				sb.WriteString(fmt.Sprintf("\nCannot read .pdata section: %v\n", err))
+				return
+			}
+			off := excDir.VirtualAddress - s.VirtualAddress
+			end := off + excDir.Size
+			if int(end) > len(secData) {
+				end = uint32(len(secData))
+			}
+			pdataData = secData[off:end]
+			break
+		}
+	}
+
+	entryCount := len(pdataData) / 12
+	if entryCount == 0 {
+		sb.WriteString("\n.pdata has no entries\n")
+		return
+	}
+
+	sb.WriteString(fmt.Sprintf("\nFunction Table (.pdata, %d entries):\n", entryCount))
+	sb.WriteString(fmt.Sprintf("  %-20s %-20s %-10s %s\n", "Start VA", "End VA", "Size", "Unwind RVA"))
+
+	shown := 0
+	const maxShown = 500
+	for i := 0; i < entryCount; i++ {
+		off := i * 12
+		begin := binary.LittleEndian.Uint32(pdataData[off:])
+		end := binary.LittleEndian.Uint32(pdataData[off+4:])
+		unwind := binary.LittleEndian.Uint32(pdataData[off+8:])
+
+		if begin >= end {
+			continue // skip corrupted entries
+		}
+
+		size := end - begin
+		sb.WriteString(fmt.Sprintf("  0x%-18x 0x%-18x %-10d 0x%x\n",
+			imageBase+uint64(begin), imageBase+uint64(end), size, unwind))
+		shown++
+		if shown >= maxShown {
+			sb.WriteString(fmt.Sprintf("  ... truncated at %d entries (total: %d)\n", maxShown, entryCount))
+			break
+		}
+	}
 }
 
 // peSectionFlags converts PE section characteristics to a human-readable permission string.
@@ -974,4 +1075,308 @@ func decodeGuardFlags(flags uint32) string {
 		}
 	}
 	return strings.Join(parts, ", ")
+}
+
+// parseHexAddr parses a hex string (with or without 0x prefix) to uint64.
+func parseHexAddr(s string) (uint64, error) {
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "0x")
+	s = strings.TrimPrefix(s, "0X")
+	if s == "" {
+		return 0, fmt.Errorf("empty address")
+	}
+	return strconv.ParseUint(s, 16, 64)
+}
+
+// fileOffsetToRVA converts a file offset to an RVA using section headers.
+// Returns 0 and false if the offset is not within any section.
+func fileOffsetToRVA(f *pe.File, fileOff uint32) (uint32, bool) {
+	for _, s := range f.Sections {
+		secStart := s.Offset
+		secEnd := s.Offset + s.Size
+		if fileOff >= secStart && fileOff < secEnd {
+			return s.VirtualAddress + (fileOff - secStart), true
+		}
+	}
+	return 0, false
+}
+
+// parseImportsWithIAT parses the Import Directory to show per-function IAT slot VAs.
+// IAT VAs are what FF 15/25 [rip+disp32] instructions reference, making them
+// essential for xref cross-referencing.
+func parseImportsWithIAT(f *pe.File, imageBase uint64, sb *strings.Builder) {
+	var importDir pe.DataDirectory
+	var is64 bool
+	switch oh := f.OptionalHeader.(type) {
+	case *pe.OptionalHeader32:
+		if len(oh.DataDirectory) > 1 {
+			importDir = oh.DataDirectory[1]
+		}
+	case *pe.OptionalHeader64:
+		if len(oh.DataDirectory) > 1 {
+			importDir = oh.DataDirectory[1]
+		}
+		is64 = true
+	}
+
+	if importDir.VirtualAddress == 0 || importDir.Size == 0 {
+		// Fallback to Go's ImportedSymbols (no IAT info)
+		imports, err := f.ImportedSymbols()
+		if err == nil && len(imports) > 0 {
+			sb.WriteString(fmt.Sprintf("\nImports (%d functions, no IAT info):\n", len(imports)))
+			for _, sym := range imports {
+				sb.WriteString(fmt.Sprintf("  %s\n", sym))
+			}
+		}
+		return
+	}
+
+	// Find section containing import directory
+	var sec *pe.Section
+	for _, s := range f.Sections {
+		if importDir.VirtualAddress >= s.VirtualAddress &&
+			importDir.VirtualAddress < s.VirtualAddress+s.VirtualSize {
+			sec = s
+			break
+		}
+	}
+	if sec == nil {
+		return
+	}
+
+	secData, err := sec.Data()
+	if err != nil {
+		return
+	}
+
+	dirOff := importDir.VirtualAddress - sec.VirtualAddress
+
+	// Parse IMAGE_IMPORT_DESCRIPTOR entries (20 bytes each, null-terminated)
+	type importDLL struct {
+		name       string
+		iatRVA     uint32 // FirstThunk RVA (IAT base for this DLL)
+		thunkRVA   uint32 // OriginalFirstThunk RVA (for name lookup)
+	}
+
+	var dlls []importDLL
+	totalFuncs := 0
+	for i := 0; i < 500; i++ { // safety limit
+		off := int(dirOff) + i*20
+		if off+20 > len(secData) {
+			break
+		}
+
+		origThunk := binary.LittleEndian.Uint32(secData[off:])
+		nameRVA := binary.LittleEndian.Uint32(secData[off+12:])
+		firstThunk := binary.LittleEndian.Uint32(secData[off+16:])
+
+		// All-zero entry terminates
+		if origThunk == 0 && nameRVA == 0 && firstThunk == 0 {
+			break
+		}
+
+		dllName := readPEString(f, nameRVA)
+		if dllName == "" {
+			dllName = fmt.Sprintf("(RVA: 0x%x)", nameRVA)
+		}
+
+		// Prefer OriginalFirstThunk for name lookup (FirstThunk may be overwritten at load time)
+		lookupThunk := origThunk
+		if lookupThunk == 0 {
+			lookupThunk = firstThunk
+		}
+
+		dlls = append(dlls, importDLL{name: dllName, iatRVA: firstThunk, thunkRVA: lookupThunk})
+	}
+
+	ptrSize := uint32(4)
+	if is64 {
+		ptrSize = 8
+	}
+
+	sb.WriteString(fmt.Sprintf("\nImports (%d DLLs):\n", len(dlls)))
+
+	for _, dll := range dlls {
+		// Read thunk array to resolve function names
+		var thunkData []byte
+		for _, s := range f.Sections {
+			if dll.thunkRVA >= s.VirtualAddress &&
+				dll.thunkRVA < s.VirtualAddress+s.VirtualSize {
+				sd, err := s.Data()
+				if err != nil {
+					break
+				}
+				off := dll.thunkRVA - s.VirtualAddress
+				thunkData = sd[off:]
+				break
+			}
+		}
+
+		// Parse each thunk entry to get function name + IAT slot VA
+		type iatEntry struct {
+			va   uint64
+			name string
+		}
+		var entries []iatEntry
+		iatSlotRVA := dll.iatRVA
+		for j := 0; len(thunkData) >= int(ptrSize) && j < 2000; j++ {
+			var thunkVal uint64
+			if is64 {
+				thunkVal = binary.LittleEndian.Uint64(thunkData[:8])
+			} else {
+				thunkVal = uint64(binary.LittleEndian.Uint32(thunkData[:4]))
+			}
+			if thunkVal == 0 {
+				break
+			}
+
+			var funcName string
+			ordinalFlag := uint64(1) << 63
+			if !is64 {
+				ordinalFlag = uint64(1) << 31
+			}
+			if thunkVal&ordinalFlag != 0 {
+				funcName = fmt.Sprintf("Ordinal_%d", thunkVal&0xFFFF)
+			} else {
+				// IMAGE_IMPORT_BY_NAME: 2-byte hint + name string
+				nameRVA := uint32(thunkVal)
+				if nameStr := readPEString(f, nameRVA+2); nameStr != "" {
+					funcName = nameStr
+				} else {
+					funcName = fmt.Sprintf("(RVA: 0x%x)", nameRVA)
+				}
+			}
+
+			entries = append(entries, iatEntry{
+				va:   imageBase + uint64(iatSlotRVA),
+				name: funcName,
+			})
+			thunkData = thunkData[ptrSize:]
+			iatSlotRVA += ptrSize
+			totalFuncs++
+		}
+
+		sb.WriteString(fmt.Sprintf("  %s (%d):\n", dll.name, len(entries)))
+		for _, e := range entries {
+			sb.WriteString(fmt.Sprintf("    0x%x  %s\n", e.va, e.name))
+		}
+	}
+}
+
+// peSymbolMap builds a map of VA -> symbol name from imports (IAT slots) and exports.
+// Used by disassembler for inline annotations (e.g. "call [rip+0x1234] ; CreateFileW").
+func peSymbolMap(f *pe.File, imageBase uint64) map[uint64]string {
+	syms := make(map[uint64]string)
+
+	is64 := false
+	if _, ok := f.OptionalHeader.(*pe.OptionalHeader64); ok {
+		is64 = true
+	}
+
+	ptrSize := uint32(4)
+	if is64 {
+		ptrSize = 8
+	}
+
+	// Imports: map IAT slot VA -> function name
+	var importDir pe.DataDirectory
+	switch oh := f.OptionalHeader.(type) {
+	case *pe.OptionalHeader32:
+		if len(oh.DataDirectory) > 1 {
+			importDir = oh.DataDirectory[1]
+		}
+	case *pe.OptionalHeader64:
+		if len(oh.DataDirectory) > 1 {
+			importDir = oh.DataDirectory[1]
+		}
+	}
+	if importDir.VirtualAddress != 0 && importDir.Size != 0 {
+		var sec *pe.Section
+		for _, s := range f.Sections {
+			if importDir.VirtualAddress >= s.VirtualAddress &&
+				importDir.VirtualAddress < s.VirtualAddress+s.VirtualSize {
+				sec = s
+				break
+			}
+		}
+		if sec != nil {
+			if secData, err := sec.Data(); err == nil {
+				dirOff := importDir.VirtualAddress - sec.VirtualAddress
+				for i := 0; i < 500; i++ {
+					off := int(dirOff) + i*20
+					if off+20 > len(secData) {
+						break
+					}
+					origThunk := binary.LittleEndian.Uint32(secData[off:])
+					nameRVA := binary.LittleEndian.Uint32(secData[off+12:])
+					firstThunk := binary.LittleEndian.Uint32(secData[off+16:])
+					if origThunk == 0 && nameRVA == 0 && firstThunk == 0 {
+						break
+					}
+					lookupThunk := origThunk
+					if lookupThunk == 0 {
+						lookupThunk = firstThunk
+					}
+					// Read thunk array
+					var thunkData []byte
+					for _, s := range f.Sections {
+						if lookupThunk >= s.VirtualAddress &&
+							lookupThunk < s.VirtualAddress+s.VirtualSize {
+							if sd, err := s.Data(); err == nil {
+								thunkData = sd[lookupThunk-s.VirtualAddress:]
+							}
+							break
+						}
+					}
+					iatRVA := firstThunk
+					for j := 0; len(thunkData) >= int(ptrSize) && j < 2000; j++ {
+						var tv uint64
+						if is64 {
+							tv = binary.LittleEndian.Uint64(thunkData[:8])
+						} else {
+							tv = uint64(binary.LittleEndian.Uint32(thunkData[:4]))
+						}
+						if tv == 0 {
+							break
+						}
+						ordFlag := uint64(1) << 63
+						if !is64 {
+							ordFlag = uint64(1) << 31
+						}
+						var name string
+						if tv&ordFlag != 0 {
+							name = fmt.Sprintf("Ordinal_%d", tv&0xFFFF)
+						} else {
+							name = readPEString(f, uint32(tv)+2)
+						}
+						if name != "" {
+							syms[imageBase+uint64(iatRVA)] = name
+						}
+						thunkData = thunkData[ptrSize:]
+						iatRVA += ptrSize
+					}
+				}
+			}
+		}
+	}
+
+	// Exports: map function VA -> name
+	exports := parseExports(f)
+	for _, exp := range exports {
+		va := imageBase + uint64(exp.rva)
+		syms[va] = exp.name
+	}
+
+	return syms
+}
+
+// peImageBase extracts ImageBase from PE OptionalHeader (32 or 64-bit).
+func peImageBase(f *pe.File) uint64 {
+	switch oh := f.OptionalHeader.(type) {
+	case *pe.OptionalHeader32:
+		return uint64(oh.ImageBase)
+	case *pe.OptionalHeader64:
+		return oh.ImageBase
+	}
+	return 0
 }

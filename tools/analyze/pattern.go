@@ -53,6 +53,10 @@ func opPatternSearch(input AnalyzeInput) (string, error) {
 	}
 	fileSize := fi.Size()
 
+	// PE VA mapping: show VA alongside file offset for PE files
+	mapper := tryPEMapper(input.FilePath)
+	defer mapper.close()
+
 	var sb strings.Builder
 	found := 0
 	patLen := len(patternBytes)
@@ -82,9 +86,14 @@ func opPatternSearch(input AnalyzeInput) (string, error) {
 			}
 
 			if matchPattern(chunk[i:i+patLen], patternBytes, mask) {
-				// Show matched bytes for context
+				// Show matched bytes with optional VA for PE files
 				matchHex := hex.EncodeToString(chunk[i : i+patLen])
-				sb.WriteString(fmt.Sprintf("0x%08x: %s\n", absOffset, formatHexSpaced(matchHex)))
+				va := mapper.toVA(int(absOffset))
+				if va != "" {
+					sb.WriteString(fmt.Sprintf("0x%08x (%s): %s\n", absOffset, va, formatHexSpaced(matchHex)))
+				} else {
+					sb.WriteString(fmt.Sprintf("0x%08x: %s\n", absOffset, formatHexSpaced(matchHex)))
+				}
 				found++
 				if found >= maxRes {
 					break
@@ -98,7 +107,7 @@ func opPatternSearch(input AnalyzeInput) (string, error) {
 
 	sb.WriteString(fmt.Sprintf("\n(%d matches found for pattern '%s')", found, pattern))
 	if found >= maxRes {
-		sb.WriteString(fmt.Sprintf(" — truncated at max_results=%d", maxRes))
+		sb.WriteString(fmt.Sprintf(" -- truncated at max_results=%d", maxRes))
 	}
 
 	return sb.String(), nil
