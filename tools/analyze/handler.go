@@ -166,7 +166,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input AnalyzeInput) (
 
 // Register adds the analyze tool to the MCP server.
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "analyze",
 		Description: `Static binary analysis tool for reverse engineering and debugging.
 Operations: disassemble (x86/x64/ARM/ARM64 disassembly), pe_info (PE header/sections/imports/exports),

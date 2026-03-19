@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 
+	"agent-tool/common"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -158,7 +159,7 @@ func checkDangerousPath(cleaned string) error {
 }
 
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name:        "delete",
 		Description: "Deletes a single file. Safety: no directory/symlink deletion, no path traversal, no system files, TOCTOU protection. Use dry_run=true to preview.",
 	}, Handle)

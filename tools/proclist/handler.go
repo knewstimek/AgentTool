@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"agent-tool/common"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -123,7 +124,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ProcListInput) 
 }
 
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "proclist",
 		Description: `Lists running processes with PID, name, command line, and memory usage.
 Sensitive information in command-line arguments (passwords, tokens) is automatically masked.

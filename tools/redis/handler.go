@@ -195,7 +195,7 @@ func sanitizeError(err error, password string) string {
 }
 
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "redis",
 		Description: `Execute Redis commands on a Redis server.
 Supports all Redis commands (GET, SET, HGETALL, LPUSH, etc.).

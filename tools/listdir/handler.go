@@ -212,7 +212,7 @@ func buildTree(sb *strings.Builder, dir, prefix string, depth, maxDepth int, tot
 }
 
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "listdir",
 		Description: `Lists directory contents.
 Default: flat listing (one path per line, token-efficient for AI agents).

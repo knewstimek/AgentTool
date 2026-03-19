@@ -208,7 +208,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input HTTPReqInput) (
 }
 
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "httpreq",
 		Description: `Execute HTTP requests with any method (GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS).
 Ideal for testing APIs, webhooks, and web services during development.

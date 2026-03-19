@@ -143,7 +143,7 @@ func normalizeYAML(v interface{}) interface{} {
 }
 
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "yamlquery",
 		Description: `Query a YAML file using dot-notation paths without loading the entire file into context.
 Supports nested keys (a.b.c), array indices ([0], [-1] for last), and wildcards ([*] for all elements).

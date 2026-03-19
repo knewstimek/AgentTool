@@ -120,7 +120,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input EditInput) (*mc
 
 // Register registers the Edit tool with the MCP server.
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "edit",
 		Description: `Replaces old_string with new_string in the specified file.
 Smart indentation: auto-converts between tabs and spaces to match the file's style.

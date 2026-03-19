@@ -262,7 +262,7 @@ func stripHTML(s string) string {
 }
 
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "websearch",
 		Description: `Search the web using Brave Search or Naver Search API.
 Requires API key(s) via environment variables:

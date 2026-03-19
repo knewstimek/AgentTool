@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"agent-tool/common"
 	"agent-tool/tools/proclist"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -233,7 +234,7 @@ func execSuspended(input ProcExecInput) (*mcp.CallToolResult, ProcExecOutput, er
 }
 
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "procexec",
 		Description: `Execute a command as a new process. Supports background execution and starting in suspended state.
 WARNING: This tool executes arbitrary commands on the host system. Use with caution.

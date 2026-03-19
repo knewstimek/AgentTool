@@ -487,7 +487,7 @@ func extractTarGz(archive, outputDir string) (int, int, error) {
 // --- Register ---
 
 func RegisterCompress(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "compress",
 		Description: `Compresses files and directories into an archive.
 Supports .zip and .tar.gz formats.
@@ -496,7 +496,7 @@ Output format is determined by the file extension.`,
 }
 
 func RegisterDecompress(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "decompress",
 		Description: `Extracts an archive to a directory.
 Supports .zip and .tar.gz formats.

@@ -129,7 +129,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ReadInput) (*mc
 }
 
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "read",
 		Description: `Reads a file and returns its contents with line numbers.
 Encoding-aware: auto-detects file encoding (UTF-8, EUC-KR, Shift-JIS, etc.).

@@ -107,7 +107,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input RenameInput) (*
 }
 
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name:        "rename",
 		Description: "Renames or moves a file/directory. Atomic operation via os.Rename. Use dry_run=true to preview.",
 	}, Handle)

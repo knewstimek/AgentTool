@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"agent-tool/common"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -239,7 +240,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input DebugInput) (*m
 
 // Register registers the debug tool with the MCP server.
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "debug",
 		Description: `Interactive debugger using Debug Adapter Protocol (DAP).
 Launch and control debug sessions for any language with a DAP-compatible adapter.

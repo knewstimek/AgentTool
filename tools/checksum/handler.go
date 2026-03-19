@@ -86,7 +86,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ChecksumInput) 
 }
 
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "checksum",
 		Description: `Computes a hash checksum of a file.
 Reads the file as raw bytes (no encoding conversion).

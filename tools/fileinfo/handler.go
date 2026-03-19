@@ -97,7 +97,7 @@ Total lines: %d`,
 }
 
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "file_info",
 		Description: `Returns detailed file metadata: size, encoding, line ending, indentation style, and line count.
 Uses the same encoding detection as read/edit (chardet + .editorconfig).`,

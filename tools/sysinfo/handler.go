@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"agent-tool/common"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -96,7 +97,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input SysInfoInput) (
 }
 
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name:        "sysinfo",
 		Description: "Returns system information: OS, CPU cores, RAM, disk space, CPU usage. Set duration_sec (1-20) to measure CPU usage over time.",
 	}, Handle)

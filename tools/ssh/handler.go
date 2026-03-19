@@ -164,7 +164,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input SSHInput) (*mcp
 }
 
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "ssh",
 		Description: `Execute commands on a remote server via SSH.
 Supports password and key-based authentication. SSH agent is used as fallback on Unix.

@@ -71,7 +71,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input DiffInput) (*mc
 }
 
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "diff",
 		Description: `Compares two files and outputs a unified diff.
 Encoding-aware: auto-detects file encoding before comparison.

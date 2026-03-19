@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"agent-tool/common"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -411,7 +412,7 @@ func shouldExclude(name string, relPath string, isDir bool, excludes []string) b
 }
 
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "backup",
 		Description: `Creates a timestamped zip backup of a directory.
 Output: {dirname}_{YYYYMMDD_HHMMSS}.zip

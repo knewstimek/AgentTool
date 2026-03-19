@@ -261,7 +261,7 @@ func formatRecord(rr dns.RR) string {
 }
 
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "dnslookup",
 		Description: `Query DNS records for a hostname.
 Supports record types: A, AAAA, MX, CNAME, TXT, NS, SOA.

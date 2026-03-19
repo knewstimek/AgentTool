@@ -55,7 +55,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input HelpInput) (*mc
 }
 
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "agent_tool_help",
 		Description: `Returns usage guide for agent-tool.
 Call this when you encounter encoding warnings, garbled text, or need to understand agent-tool features.

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"agent-tool/common"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -119,7 +120,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input BashInput) (*mc
 }
 
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "bash",
 		Description: `Execute shell commands with persistent session support.
 Sessions maintain working directory, environment variables, and shell state across calls.

@@ -302,7 +302,7 @@ func sanitizeError(err error, password string) string {
 }
 
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "mysql",
 		Description: `Execute SQL queries on a MySQL/MariaDB database.
 Supports SELECT, INSERT, UPDATE, DELETE, SHOW, DESCRIBE, and other SQL statements.

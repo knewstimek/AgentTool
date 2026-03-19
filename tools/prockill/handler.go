@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"agent-tool/common"
 	"agent-tool/tools/proclist"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -255,7 +256,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ProcKillInput) 
 }
 
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "prockill",
 		Description: `Kills, suspends, or resumes a process by PID or port number.
 Supports tree kill (process + all children), signal selection (kill/term/hup/int/stop/cont).

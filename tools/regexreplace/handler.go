@@ -255,7 +255,7 @@ func isBinaryExt(name string) bool {
 }
 
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "regexreplace",
 		Description: `Performs regex find-and-replace across files.
 Encoding-aware: preserves original file encoding.

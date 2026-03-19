@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"agent-tool/common"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -110,7 +111,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input EnvVarInput) (*
 }
 
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "envvar",
 		Description: `Reads environment variables. Returns a single variable by name, or lists all with optional filter.
 Sensitive values (passwords, tokens, keys) are automatically masked for security.`,

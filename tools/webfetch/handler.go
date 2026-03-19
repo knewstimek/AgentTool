@@ -178,7 +178,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input WebFetchInput) 
 }
 
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "webfetch",
 		Description: `Fetch content from a URL and return it as text.
 HTML pages are automatically converted to Markdown for readability.

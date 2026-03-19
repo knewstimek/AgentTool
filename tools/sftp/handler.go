@@ -191,7 +191,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input SFTPInput) (*mc
 }
 
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "sftp",
 		Description: `Transfer files and manage remote filesystems over SSH (SFTP protocol).
 Reuses SSH session pool — same authentication and session reuse as the ssh tool.

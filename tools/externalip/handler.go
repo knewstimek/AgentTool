@@ -119,7 +119,7 @@ func fetchIP(ctx context.Context, client *http.Client, providerURL string) (stri
 }
 
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "externalip",
 		Description: `Returns your external (public) IP address (both IPv4 and IPv6).
 Queries dedicated IPv4 and IPv6 detection services with automatic fallback.

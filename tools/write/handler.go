@@ -71,7 +71,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input WriteInput) (*m
 }
 
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "write",
 		Description: `Creates or overwrites a file with the given content.
 Encoding-aware: preserves original encoding for existing files, uses .editorconfig hints for new files.

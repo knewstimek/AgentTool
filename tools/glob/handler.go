@@ -184,7 +184,7 @@ func findMatches(baseDir, pattern string) ([]string, error) {
 }
 
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "glob",
 		Description: `Finds files matching a glob pattern.
 Supports ** for recursive directory matching.

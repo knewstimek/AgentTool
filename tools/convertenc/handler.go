@@ -91,7 +91,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ConvertInput) (
 }
 
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "convert_encoding",
 		Description: `Converts a file's encoding to a different character set.
 Reads the file with auto-detected encoding, then rewrites it in the target encoding.

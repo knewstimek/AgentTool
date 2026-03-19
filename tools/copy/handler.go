@@ -324,7 +324,7 @@ func windowsLockedFileFallback(newTmpPath, dst string) (string, error) {
 }
 
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "copy",
 		Description: `Copies a file or directory to a new location.
 File copy uses atomic write (temp file + rename) and preserves permissions.

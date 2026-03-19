@@ -187,7 +187,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input DownloadInput) 
 }
 
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "download",
 		Description: `Download a file from a URL and save it to disk.
 Supports binary and text files. For reading web page content as text, use the webfetch tool.

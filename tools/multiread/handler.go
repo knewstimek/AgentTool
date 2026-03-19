@@ -216,7 +216,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input MultiReadInput)
 }
 
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "multiread",
 		Description: `Reads multiple files in a single call to reduce API round-trips.
 Encoding-aware: auto-detects file encoding for each file.

@@ -172,7 +172,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ConfigInput) (*
 }
 
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "set_config",
 		Description: `Changes agent-tool runtime configuration.
 Supports: fallback_encoding, encoding_warnings, max_file_size_mb, allow_symlinks, workspace.

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"agent-tool/common"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -88,7 +89,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input PortCheckInput)
 }
 
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "portcheck",
 		Description: `Check if a TCP port is open on a host.
 Tests connectivity by attempting a TCP connection with a configurable timeout.

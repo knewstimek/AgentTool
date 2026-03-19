@@ -105,7 +105,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input JSONQueryInput)
 }
 
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "jsonquery",
 		Description: `Query a JSON file using dot-notation paths without loading the entire file into context.
 Supports nested keys (a.b.c), array indices ([0], [-1] for last), and wildcards ([*] for all elements).

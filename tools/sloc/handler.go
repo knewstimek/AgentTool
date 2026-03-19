@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"agent-tool/common"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -379,7 +380,7 @@ func detectByName(name string) string {
 }
 
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "sloc",
 		Description: `Count source lines of code (SLOC) in files or directories.
 Returns per-language summary with file count, total lines, and blank lines.

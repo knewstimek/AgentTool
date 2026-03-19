@@ -214,7 +214,7 @@ func isBinaryExt(name string) bool {
 }
 
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "grep",
 		Description: `Searches file contents for a regex pattern.
 Encoding-aware: auto-detects file encoding.

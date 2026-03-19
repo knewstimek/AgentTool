@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"agent-tool/common"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -114,7 +115,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input WintoolInput) (
 
 // Register adds the wintool to the MCP server.
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "wintool",
 		Description: `Windows GUI automation tool for finding, inspecting, and controlling windows.
 Find windows by title/class/PID, enumerate child controls, capture screenshots (base64 PNG),

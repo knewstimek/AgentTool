@@ -185,7 +185,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input PatchInput) (*m
 }
 
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "patch",
 		Description: `Applies a unified diff patch to a file.
 Parses @@ hunk headers, verifies context lines, and applies changes.

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"agent-tool/common"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -45,7 +46,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input FindToolsInput)
 }
 
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "find_tools",
 		Description: `Discovers installed development tools (compilers, build systems, runtimes) on the system.
 Returns paths and versions for: Go, .NET/MSBuild, Node.js, Python, Java, Rust, C/C++ (GCC/Clang/MSVC), CMake, Make, Git, Docker, Bun, Deno.

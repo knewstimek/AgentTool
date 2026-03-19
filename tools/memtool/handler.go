@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"agent-tool/common"
 	"agent-tool/tools/analyze"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -694,7 +695,7 @@ func compareWithSnapshot(reader ProcessReader, snap *memorySnapshot, maxDiffs in
 
 // Register registers the memtool with the MCP server.
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "memtool",
 		Description: `Process memory tool for reverse engineering and game hacking.
 CheatEngine-style workflow: search → filter → filter → find exact addresses → write.

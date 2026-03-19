@@ -114,7 +114,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input MkdirInput) (*m
 }
 
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "mkdir",
 		Description: `Create a directory. Creates parent directories by default (like mkdir -p).
 Supports permission mode in octal (e.g. 0755, 0700) — applied on Unix/Linux.

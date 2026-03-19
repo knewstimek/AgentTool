@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"agent-tool/common"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -44,7 +45,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input FirewallInput) 
 }
 
 func Register(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+	common.SafeAddTool(server, &mcp.Tool{
 		Name: "firewall",
 		Description: `Reads firewall rules (read-only). Linux: iptables/nftables/firewalld. Windows: netsh advfirewall.
 Use filter to search by rule name or port number. May require elevated privileges on Linux.`,
