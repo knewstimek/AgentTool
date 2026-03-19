@@ -618,7 +618,17 @@ func installTOML(agent agentConfig, exePath string) error {
 		normalizedPath = filepath.ToSlash(exePath)
 	}
 
-	entry := fmt.Sprintf("\n[mcp_servers.agent-tool]\ncommand = %q\nargs = []\nenabled = true\n", normalizedPath)
+	var entry string
+	if agent.name == "Codex CLI" && runtime.GOOS == "windows" {
+		// Codex on Windows: wrap with cmd /c to redirect stderr to NUL.
+		// Codex's MCP client has a bug (Issue #7155) where the stderr pipe
+		// blocks when the server writes to stderr, causing "Transport closed"
+		// errors. Redirecting to NUL eliminates the pipe buffer entirely.
+		entry = fmt.Sprintf("\n[mcp_servers.agent-tool]\ncommand = \"cmd\"\nargs = [\"/c\", %q]\nenabled = true\n",
+			normalizedPath+" 2>NUL")
+	} else {
+		entry = fmt.Sprintf("\n[mcp_servers.agent-tool]\ncommand = %q\nargs = []\nenabled = true\n", normalizedPath)
+	}
 
 	// Read existing file
 	data, err := os.ReadFile(agent.configPath)
