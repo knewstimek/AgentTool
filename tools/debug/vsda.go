@@ -115,12 +115,12 @@ func signVsdaNative(input string) string {
 func signVsdaViaNode(challenge string) (string, error) {
 	vsdaPath, err := findVsdaNode()
 	if err != nil {
-		return "", fmt.Errorf("vsda.node not found: %w (vsdbg requires VS Code's vsda module for handshake signing)")
+		return "", fmt.Errorf("vsda.node not found: %w (vsdbg requires VS Code's vsda module for handshake signing)", err)
 	}
 
 	nodePath, err := findNode()
 	if err != nil {
-		return "", fmt.Errorf("node not found: %w (needed to load vsda.node for vsdbg handshake)")
+		return "", fmt.Errorf("node not found: %w (needed to load vsda.node for vsdbg handshake)", err)
 	}
 
 	// Escape backslashes in paths for JS string literals
