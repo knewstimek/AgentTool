@@ -18,6 +18,16 @@ import (
 //   - lenient int parsing: string values that look like numbers (e.g. "123",
 //     "0x1000") are coerced to integers before schema validation, so agents
 //     don't fail on trivial type mismatches.
+//
+// Differences from mcp.AddTool (intentional trade-offs):
+//   - Uses encoding/json (case-insensitive field matching) instead of SDK's
+//     segmentio/encoding/json (case-sensitive). This is more lenient for agents.
+//   - Out return value is discarded. StructuredContent/OutputSchema not supported.
+//     All current handlers use Out=any with nil output.
+//   - Handler errors are always returned as tool errors (IsError=true), not as
+//     JSON-RPC protocol errors. This lets agents see the error and retry, rather
+//     than getting an opaque transport error. The SDK's jsonrpc.Error type is in
+//     an internal package and cannot be type-asserted here.
 func SafeAddTool[In, Out any](s *mcp.Server, t *mcp.Tool, h mcp.ToolHandlerFor[In, Out]) {
 	toolName := t.Name
 
@@ -38,6 +48,8 @@ func SafeAddTool[In, Out any](s *mcp.Server, t *mcp.Tool, h mcp.ToolHandlerFor[I
 	}
 
 	// Collect which properties are integer-typed for targeted coercion.
+	// Handles both direct "integer" type and nullable patterns like
+	// oneOf: [{type: "integer"}, {type: "null"}] (Go *int fields).
 	intProps := collectIntProperties(schema)
 
 	rawHandler := func(ctx context.Context, req *mcp.CallToolRequest) (result *mcp.CallToolResult, err error) {
@@ -99,19 +111,40 @@ func toolError(msg string) *mcp.CallToolResult {
 	}
 }
 
-// collectIntProperties returns a set of top-level property names that have
-// type "integer" in the given schema.
+// collectIntProperties returns a set of top-level property names that are
+// integer-typed in the given schema. Also detects nullable integer patterns
+// like oneOf: [{type: "integer"}, {type: "null"}] which jsonschema-go
+// generates for Go *int pointer fields.
 func collectIntProperties(s *jsonschema.Schema) map[string]bool {
 	result := make(map[string]bool)
 	if s == nil || s.Properties == nil {
 		return result
 	}
 	for name, prop := range s.Properties {
-		if prop != nil && prop.Type == "integer" {
+		if prop != nil && isIntegerSchema(prop) {
 			result[name] = true
 		}
 	}
 	return result
+}
+
+// isIntegerSchema checks if a schema represents an integer type, either
+// directly (type: "integer") or via oneOf/anyOf nullable patterns.
+func isIntegerSchema(s *jsonschema.Schema) bool {
+	if s.Type == "integer" {
+		return true
+	}
+	for _, sub := range s.OneOf {
+		if sub != nil && sub.Type == "integer" {
+			return true
+		}
+	}
+	for _, sub := range s.AnyOf {
+		if sub != nil && sub.Type == "integer" {
+			return true
+		}
+	}
+	return false
 }
 
 // coerceIntProperties takes raw JSON arguments and converts string values

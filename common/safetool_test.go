@@ -3,6 +3,8 @@ package common
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/google/jsonschema-go/jsonschema"
 )
 
 func TestCoerceIntProperties(t *testing.T) {
@@ -13,10 +15,10 @@ func TestCoerceIntProperties(t *testing.T) {
 	}
 
 	tests := []struct {
-		name     string
-		input    string
-		wantKey  string
-		wantVal  any // nil = unchanged from input
+		name    string
+		input   string
+		wantKey string
+		wantVal any
 	}{
 		{
 			name:    "decimal string to int",
@@ -84,9 +86,83 @@ func TestCoerceIntProperties(t *testing.T) {
 }
 
 func TestCollectIntProperties(t *testing.T) {
-	// Quick smoke test with nil schema
+	// nil schema
 	result := collectIntProperties(nil)
 	if len(result) != 0 {
 		t.Errorf("expected empty map for nil schema, got %v", result)
+	}
+
+	// Direct integer type
+	s := &jsonschema.Schema{
+		Properties: map[string]*jsonschema.Schema{
+			"count":  {Type: "integer"},
+			"name":   {Type: "string"},
+			"active": {Type: "boolean"},
+		},
+	}
+	result = collectIntProperties(s)
+	if !result["count"] {
+		t.Error("expected count to be detected as integer")
+	}
+	if result["name"] {
+		t.Error("name should not be detected as integer")
+	}
+}
+
+func TestIsIntegerSchema(t *testing.T) {
+	tests := []struct {
+		name   string
+		schema *jsonschema.Schema
+		want   bool
+	}{
+		{
+			name:   "direct integer",
+			schema: &jsonschema.Schema{Type: "integer"},
+			want:   true,
+		},
+		{
+			name:   "string",
+			schema: &jsonschema.Schema{Type: "string"},
+			want:   false,
+		},
+		{
+			name: "oneOf nullable integer",
+			schema: &jsonschema.Schema{
+				OneOf: []*jsonschema.Schema{
+					{Type: "integer"},
+					{Type: "null"},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "anyOf nullable integer",
+			schema: &jsonschema.Schema{
+				AnyOf: []*jsonschema.Schema{
+					{Type: "integer"},
+					{Type: "null"},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "oneOf without integer",
+			schema: &jsonschema.Schema{
+				OneOf: []*jsonschema.Schema{
+					{Type: "string"},
+					{Type: "null"},
+				},
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isIntegerSchema(tt.schema)
+			if got != tt.want {
+				t.Errorf("isIntegerSchema() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
