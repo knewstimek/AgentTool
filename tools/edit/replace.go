@@ -27,8 +27,19 @@ func Replace(content, oldStr, newStr string, replaceAll bool, fileStyle IndentSt
 	normalizedOld := normalizeLineEnding(oldStr, lineEnding)
 	normalizedNew := normalizeLineEnding(newStr, lineEnding)
 
-	// 1st pass: direct match with original string
-	count := strings.Count(content, normalizedOld)
+	// 1st pass: direct match with original string.
+	// When old_string has leading whitespace, require line-boundary alignment
+	// (match must start at position 0 or immediately after '\n').
+	// This prevents a shallowly-indented old_string from matching as a
+	// substring inside a more-deeply-indented line, which would produce
+	// incorrect indentation in the replacement -- especially for multiline
+	// new_string where only the first line would inherit the surrounding tabs.
+	var count int
+	if hasLeadingWhitespace(normalizedOld) {
+		count = lineStartCount(content, normalizedOld)
+	} else {
+		count = strings.Count(content, normalizedOld)
+	}
 	if count > 0 {
 		finalNew := normalizedNew
 		// forceStyle: force-convert newStr to fileStyle when indent_style is explicitly specified
@@ -37,6 +48,9 @@ func Replace(content, oldStr, newStr string, replaceAll bool, fileStyle IndentSt
 			if newStyle.UseTabs != fileStyle.UseTabs || newStyle.IndentSize != fileStyle.IndentSize {
 				finalNew = ConvertIndent(normalizedNew, newStyle, fileStyle)
 			}
+		}
+		if hasLeadingWhitespace(normalizedOld) {
+			return applyLineStartReplace(content, normalizedOld, finalNew, count, replaceAll)
 		}
 		return applyReplace(content, normalizedOld, finalNew, count, replaceAll)
 	}
@@ -256,6 +270,64 @@ func applyReplace(content, oldStr, newStr string, count int, replaceAll bool) Re
 
 	return ReplaceResult{
 		Content:    result,
+		MatchCount: count,
+		Applied:    true,
+		Message:    fmt.Sprintf("replaced %d occurrence(s)", count),
+	}
+}
+
+// hasLeadingWhitespace returns true if the first character of s is a tab or space.
+// Used to decide whether line-boundary anchoring is needed in pass 1.
+func hasLeadingWhitespace(s string) bool {
+	return len(s) > 0 && (s[0] == '\t' || s[0] == ' ')
+}
+
+// lineStartIndices returns the start positions of all occurrences of sub in s
+// that begin at a line boundary (position 0 or immediately after '\n').
+func lineStartIndices(s, sub string) []int {
+	var out []int
+	for i := 0; i <= len(s)-len(sub); {
+		idx := strings.Index(s[i:], sub)
+		if idx < 0 {
+			break
+		}
+		pos := i + idx
+		if pos == 0 || s[pos-1] == '\n' {
+			out = append(out, pos)
+		}
+		i = pos + len(sub)
+	}
+	return out
+}
+
+// lineStartCount counts occurrences of sub in s that start at a line boundary.
+func lineStartCount(s, sub string) int {
+	return len(lineStartIndices(s, sub))
+}
+
+// applyLineStartReplace is like applyReplace but only replaces occurrences
+// of oldStr that start at a line boundary. count must equal lineStartCount(content, oldStr).
+func applyLineStartReplace(content, oldStr, newStr string, count int, replaceAll bool) ReplaceResult {
+	if !replaceAll && count > 1 {
+		return ReplaceResult{
+			Applied: false,
+			Message: fmt.Sprintf("old_string found %d times. Use replace_all=true or provide more context to make it unique", count),
+		}
+	}
+	indices := lineStartIndices(content, oldStr)
+	if !replaceAll {
+		indices = indices[:1]
+	}
+	var result strings.Builder
+	prev := 0
+	for _, idx := range indices {
+		result.WriteString(content[prev:idx])
+		result.WriteString(newStr)
+		prev = idx + len(oldStr)
+	}
+	result.WriteString(content[prev:])
+	return ReplaceResult{
+		Content:    result.String(),
 		MatchCount: count,
 		Applied:    true,
 		Message:    fmt.Sprintf("replaced %d occurrence(s)", count),
