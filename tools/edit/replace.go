@@ -93,10 +93,34 @@ func Replace(content, oldStr, newStr string, replaceAll bool, fileStyle IndentSt
 		}
 	}
 
+	// 6th pass (diagnostic): normalize all leading whitespace line-by-line and
+	// check whether the content exists with different indentation. This catches
+	// the common case where old_string has the right content but wrong tab depth
+	// (e.g. 2 tabs provided, file has 3 tabs). We do NOT auto-fix this — ambiguous
+	// indentation replacement is risky — but we give an actionable error message.
+	normContent := normalizeIndent(content)
+	normOld := normalizeIndent(normalizedOld)
+	if normOld != "" && strings.Contains(normContent, normOld) {
+		return ReplaceResult{
+			Applied: false,
+			Message: "old_string not found: content exists in file but indentation differs (wrong number of tabs/spaces). Re-read the file to copy exact indentation.",
+		}
+	}
+
 	return ReplaceResult{
 		Applied: false,
 		Message: "old_string not found in file",
 	}
+}
+
+// normalizeIndent strips all leading whitespace from every line, preserving content.
+// Used as a last-resort diagnostic to detect indentation mismatches.
+func normalizeIndent(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimLeft(line, " \t")
+	}
+	return strings.Join(lines, "\n")
 }
 
 // applyReplace performs the actual replacement.

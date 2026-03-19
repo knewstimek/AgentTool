@@ -88,13 +88,20 @@ func (r *windowsReader) Regions() ([]MemoryRegion, error) {
 
 	for len(regions) < maxRegions {
 		var mbi memoryBasicInfo
-		ret, _, err := procVirtualQueryEx.Call(
+		ret, _, lastErr := procVirtualQueryEx.Call(
 			uintptr(r.handle), addr,
 			uintptr(unsafe.Pointer(&mbi)),
 			unsafe.Sizeof(mbi),
 		)
 		if ret == 0 {
-			_ = err
+			// VirtualQueryEx returns 0 both at normal end-of-address-space
+			// (ERROR_INVALID_PARAMETER) and on real failures. If addr==0, we
+			// haven't enumerated anything yet -- that's a real failure, not a
+			// normal termination. Surface the error so agents know why 0 regions
+			// were returned instead of silently succeeding with empty results.
+			if addr == 0 {
+				return nil, fmt.Errorf("VirtualQueryEx failed at base address: %w (process may be protected (PPL/anti-cheat); try running as Administrator)", lastErr)
+			}
 			break
 		}
 
