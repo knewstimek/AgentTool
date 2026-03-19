@@ -118,7 +118,7 @@ It auto-detects file encoding and indentation style, preserving them across edit
 - externalip: Get your external (public) IP address
 - sloc: Count source lines of code (SLOC) with per-language summary
 - debug: Interactive debugger via DAP (breakpoints, stepping, variables, stack traces)
-- analyze: Static binary analysis (14 operations: disassemble, PE/ELF/Mach-O parsing, imphash, Rich header, resources, DWARF, strings, hexdump, pattern search, entropy, overlay, binary diff)
+- analyze: Static binary analysis (17 operations: disassemble, PE/ELF/Mach-O parsing, imphash, Rich header, resources, DWARF, strings, hexdump, pattern search, entropy, overlay, binary diff, xref, function_at, call_graph)
 - set_config: Change runtime settings (encoding, file size, SSRF policy, DoH/ECH toggle)
 - agent_tool_help: This help tool
 
@@ -763,6 +763,24 @@ Find function boundaries in PE files.
   and epilogue (ret + int3/nop padding). Results are marked with confidence level.
   Returns function start, end, size, and disassembly.
 
+### call_graph
+Build a static call graph from a root function (x64 PE only).
+  analyze(operation="call_graph", file_path="/path/to/binary.exe",
+          va="0x140001000")
+
+  Uses .pdata for function boundaries and scans CALL (E8 rel32) instructions.
+  BFS traversal from the root function, showing:
+  - Callers: functions that call the root (1 level, reverse scan)
+  - Callees: functions called by the root (tree format, configurable depth)
+
+  Parameters:
+    va: Root function address (hex, required)
+    count: Max depth (default: 2, max: 5)
+    max_results: Max nodes to visit (default: 200, max: 500)
+
+  Only includes callees that land on .pdata function starts (filters false positives).
+  Cycle detection marks revisited nodes as "(already shown)".
+
 ## Typical Workflow
 
 1. pe_info/elf_info/macho_info -- Get section layout, check for W+X sections
@@ -776,8 +794,9 @@ Find function boundaries in PE files.
 9. disassemble -- Decode machine code (use va= for PE virtual addresses)
 10. function_at -- Find function boundaries (.pdata or heuristic fallback)
 11. xref -- Find all call/jump/data references to an address (PE)
-12. dwarf_info -- Extract debug symbols and function names
-13. bin_diff -- Compare original vs patched versions
+12. call_graph -- Build static call graph from a root function (x64 PE)
+13. dwarf_info -- Extract debug symbols and function names
+14. bin_diff -- Compare original vs patched versions
 
 ### Example: Analyzing a DLL
   # Step 1: Get PE layout

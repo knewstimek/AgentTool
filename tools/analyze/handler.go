@@ -14,7 +14,7 @@ import (
 
 // AnalyzeInput defines parameters for the static binary analysis tool.
 type AnalyzeInput struct {
-	Operation string `json:"operation" jsonschema:"Operation: disassemble, pe_info, elf_info, macho_info, strings, hexdump, pattern_search, entropy, bin_diff, resource_info, imphash, rich_header, overlay_detect, dwarf_info, xref, function_at,required"`
+	Operation string `json:"operation" jsonschema:"Operation: disassemble, pe_info, elf_info, macho_info, strings, hexdump, pattern_search, entropy, bin_diff, resource_info, imphash, rich_header, overlay_detect, dwarf_info, xref, function_at, call_graph,required"`
 	FilePath  string `json:"file_path" jsonschema:"Absolute path to the binary file,required"`
 
 	// disassemble / function_at parameters
@@ -69,12 +69,13 @@ var validOperations = map[string]bool{
 	"dwarf_info":     true,
 	"xref":           true,
 	"function_at":    true,
+	"call_graph":     true,
 }
 
 // Handle dispatches to the appropriate operation.
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input AnalyzeInput) (*mcp.CallToolResult, AnalyzeOutput, error) {
 	op := strings.ToLower(strings.TrimSpace(input.Operation))
-	allOps := "disassemble, pe_info, elf_info, macho_info, strings, hexdump, pattern_search, entropy, bin_diff, resource_info, imphash, rich_header, overlay_detect, dwarf_info, xref, function_at"
+	allOps := "disassemble, pe_info, elf_info, macho_info, strings, hexdump, pattern_search, entropy, bin_diff, resource_info, imphash, rich_header, overlay_detect, dwarf_info, xref, function_at, call_graph"
 	if op == "" {
 		return errorResult("operation is required (" + allOps + ")")
 	}
@@ -150,6 +151,8 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input AnalyzeInput) (
 		result, err = opXref(input)
 	case "function_at":
 		result, err = opFunctionAt(input)
+	case "call_graph":
+		result, err = opCallGraph(input)
 	}
 
 	if err != nil {
@@ -174,7 +177,8 @@ bin_diff (two-file byte comparison), resource_info (PE resources and version inf
 imphash (PE import hash for malware classification), rich_header (PE build tool fingerprint),
 overlay_detect (detect appended data after last section), dwarf_info (debug symbol info),
 xref (find all code references to a target address in PE),
-function_at (find function boundaries via PE .pdata or heuristic prologue/epilogue scan).
+function_at (find function boundaries via PE .pdata or heuristic prologue/epilogue scan),
+call_graph (static call graph from a root function via .pdata + CALL scanning).
 Pure Go implementation -- no external tools needed. Supports x86, x64, ARM, ARM64.
 For PE files: use 'va' parameter instead of 'offset' for auto VA display, symbol annotation, and function boundary detection.
 PE strings/pattern_search automatically show VA alongside file offsets.

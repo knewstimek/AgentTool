@@ -329,7 +329,8 @@ func Register(server *mcp.Server) {
 		Description: `Copies a file or directory to a new location.
 File copy uses atomic write (temp file + rename) and preserves permissions.
 Directory copy recreates the full directory structure recursively.
-Use dry_run=true to preview what would be copied without doing it.`,
+Use dry_run=true to preview what would be copied without doing it.
+On Windows, handles locked files (running executables, loaded DLLs) by renaming the locked file aside before replacing it. Use overwrite=true when updating a running binary.`,
 	}, Handle)
 }
 

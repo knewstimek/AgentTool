@@ -96,7 +96,7 @@ func scanXref64(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxRes,
 		// E8 rel32 -- CALL relative
 		if data[i] == 0xE8 && i+5 <= dataLen {
 			rel := int32(binary.LittleEndian.Uint32(data[i+1:]))
-			target := uint32(int32(instrRVA) + 5 + rel)
+			target := uint32(int64(instrRVA) + 5 + int64(rel))
 			if target == targetRVA {
 				fmt.Fprintf(sb, "  0x%x: CALL 0x%x  (E8 relative)\n", instrVA, imageBase+uint64(targetRVA))
 				found++
@@ -107,7 +107,7 @@ func scanXref64(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxRes,
 		// E9 rel32 -- JMP relative
 		if data[i] == 0xE9 && i+5 <= dataLen {
 			rel := int32(binary.LittleEndian.Uint32(data[i+1:]))
-			target := uint32(int32(instrRVA) + 5 + rel)
+			target := uint32(int64(instrRVA) + 5 + int64(rel))
 			if target == targetRVA {
 				fmt.Fprintf(sb, "  0x%x: JMP 0x%x  (E9 relative)\n", instrVA, imageBase+uint64(targetRVA))
 				found++
@@ -118,7 +118,7 @@ func scanXref64(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxRes,
 		// 0F 80-8F rel32 -- Jcc (conditional jump near)
 		if data[i] == 0x0F && i+6 <= dataLen && data[i+1] >= 0x80 && data[i+1] <= 0x8F {
 			rel := int32(binary.LittleEndian.Uint32(data[i+2:]))
-			target := uint32(int32(instrRVA) + 6 + rel)
+			target := uint32(int64(instrRVA) + 6 + int64(rel))
 			if target == targetRVA {
 				name := jccNames[data[i+1]-0x80]
 				fmt.Fprintf(sb, "  0x%x: %s 0x%x  (0F %02X relative)\n", instrVA, name, imageBase+uint64(targetRVA), data[i+1])
@@ -137,7 +137,7 @@ func scanXref64(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxRes,
 				rm := modrm & 0x07
 				if mod == 0x00 && rm == 0x05 { // [rip+disp32]
 					disp := int32(binary.LittleEndian.Uint32(data[i+3:]))
-					target := uint32(int32(instrRVA) + 7 + disp)
+					target := uint32(int64(instrRVA) + 7 + int64(disp))
 					if target == targetRVA {
 						regIdx := ((rex & 0x04) << 1) | ((modrm >> 3) & 0x07)
 						fmt.Fprintf(sb, "  0x%x: LEA %s, [0x%x]  (RIP-relative)\n", instrVA, x64RegName(regIdx), imageBase+uint64(targetRVA))
@@ -153,7 +153,7 @@ func scanXref64(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxRes,
 		if i+6 <= dataLen && data[i] == 0xFF {
 			if data[i+1] == 0x15 || data[i+1] == 0x25 {
 				disp := int32(binary.LittleEndian.Uint32(data[i+2:]))
-				target := uint32(int32(instrRVA) + 6 + disp)
+				target := uint32(int64(instrRVA) + 6 + int64(disp))
 				if target == targetRVA {
 					op := "CALL"
 					if data[i+1] == 0x25 {
@@ -195,7 +195,7 @@ func scanXref64(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxRes,
 				rm := modrm & 0x07
 				if mod == 0x00 && rm == 0x05 {
 					disp := int32(binary.LittleEndian.Uint32(data[i+3:]))
-					target := uint32(int32(instrRVA) + 7 + disp)
+					target := uint32(int64(instrRVA) + 7 + int64(disp))
 					if target == targetRVA {
 						regIdx := ((rex & 0x04) << 1) | ((modrm >> 3) & 0x07)
 						fmt.Fprintf(sb, "  0x%x: MOV %s, [0x%x]  (RIP-relative)\n", instrVA, x64RegName(regIdx), imageBase+uint64(targetRVA))
@@ -221,7 +221,7 @@ func scanXref32(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxRes,
 		// E8/E9 rel32 -- CALL/JMP relative
 		if (data[i] == 0xE8 || data[i] == 0xE9) && i+5 <= dataLen {
 			rel := int32(binary.LittleEndian.Uint32(data[i+1:]))
-			target := uint32(int32(instrRVA) + 5 + rel)
+			target := uint32(int64(instrRVA) + 5 + int64(rel))
 			if target == targetRVA {
 				op := "CALL"
 				if data[i] == 0xE9 {
@@ -236,7 +236,7 @@ func scanXref32(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxRes,
 		// 0F 80-8F rel32 -- Jcc
 		if data[i] == 0x0F && i+6 <= dataLen && data[i+1] >= 0x80 && data[i+1] <= 0x8F {
 			rel := int32(binary.LittleEndian.Uint32(data[i+2:]))
-			target := uint32(int32(instrRVA) + 6 + rel)
+			target := uint32(int64(instrRVA) + 6 + int64(rel))
 			if target == targetRVA {
 				name := jccNames[data[i+1]-0x80]
 				fmt.Fprintf(sb, "  0x%x: %s 0x%x  (relative)\n", instrVA, name, imageBase+uint64(targetRVA))
