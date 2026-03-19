@@ -13,7 +13,7 @@ import (
 
 const (
 	defaultDisasmCount = 50
-	maxDisasmCount     = 200
+	maxDisasmCount     = 600
 )
 
 // opDisassemble disassembles machine code from a binary file.

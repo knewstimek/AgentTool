@@ -20,7 +20,7 @@ type AnalyzeInput struct {
 	// disassemble / function_at parameters
 	Offset   int    `json:"offset,omitempty" jsonschema:"Byte offset to start from. Default: 0"`
 	VA       string `json:"va,omitempty" jsonschema:"Virtual address for PE files (hex, e.g. '0x140001000'). Auto-converts to file offset. For disassemble and function_at. Preferred over offset+base_addr for PE analysis: enables correct VA display, symbol annotation, and auto-stop at function boundary."`
-	Count    int    `json:"count,omitempty" jsonschema:"Number of instructions (disassemble). Default: 50, Max: 200"`
+	Count    int    `json:"count,omitempty" jsonschema:"Number of instructions (disassemble). Default: 50, Max: 600. Use pattern_search or xref for targeted analysis; use high count only when full-range scan is needed."`
 	Mode     int    `json:"mode,omitempty" jsonschema:"CPU mode: 32 or 64. Default: 64"`
 	BaseAddr string `json:"base_addr,omitempty" jsonschema:"Base address for display (hex string, e.g. '0x140001000'). Default: 0x0. This maps to file offset 0, so displayed address = base_addr + offset + instruction_position. For PE files, prefer 'va' parameter instead -- it auto-calculates the correct base_addr."`
 	Arch     string `json:"arch,omitempty" jsonschema:"CPU architecture: x86 (default) or arm. For disassemble"`
