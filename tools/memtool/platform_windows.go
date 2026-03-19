@@ -139,7 +139,14 @@ func (r *windowsReader) ReadMemory(address uint64, buf []byte) (int, error) {
 		uintptr(unsafe.Pointer(&bytesRead)),
 	)
 	if ret == 0 {
-		return int(bytesRead), fmt.Errorf("ReadProcessMemory at 0x%X: %w", address, err)
+		n := int(bytesRead)
+		if n > 0 {
+			// Partial read succeeded: return the data we got with an error
+			// so callers can use the partial result. This typically happens
+			// when the read crosses a page boundary into unmapped memory.
+			return n, fmt.Errorf("partial read at 0x%X: got %d of %d bytes (%w). Try a smaller length or align to page boundary (0x1000)", address, n, len(buf), err)
+		}
+		return 0, fmt.Errorf("read failed at 0x%X: %w. Address may be unmapped or protected -- try VirtualQueryEx (memtool scan) to find valid memory regions first", address, err)
 	}
 	return int(bytesRead), nil
 }
