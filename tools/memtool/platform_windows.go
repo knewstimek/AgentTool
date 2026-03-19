@@ -100,7 +100,7 @@ func (r *windowsReader) Regions() ([]MemoryRegion, error) {
 			// normal termination. Surface the error so agents know why 0 regions
 			// were returned instead of silently succeeding with empty results.
 			if addr == 0 {
-				return nil, fmt.Errorf("VirtualQueryEx failed at base address: %w (process may be protected (PPL/anti-cheat); try running as Administrator)", lastErr)
+				return nil, fmt.Errorf("VirtualQueryEx failed at base address for PID %d: %w (process may be protected (PPL/anti-cheat); try running as Administrator)", r.pid, lastErr)
 			}
 			break
 		}

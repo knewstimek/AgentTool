@@ -93,11 +93,78 @@ func Replace(content, oldStr, newStr string, replaceAll bool, fileStyle IndentSt
 		}
 	}
 
-	// 6th pass (diagnostic): normalize all leading whitespace line-by-line and
-	// check whether the content exists with different indentation. This catches
-	// the common case where old_string has the right content but wrong tab depth
-	// (e.g. 2 tabs provided, file has 3 tabs). We do NOT auto-fix this — ambiguous
-	// indentation replacement is risky — but we give an actionable error message.
+	// 6th pass: tab depth normalization.
+	// Handles the case where both file and old_string use tabs but have different
+	// base indentation depth (e.g. old_string has 2 tabs, file has 3 tabs).
+	// Passes 2-4 only handle tabs<->spaces conversion, not depth differences.
+	// Tries shifting old_string by 0-10 tabs, preserving relative indentation.
+	if fileStyle.UseTabs && hasLeadingTabs(normalizedOld) {
+		// minTabsNew is computed independently from minTabsOld so that tabDelta
+		// captures the relative indent change between old and new. For example,
+		// if old has min 2 tabs and new has min 3 tabs, new is always 1 level
+		// deeper -- this relationship must be preserved when shifting to actual depth.
+		//
+		// Candidates are collected across all depths before picking the best one,
+		// preferring unambiguous matches (count==1) over multiple matches, and
+		// among equal ambiguity preferring depth closest to original minTabsOld.
+		// This avoids incorrectly matching outer-scope code when the same snippet
+		// appears at multiple indentation levels.
+		minTabsOld := findMinLeadingTabs(normalizedOld)
+		minTabsNew := findMinLeadingTabs(normalizedNew)
+		tabDelta := minTabsNew - minTabsOld
+		strippedOld := shiftTabs(normalizedOld, -minTabsOld)
+		strippedNew := shiftTabs(normalizedNew, -minTabsNew)
+
+		type candidate struct{ baseTabs, count int }
+		var candidates []candidate
+		for baseTabs := 0; baseTabs <= 10; baseTabs++ {
+			if baseTabs == minTabsOld {
+				continue // already tried this exact depth in pass 1
+			}
+			shiftedOld := shiftTabs(strippedOld, baseTabs)
+			cnt := strings.Count(content, shiftedOld)
+			if cnt > 0 {
+				candidates = append(candidates, candidate{baseTabs, cnt})
+			}
+		}
+		if len(candidates) > 0 {
+			absDist := func(a, b int) int {
+				if a > b {
+					return a - b
+				}
+				return b - a
+			}
+			best := candidates[0]
+			for _, c := range candidates[1:] {
+				cUniq := c.count == 1
+				bUniq := best.count == 1
+				if cUniq && !bUniq {
+					best = c
+				} else if cUniq == bUniq {
+					// Same uniqueness: prefer depth closest to original.
+					if absDist(c.baseTabs, minTabsOld) < absDist(best.baseTabs, minTabsOld) {
+						best = c
+					}
+				}
+			}
+			shiftedOld := shiftTabs(strippedOld, best.baseTabs)
+			// Clamp newDepth to 0: when new_string is shallower than old_string
+			// (negative tabDelta), the computed depth can go below zero if the
+			// actual file depth is smaller than |tabDelta|. Top-level (0 tabs)
+			// is the minimum valid indentation.
+			newDepth := best.baseTabs + tabDelta
+			if newDepth < 0 {
+				newDepth = 0
+			}
+			shiftedNew := shiftTabs(strippedNew, newDepth)
+			return applyReplace(content, shiftedOld, shiftedNew, best.count, replaceAll)
+		}
+	}
+
+	// 7th pass (diagnostic only): normalize all leading whitespace line-by-line
+	// and check whether the content exists with different indentation.
+	// Covers remaining cases (e.g. spaces in old_string, tabs in file) not caught
+	// by passes 2-6. Does NOT auto-fix -- gives an actionable error message instead.
 	normContent := normalizeIndent(content)
 	normOld := normalizeIndent(normalizedOld)
 	if normOld != "" && strings.Contains(normContent, normOld) {
@@ -111,6 +178,53 @@ func Replace(content, oldStr, newStr string, replaceAll bool, fileStyle IndentSt
 		Applied: false,
 		Message: "old_string not found in file",
 	}
+}
+
+// findMinLeadingTabs returns the minimum number of leading tabs across all
+// non-empty, non-whitespace-only lines. Empty lines are ignored so that
+// blank lines inside a block do not incorrectly reduce the minimum to 0.
+func findMinLeadingTabs(s string) int {
+	min := -1
+	for _, line := range strings.Split(s, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		n := len(line) - len(strings.TrimLeft(line, "\t"))
+		if min < 0 || n < min {
+			min = n
+		}
+	}
+	if min < 0 {
+		return 0
+	}
+	return min
+}
+
+// shiftTabs adds (positive delta) or removes (negative delta) leading tabs
+// from every line. Lines with fewer tabs than the removal amount get all
+// their leading tabs stripped rather than going negative.
+func shiftTabs(s string, delta int) string {
+	if delta == 0 {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	prefix := ""
+	if delta > 0 {
+		prefix = strings.Repeat("\t", delta)
+	}
+	for i, line := range lines {
+		if delta > 0 {
+			lines[i] = prefix + line
+		} else {
+			toRemove := -delta
+			tabCount := len(line) - len(strings.TrimLeft(line, "\t"))
+			if tabCount < toRemove {
+				toRemove = tabCount
+			}
+			lines[i] = line[toRemove:]
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // normalizeIndent strips all leading whitespace from every line, preserving content.
