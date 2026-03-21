@@ -13,7 +13,14 @@ const (
 )
 
 // opXref finds all code locations that reference a target virtual address.
-// Scans executable sections for CALL/JMP/LEA/Jcc patterns (PE files only).
+// Scans executable sections for CALL/JMP/LEA/MOV/Jcc patterns (PE files only).
+//
+// Performance: full-scans all executable sections on every call (no caching).
+// This is fast enough in practice (10MB binary in ~10ms) because the scan is
+// simple byte-pattern matching, not instruction-level decoding. Unlike call_graph
+// which collects ALL call targets (high false-positive risk from data bytes),
+// xref matches against a specific target address, so false positives are
+// statistically negligible (~1/2^32 chance per byte).
 func opXref(input AnalyzeInput) (string, error) {
 	if input.TargetVA == "" {
 		return "", fmt.Errorf("target_va is required for xref")
@@ -198,7 +205,10 @@ func collectXref64(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxR
 			}
 		}
 
-		// 68 imm32 -- PUSH
+		// 68 imm32 -- PUSH (x64: sign-extended to 64-bit)
+		// Only matches when targetVA fits in sign-extended int32 range.
+		// High-address binaries (imageBase >= 0x80000000) can never match
+		// because PUSH imm32 cannot encode addresses above 0x7FFFFFFF.
 		if data[i] == 0x68 && i+5 <= dataLen {
 			imm := int32(binary.LittleEndian.Uint32(data[i+1:]))
 			immVA := uint64(int64(imm))
@@ -214,7 +224,9 @@ func collectXref64(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxR
 			}
 		}
 
-		// MOV reg, [rip+disp32] (load)
+		// MOV reg, [rip+disp32] (load) -- REX.W only (64-bit operand).
+		// Without REX.W, 8B 05 is MOV eax,[rip+disp32] which still references
+		// the same address, but those are less common for pointer-sized data.
 		if i+7 <= dataLen {
 			rex := data[i]
 			if (rex == 0x48 || rex == 0x4C) && data[i+1] == 0x8B {
@@ -234,7 +246,7 @@ func collectXref64(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxR
 			}
 		}
 
-		// MOV [rip+disp32], reg (store)
+		// MOV [rip+disp32], reg (store) -- REX.W only, same reasoning as load above.
 		if i+7 <= dataLen {
 			rex := data[i]
 			if (rex == 0x48 || rex == 0x4C) && data[i+1] == 0x89 {
@@ -258,8 +270,11 @@ func collectXref64(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxR
 }
 
 // collectXref32 scans x86 32-bit code for references and collects typed results.
+// x86 uses absolute addresses for data refs (A1/A3, FF 15/25, PUSH imm32),
+// unlike x64 which uses RIP-relative addressing.
 func collectXref32(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxRes, found int, refs []xrefResult) ([]xrefResult, int) {
 	dataLen := len(data)
+	// Safe: x86 PE ImageBase field is uint32, so uint32(imageBase) is lossless.
 	targetAbsVA := uint32(imageBase) + targetRVA
 
 	for i := 0; i < dataLen && found < maxRes; i++ {
@@ -485,8 +500,11 @@ func scanXref64(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxRes,
 }
 
 // scanXref32 scans x86 32-bit code for references to targetRVA.
+// scanXref32 is the legacy string-builder variant of collectXref32.
+// Deprecated: use collectXref32 (returns typed results for summary stats).
 func scanXref32(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxRes, found int, sb *strings.Builder) int {
 	dataLen := len(data)
+	// Safe: x86 PE ImageBase field is uint32, so uint32(imageBase) is lossless.
 	targetAbsVA := uint32(imageBase) + targetRVA
 
 	for i := 0; i < dataLen && found < maxRes; i++ {
