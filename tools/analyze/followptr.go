@@ -48,6 +48,11 @@ func opFollowPtr(input AnalyzeInput) (string, error) {
 		ptrSize = 8
 	}
 
+	// Validate starting VA is within PE address space
+	if startVA < imageBase {
+		return "", fmt.Errorf("va 0x%x is below image base 0x%x", startVA, imageBase)
+	}
+
 	symbols := peSymbolMap(f, imageBase)
 
 	var sb strings.Builder
