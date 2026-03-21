@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"agent-tool/common"
@@ -20,7 +21,7 @@ const readHashThreshold = 10 * 1024 * 1024 // 10MB
 
 type ReadInput struct {
 	FilePath string `json:"file_path" jsonschema:"Absolute path to the file to read"`
-	Offset   int    `json:"offset,omitempty" jsonschema:"Line number to start reading from (1-based). Negative = from end (e.g. -5 = last 5 lines). Default: 1"`
+	Offset   any    `json:"offset,omitempty" jsonschema:"Line offset. Integer (1-based, negative=from end), string range 'start-end', or [start,end] array. Default: 0 (all)"`
 	Limit    int    `json:"limit,omitempty" jsonschema:"Maximum number of lines to read. Default: 0 (all)"`
 }
 
@@ -29,6 +30,83 @@ type ReadOutput struct {
 	Encoding   string `json:"encoding"`
 	TotalLines int    `json:"total_lines"`
 	Hash       string `json:"hash,omitempty"`
+}
+
+// parseFlexOffset accepts integer, "N", "N-M" range string, "[N, M]" string,
+// or [N, M] array. Agents sometimes pass offset as a string or array instead
+// of a plain integer; this function normalizes all forms.
+// Returns (offset, rangeLimit). rangeLimit > 0 indicates a range was given.
+func parseFlexOffset(v any) (int, int, error) {
+	switch val := v.(type) {
+	case nil:
+		return 0, 0, nil
+	case float64:
+		return int(val), 0, nil
+	case int:
+		return val, 0, nil
+	case string:
+		val = strings.TrimSpace(val)
+		if val == "" {
+			return 0, 0, nil
+		}
+		// Strip array brackets: "[370, 396]" -> "370, 396"
+		if len(val) >= 2 && val[0] == '[' && val[len(val)-1] == ']' {
+			val = strings.TrimSpace(val[1 : len(val)-1])
+		}
+		// Comma-separated range: "370, 396"
+		if parts := strings.SplitN(val, ",", 2); len(parts) == 2 {
+			s, e1 := strconv.Atoi(strings.TrimSpace(parts[0]))
+			e, e2 := strconv.Atoi(strings.TrimSpace(parts[1]))
+			if e1 == nil && e2 == nil {
+				if e < s {
+					s, e = e, s
+				}
+				return s, e - s + 1, nil
+			}
+		}
+		// Dash range: "370-396" (parts[0]!="" prevents matching negative like "-5")
+		if parts := strings.SplitN(val, "-", 2); len(parts) == 2 && parts[0] != "" {
+			s, e1 := strconv.Atoi(strings.TrimSpace(parts[0]))
+			e, e2 := strconv.Atoi(strings.TrimSpace(parts[1]))
+			if e1 == nil && e2 == nil {
+				if e < s {
+					s, e = e, s
+				}
+				return s, e - s + 1, nil
+			}
+		}
+		// Plain number
+		n, err := strconv.Atoi(val)
+		if err != nil {
+			return 0, 0, fmt.Errorf("invalid offset %q -- use integer, 'start-end', or [start, end]", v)
+		}
+		return n, 0, nil
+	case []interface{}:
+		if len(val) == 2 {
+			s, ok1 := asInt(val[0])
+			e, ok2 := asInt(val[1])
+			if ok1 && ok2 {
+				if e < s {
+					s, e = e, s
+				}
+				return s, e - s + 1, nil
+			}
+		}
+		return 0, 0, fmt.Errorf("invalid offset array -- expected [start, end] integers")
+	default:
+		return 0, 0, fmt.Errorf("invalid offset type %T -- use integer or string", v)
+	}
+}
+
+func asInt(v interface{}) (int, bool) {
+	switch val := v.(type) {
+	case float64:
+		return int(val), true
+	case int:
+		return val, true
+	default:
+		return 0, false
+	}
 }
 
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input ReadInput) (*mcp.CallToolResult, ReadOutput, error) {
@@ -62,16 +140,26 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ReadInput) (*mc
 	// Count total lines (allocation-free O(N))
 	totalLines := strings.Count(content, "\n") + 1
 
+	offset, rangeLimit, err := parseFlexOffset(input.Offset)
+	if err != nil {
+		return errorResult(err.Error())
+	}
+
+	// Range (e.g. "100-200") sets limit when explicit limit is not provided
+	limit := input.Limit
+	if rangeLimit > 0 && limit == 0 {
+		limit = rangeLimit
+	}
+
 	var startIdx, endIdx int
 
-	if input.Offset < 0 {
+	if offset < 0 {
 		// Negative index: calculate from the end
-		startIdx = totalLines + input.Offset
+		startIdx = totalLines + offset
 		if startIdx < 0 {
 			startIdx = 0
 		}
 	} else {
-		offset := input.Offset
 		if offset < 1 {
 			offset = 1
 		}
@@ -82,8 +170,8 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ReadInput) (*mc
 	}
 
 	endIdx = totalLines
-	if input.Limit > 0 && startIdx+input.Limit < endIdx {
-		endIdx = startIdx + input.Limit
+	if limit > 0 && startIdx+limit < endIdx {
+		endIdx = startIdx + limit
 	}
 
 	// Process only the needed range with Scanner (saves memory vs full Split)
@@ -107,7 +195,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ReadInput) (*mc
 		result += warning
 	}
 
-	// Add file hash (only for files <= 10MB — use checksum tool for larger files)
+	// Add file hash (only for files <= 10MB -- use checksum tool for larger files)
 	var fileHash string
 	if fi.Size() <= readHashThreshold {
 		if h, err := common.ComputeFileHash(input.FilePath); err == nil {
@@ -134,7 +222,8 @@ func Register(server *mcp.Server) {
 		Description: `Reads a file and returns its contents with line numbers.
 Encoding-aware: auto-detects file encoding (UTF-8, EUC-KR, Shift-JIS, etc.).
 Supports offset/limit for reading specific line ranges.
-Negative offset reads from end (e.g. offset=-5 reads last 5 lines).`,
+Negative offset reads from end (e.g. offset=-5 reads last 5 lines).
+Offset accepts integer, string range "100-200", or [start, end] array.`,
 	}, Handle)
 }
 

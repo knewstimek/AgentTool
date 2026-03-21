@@ -217,7 +217,8 @@ Parameters: file_path, old_string, new_string, replace_all, dry_run, indent_styl
 ## read
 Read a file with encoding auto-detection. Returns content with line numbers.
 Supports negative offset to read from end (e.g. offset=-5 reads last 5 lines).
-Parameters: file_path, offset (1-based, or negative for end-relative), limit
+Offset accepts integer, string range "100-200", or [start, end] array.
+Parameters: file_path, offset (integer, "start-end" string, or [start,end] array), limit
 
 ## write
 Create or overwrite a file. Preserves encoding for existing files.
@@ -225,7 +226,9 @@ Parameters: file_path, content
 
 ## grep
 Search file contents with regex. Encoding-aware.
-Parameters: pattern, path, glob, ignore_case, max_results
+Output modes: content (default, matching lines), files_with_matches (paths only), count (match counts).
+Context: use before/after/context to include surrounding lines (like grep -B/-A/-C).
+Parameters: pattern, path, glob, ignore_case, max_results, output_mode, context, before, after
 
 ## glob
 Find files by pattern. Supports ** for recursive matching.
