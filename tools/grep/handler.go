@@ -42,6 +42,7 @@ type searchOpts struct {
 	outputMode string
 	before     int
 	after      int
+	showPath   bool // include file path prefix on each line (true for directory search)
 }
 
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input GrepInput) (*mcp.CallToolResult, GrepOutput, error) {
@@ -95,6 +96,10 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input GrepInput) (*mc
 		}
 		return errorResult(fmt.Sprintf("cannot access path: %v", err))
 	}
+
+	// Directory search includes file path on each line; single-file search
+	// omits it to save tokens (agent already knows which file it passed).
+	opts.showPath = fi.IsDir()
 
 	var matches []string
 	var matchCount int
@@ -197,13 +202,27 @@ func searchFile(path string, re *regexp.Regexp, maxResults int, opts searchOpts)
 		return result, nil
 	}
 
+	// Line formatting helpers: include path prefix only for directory search
+	fmtMatch := func(lineNum int, text string) string {
+		if opts.showPath {
+			return fmt.Sprintf("%s:%d:%s", path, lineNum, text)
+		}
+		return fmt.Sprintf("%d:%s", lineNum, text)
+	}
+	fmtContext := func(lineNum int, text string) string {
+		if opts.showPath {
+			return fmt.Sprintf("%s:%d-%s", path, lineNum, text)
+		}
+		return fmt.Sprintf("%d-%s", lineNum, text)
+	}
+
 	// content mode without context: simple line-by-line (preserves original behavior)
 	if opts.before == 0 && opts.after == 0 {
 		for _, idx := range matchIndices {
 			if result.matchCount >= maxResults {
 				break
 			}
-			result.matches = append(result.matches, fmt.Sprintf("%s:%d:%s", path, idx+1, lines[idx]))
+			result.matches = append(result.matches, fmtMatch(idx+1, lines[idx]))
 			result.matchCount++
 		}
 		return result, nil
@@ -249,9 +268,9 @@ func searchFile(path string, re *regexp.Regexp, maxResults int, opts searchOpts)
 		}
 		for lineIdx := r.start; lineIdx < r.end; lineIdx++ {
 			if matchSet[lineIdx] {
-				result.matches = append(result.matches, fmt.Sprintf("%s:%d:%s", path, lineIdx+1, lines[lineIdx]))
+				result.matches = append(result.matches, fmtMatch(lineIdx+1, lines[lineIdx]))
 			} else {
-				result.matches = append(result.matches, fmt.Sprintf("%s:%d-%s", path, lineIdx+1, lines[lineIdx]))
+				result.matches = append(result.matches, fmtContext(lineIdx+1, lines[lineIdx]))
 			}
 		}
 	}
