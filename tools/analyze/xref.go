@@ -214,7 +214,7 @@ func collectXref64(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxR
 			}
 		}
 
-		// MOV reg, [rip+disp32]
+		// MOV reg, [rip+disp32] (load)
 		if i+7 <= dataLen {
 			rex := data[i]
 			if (rex == 0x48 || rex == 0x4C) && data[i+1] == 0x8B {
@@ -227,6 +227,26 @@ func collectXref64(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxR
 					if target == targetRVA {
 						regIdx := ((rex & 0x04) << 1) | ((modrm >> 3) & 0x07)
 						refs = append(refs, xrefResult{"MOV", fmt.Sprintf("  0x%x: MOV %s, [0x%x]  (RIP-relative)\n", instrVA, x64RegName(regIdx), imageBase+uint64(targetRVA))})
+						found++
+						continue
+					}
+				}
+			}
+		}
+
+		// MOV [rip+disp32], reg (store)
+		if i+7 <= dataLen {
+			rex := data[i]
+			if (rex == 0x48 || rex == 0x4C) && data[i+1] == 0x89 {
+				modrm := data[i+2]
+				mod := modrm >> 6
+				rm := modrm & 0x07
+				if mod == 0x00 && rm == 0x05 {
+					disp := int32(binary.LittleEndian.Uint32(data[i+3:]))
+					target := uint32(int64(instrRVA) + 7 + int64(disp))
+					if target == targetRVA {
+						regIdx := ((rex & 0x04) << 1) | ((modrm >> 3) & 0x07)
+						refs = append(refs, xrefResult{"MOV", fmt.Sprintf("  0x%x: MOV [0x%x], %s  (RIP-relative store)\n", instrVA, imageBase+uint64(targetRVA), x64RegName(regIdx))})
 						found++
 						continue
 					}
@@ -268,6 +288,36 @@ func collectXref32(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxR
 			if target == targetRVA {
 				name := jccNames[data[i+1]-0x80]
 				refs = append(refs, xrefResult{"Jcc", fmt.Sprintf("  0x%x: %s 0x%x  (relative)\n", instrVA, name, imageBase+uint64(targetRVA))})
+				found++
+				continue
+			}
+		}
+
+		// FF 15 [abs32] -- CALL [addr] (indirect, e.g. IAT)
+		// FF 25 [abs32] -- JMP  [addr] (indirect, e.g. IAT thunk)
+		if data[i] == 0xFF && i+6 <= dataLen && (data[i+1] == 0x15 || data[i+1] == 0x25) {
+			addr := binary.LittleEndian.Uint32(data[i+2:])
+			if addr == targetAbsVA {
+				op := "CALL"
+				if data[i+1] == 0x25 {
+					op = "JMP"
+				}
+				refs = append(refs, xrefResult{op, fmt.Sprintf("  0x%x: %s [0x%x]  (indirect absolute)\n", instrVA, op, targetAbsVA)})
+				found++
+				continue
+			}
+		}
+
+		// A1 [abs32] -- MOV EAX, [addr]
+		// A3 [abs32] -- MOV [addr], EAX
+		if (data[i] == 0xA1 || data[i] == 0xA3) && i+5 <= dataLen {
+			addr := binary.LittleEndian.Uint32(data[i+1:])
+			if addr == targetAbsVA {
+				op := "MOV EAX, [0x%x]"
+				if data[i] == 0xA3 {
+					op = "MOV [0x%x], EAX"
+				}
+				refs = append(refs, xrefResult{"MOV", fmt.Sprintf("  0x%x: "+op+"  (absolute)\n", instrVA, targetAbsVA)})
 				found++
 				continue
 			}
@@ -391,8 +441,7 @@ func scanXref64(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxRes,
 			}
 		}
 
-		// MOV reg, [rip+disp32]: 48/4C 8B modrm(00,reg,101) disp32
-		// instrLen = 7, same encoding as LEA but with 8B opcode
+		// MOV reg, [rip+disp32]: 48/4C 8B modrm(00,reg,101) disp32 (load)
 		if i+7 <= dataLen {
 			rex := data[i]
 			if (rex == 0x48 || rex == 0x4C) && data[i+1] == 0x8B {
@@ -405,6 +454,26 @@ func scanXref64(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxRes,
 					if target == targetRVA {
 						regIdx := ((rex & 0x04) << 1) | ((modrm >> 3) & 0x07)
 						fmt.Fprintf(sb, "  0x%x: MOV %s, [0x%x]  (RIP-relative)\n", instrVA, x64RegName(regIdx), imageBase+uint64(targetRVA))
+						found++
+						continue
+					}
+				}
+			}
+		}
+
+		// MOV [rip+disp32], reg: 48/4C 89 modrm(00,reg,101) disp32 (store)
+		if i+7 <= dataLen {
+			rex := data[i]
+			if (rex == 0x48 || rex == 0x4C) && data[i+1] == 0x89 {
+				modrm := data[i+2]
+				mod := modrm >> 6
+				rm := modrm & 0x07
+				if mod == 0x00 && rm == 0x05 {
+					disp := int32(binary.LittleEndian.Uint32(data[i+3:]))
+					target := uint32(int64(instrRVA) + 7 + int64(disp))
+					if target == targetRVA {
+						regIdx := ((rex & 0x04) << 1) | ((modrm >> 3) & 0x07)
+						fmt.Fprintf(sb, "  0x%x: MOV [0x%x], %s  (RIP-relative store)\n", instrVA, imageBase+uint64(targetRVA), x64RegName(regIdx))
 						found++
 						continue
 					}
@@ -446,6 +515,36 @@ func scanXref32(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxRes,
 			if target == targetRVA {
 				name := jccNames[data[i+1]-0x80]
 				fmt.Fprintf(sb, "  0x%x: %s 0x%x  (relative)\n", instrVA, name, imageBase+uint64(targetRVA))
+				found++
+				continue
+			}
+		}
+
+		// FF 15 [abs32] -- CALL [addr] (indirect, e.g. IAT)
+		// FF 25 [abs32] -- JMP  [addr] (indirect, e.g. IAT thunk)
+		if data[i] == 0xFF && i+6 <= dataLen && (data[i+1] == 0x15 || data[i+1] == 0x25) {
+			addr := binary.LittleEndian.Uint32(data[i+2:])
+			if addr == targetAbsVA {
+				op := "CALL"
+				if data[i+1] == 0x25 {
+					op = "JMP"
+				}
+				fmt.Fprintf(sb, "  0x%x: %s [0x%x]  (indirect absolute)\n", instrVA, op, targetAbsVA)
+				found++
+				continue
+			}
+		}
+
+		// A1 [abs32] -- MOV EAX, [addr]
+		// A3 [abs32] -- MOV [addr], EAX
+		if (data[i] == 0xA1 || data[i] == 0xA3) && i+5 <= dataLen {
+			addr := binary.LittleEndian.Uint32(data[i+1:])
+			if addr == targetAbsVA {
+				op := "MOV EAX, [0x%x]"
+				if data[i] == 0xA3 {
+					op = "MOV [0x%x], EAX"
+				}
+				fmt.Fprintf(sb, "  0x%x: "+op+"  (absolute)\n", instrVA, targetAbsVA)
 				found++
 				continue
 			}
