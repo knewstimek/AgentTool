@@ -1,6 +1,7 @@
 package analyze
 
 import (
+	"agent-tool/common"
 	"debug/pe"
 	"fmt"
 	"os"
@@ -56,6 +57,12 @@ const (
 // opStrings extracts printable strings from a binary file.
 // Supports ASCII (0x20-0x7E) and UTF-8 modes.
 func opStrings(input AnalyzeInput) (string, error) {
+	// strings reads entire file into memory -- enforce size limit
+	maxSize := int64(common.GetMaxFileSize())
+	if fi, err := os.Stat(input.FilePath); err == nil && fi.Size() > maxSize {
+		return "", fmt.Errorf("file too large for strings: %d bytes (max %d MB, change with set_config max_file_size_mb)",
+			fi.Size(), maxSize/(1024*1024))
+	}
 	data, err := os.ReadFile(input.FilePath)
 	if err != nil {
 		return "", fmt.Errorf("cannot read file: %w", err)

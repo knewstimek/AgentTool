@@ -1,6 +1,7 @@
 package analyze
 
 import (
+	"agent-tool/common"
 	"bytes"
 	"debug/elf"
 	"debug/macho"
@@ -18,6 +19,12 @@ const entropyChunkSize = 64 * 1024 // 64KB read buffer
 // High entropy (>7.0) suggests compressed or encrypted data.
 // Low entropy (<1.0) suggests padding or uninitialized data.
 func opEntropy(input AnalyzeInput) (string, error) {
+	// entropy reads entire file into memory -- enforce size limit
+	maxSize := int64(common.GetMaxFileSize())
+	if fi, err := os.Stat(input.FilePath); err == nil && fi.Size() > maxSize {
+		return "", fmt.Errorf("file too large for entropy: %d bytes (max %d MB, change with set_config max_file_size_mb)",
+			fi.Size(), maxSize/(1024*1024))
+	}
 	data, err := os.ReadFile(input.FilePath)
 	if err != nil {
 		return "", fmt.Errorf("cannot read file: %w", err)

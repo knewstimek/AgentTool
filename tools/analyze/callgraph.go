@@ -1,6 +1,8 @@
 package analyze
 
 import (
+	"debug/elf"
+	"debug/macho"
 	"debug/pe"
 	"encoding/binary"
 	"fmt"
@@ -46,13 +48,16 @@ func opCallGraph(input AnalyzeInput) (string, error) {
 		return "", fmt.Errorf("invalid va: %s", vaStr)
 	}
 
-	f, err := pe.Open(input.FilePath)
+	// Open binary: try PE, then ELF, then Mach-O
+	bin, err := cgOpenBinary(input.FilePath)
 	if err != nil {
-		return "", fmt.Errorf("call_graph requires a PE file: %w", err)
+		return "", err
 	}
-	defer f.Close()
+	if bin.closer != nil {
+		defer bin.closer()
+	}
 
-	imageBase := peImageBase(f)
+	imageBase := bin.imageBase
 	if rootVA < imageBase {
 		return "", fmt.Errorf("va 0x%x is below image base 0x%x", rootVA, imageBase)
 	}
@@ -60,7 +65,10 @@ func opCallGraph(input AnalyzeInput) (string, error) {
 		return "", fmt.Errorf("va 0x%x is too far from image base 0x%x (RVA exceeds 4GB)", rootVA, imageBase)
 	}
 
-	is64 := f.FileHeader.Machine == 0x8664
+	is64 := bin.is64
+	if bin.arch != "x86" && bin.arch != "x64" {
+		return "", fmt.Errorf("call_graph currently supports x86/x64 only (detected: %s %s)", bin.format, bin.arch)
+	}
 
 	depth := input.Count // reuse count parameter as max_depth
 	if depth <= 0 {
@@ -78,33 +86,9 @@ func opCallGraph(input AnalyzeInput) (string, error) {
 		maxNodes = maxCallGraphMaxNodes
 	}
 
-	// Build symbol map for name resolution
-	symbols := peSymbolMap(f, imageBase)
-
-	// Preload executable section data for CALL scanning
-	var execSections []cgSection
-	for _, sec := range f.Sections {
-		if sec.Characteristics&0x20000000 == 0 { // IMAGE_SCN_MEM_EXECUTE
-			continue
-		}
-		data, err := sec.Data()
-		if err != nil || len(data) == 0 {
-			continue
-		}
-		execSections = append(execSections, cgSection{rva: sec.VirtualAddress, data: data})
-	}
-
-	// Build function table: .pdata for x64, heuristic for x86
-	var funcTable []funcRange
-	if is64 {
-		funcTable = buildFuncTable(f, imageBase)
-		if len(funcTable) == 0 {
-			return "", fmt.Errorf("no .pdata found -- call_graph requires exception table for function boundaries (x64)")
-		}
-	} else {
-		funcTable = buildFuncTableFromCalls(execSections, imageBase)
-		// Empty table is OK for x86 -- insertFunc will add the root if needed
-	}
+	symbols := bin.symbols
+	execSections := bin.execSections
+	funcTable := bin.funcTable
 
 	// Resolve root function
 	rootRVA := uint32(rootVA - imageBase)
@@ -597,5 +581,324 @@ func insertFunc(table []funcRange, rva uint32, sections []cgSection) []funcRange
 	}
 
 	return table
+}
+
+// cgBinary holds parsed binary info for call graph analysis.
+type cgBinary struct {
+	imageBase    uint64
+	is64         bool
+	arch         string // "x86" or "x64"
+	format       string // "PE", "ELF", "Mach-O"
+	symbols      map[uint64]string
+	execSections []cgSection
+	funcTable    []funcRange
+	closer       func()
+}
+
+// cgOpenBinary tries PE, ELF, Mach-O in order and returns a cgBinary.
+func cgOpenBinary(path string) (*cgBinary, error) {
+	// Try PE first
+	if bin, err := cgOpenPE(path); err == nil {
+		return bin, nil
+	}
+	// Try ELF
+	if bin, err := cgOpenELF(path); err == nil {
+		return bin, nil
+	}
+	// Try Mach-O
+	if bin, err := cgOpenMachO(path); err == nil {
+		return bin, nil
+	}
+	return nil, fmt.Errorf("cannot open %s as PE/ELF/Mach-O", path)
+}
+
+// cgOpenPE opens a PE binary and extracts call graph info.
+func cgOpenPE(path string) (*cgBinary, error) {
+	f, err := pe.Open(path)
+	if err != nil {
+		return nil, err
+	}
+
+	imageBase := peImageBase(f)
+	if imageBase == 0 {
+		f.Close()
+		return nil, fmt.Errorf("PE: no optional header")
+	}
+
+	var is64 bool
+	switch f.OptionalHeader.(type) {
+	case *pe.OptionalHeader64:
+		is64 = true
+	}
+
+	arch := "x86"
+	if is64 {
+		arch = "x64"
+	}
+
+	// Load executable sections
+	var execSections []cgSection
+	for _, s := range f.Sections {
+		if s.Characteristics&0x20000000 != 0 { // IMAGE_SCN_MEM_EXECUTE
+			data, err := s.Data()
+			if err != nil {
+				continue
+			}
+			execSections = append(execSections, cgSection{rva: s.VirtualAddress, data: data})
+		}
+	}
+	if len(execSections) == 0 {
+		f.Close()
+		return nil, fmt.Errorf("PE: no executable sections")
+	}
+
+	// Build function table
+	var funcTable []funcRange
+	if is64 {
+		funcTable = buildFuncTable(f, imageBase)
+		if len(funcTable) == 0 {
+			// x64 PE without .pdata: fall back to heuristic
+			funcTable = buildFuncTableFromCalls(execSections, imageBase)
+		}
+	} else {
+		// x86 PE: no .pdata, use heuristic
+		funcTable = buildFuncTableFromCalls(execSections, imageBase)
+	}
+
+	symbols := peSymbolMap(f, imageBase)
+
+	return &cgBinary{
+		imageBase:    imageBase,
+		is64:         is64,
+		arch:         arch,
+		format:       "PE",
+		symbols:      symbols,
+		execSections: execSections,
+		funcTable:    funcTable,
+		closer:       func() { f.Close() },
+	}, nil
+}
+
+// cgOpenELF opens an ELF binary and extracts call graph info.
+func cgOpenELF(path string) (*cgBinary, error) {
+	f, err := elf.Open(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var is64 bool
+	var arch string
+	switch f.Machine {
+	case elf.EM_386:
+		arch = "x86"
+	case elf.EM_X86_64:
+		arch = "x64"
+		is64 = true
+	default:
+		f.Close()
+		return nil, fmt.Errorf("ELF: unsupported machine %v (x86/x64 only)", f.Machine)
+	}
+
+	// ELF imageBase = lowest PT_LOAD virtual address. Unlike PE (which stores
+	// imageBase in the optional header), ELF uses the first loadable segment's
+	// vaddr as the base for RVA calculations.
+	var imageBase uint64 = ^uint64(0)
+	for _, p := range f.Progs {
+		if p.Type == elf.PT_LOAD && p.Vaddr < imageBase {
+			imageBase = p.Vaddr
+		}
+	}
+	if imageBase == ^uint64(0) {
+		imageBase = 0
+	}
+
+	// Executable sections (SHF_EXECINSTR)
+	var execSections []cgSection
+	for _, s := range f.Sections {
+		if s.Flags&elf.SHF_EXECINSTR != 0 && s.Size > 0 {
+			data, err := s.Data()
+			if err != nil || len(data) == 0 {
+				continue
+			}
+			// Guard: s.Addr < imageBase would cause uint64 underflow in subtraction
+			if s.Addr < imageBase {
+				continue
+			}
+			rva64 := s.Addr - imageBase
+			// RVA must fit in uint32 for cgSection.rva and all scan functions
+			if rva64 > 0xFFFFFFFF {
+				continue
+			}
+			execSections = append(execSections, cgSection{rva: uint32(rva64), data: data})
+		}
+	}
+	if len(execSections) == 0 {
+		f.Close()
+		return nil, fmt.Errorf("ELF: no executable sections")
+	}
+
+	// Heuristic function table from E8 CALL targets
+	funcTable := buildFuncTableFromCalls(execSections, imageBase)
+
+	// Merge ELF symbol table entries as function starts. Heuristic CALL-target
+	// detection alone misses functions only reached via indirect calls, jump
+	// tables, or tail calls. Symbol tables provide authoritative entry points.
+	symbols := elfSymbolMap(f, imageBase)
+	if len(symbols) > 0 {
+		for va := range symbols {
+			if va < imageBase {
+				continue
+			}
+			rva64 := va - imageBase
+			if rva64 > 0xFFFFFFFF {
+				continue // symbol beyond uint32 RVA range
+			}
+			rva := uint32(rva64)
+			if isInExecSection(execSections, rva) {
+				if fn := findFunc(funcTable, rva); fn == nil || fn.begin != rva {
+					funcTable = insertFunc(funcTable, rva, execSections)
+				}
+			}
+		}
+	}
+
+	return &cgBinary{
+		imageBase:    imageBase,
+		is64:         is64,
+		arch:         arch,
+		format:       "ELF",
+		symbols:      symbols,
+		execSections: execSections,
+		funcTable:    funcTable,
+		closer:       func() { f.Close() },
+	}, nil
+}
+
+// cgOpenMachO opens a Mach-O binary and extracts call graph info.
+func cgOpenMachO(path string) (*cgBinary, error) {
+	f, err := macho.Open(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var is64 bool
+	var arch string
+	switch f.Cpu {
+	case macho.Cpu386:
+		arch = "x86"
+	case macho.CpuAmd64:
+		arch = "x64"
+		is64 = true
+	default:
+		f.Close()
+		return nil, fmt.Errorf("Mach-O: unsupported CPU %v (x86/x64 only)", f.Cpu)
+	}
+
+	// Mach-O imageBase = __TEXT segment virtual address. This is the conventional
+	// base for Mach-O binaries; all code sections live within __TEXT.
+	var imageBase uint64
+	for _, seg := range f.Loads {
+		if s, ok := seg.(*macho.Segment); ok && s.Name == "__TEXT" {
+			imageBase = s.Addr
+			break
+		}
+	}
+
+	// Executable sections (in __TEXT segment)
+	var execSections []cgSection
+	for _, s := range f.Sections {
+		if s.Seg == "__TEXT" && s.Size > 0 {
+			data, err := s.Data()
+			if err != nil || len(data) == 0 {
+				continue
+			}
+			// Guard: s.Addr < imageBase would cause uint64 underflow in subtraction
+			if s.Addr < imageBase {
+				continue
+			}
+			rva64 := s.Addr - imageBase
+			// RVA must fit in uint32 for cgSection.rva and all scan functions
+			if rva64 > 0xFFFFFFFF {
+				continue
+			}
+			execSections = append(execSections, cgSection{rva: uint32(rva64), data: data})
+		}
+	}
+	if len(execSections) == 0 {
+		f.Close()
+		return nil, fmt.Errorf("Mach-O: no executable sections")
+	}
+
+	// Heuristic function table from E8 CALL targets
+	funcTable := buildFuncTableFromCalls(execSections, imageBase)
+
+	// Merge Mach-O symbol table entries as function starts (same rationale as ELF)
+	symbols := machoSymbolMap(f, imageBase)
+	if len(symbols) > 0 {
+		for va := range symbols {
+			if va < imageBase {
+				continue
+			}
+			rva64 := va - imageBase
+			if rva64 > 0xFFFFFFFF {
+				continue // symbol beyond uint32 RVA range
+			}
+			rva := uint32(rva64)
+			if isInExecSection(execSections, rva) {
+				if fn := findFunc(funcTable, rva); fn == nil || fn.begin != rva {
+					funcTable = insertFunc(funcTable, rva, execSections)
+				}
+			}
+		}
+	}
+
+	return &cgBinary{
+		imageBase:    imageBase,
+		is64:         is64,
+		arch:         arch,
+		format:       "Mach-O",
+		symbols:      symbols,
+		execSections: execSections,
+		funcTable:    funcTable,
+		closer:       func() { f.Close() },
+	}, nil
+}
+
+// elfSymbolMap builds a VA->name map from ELF .symtab and .dynsym.
+func elfSymbolMap(f *elf.File, imageBase uint64) map[uint64]string {
+	m := make(map[uint64]string)
+	// .symtab
+	if syms, err := f.Symbols(); err == nil {
+		for _, s := range syms {
+			if s.Name != "" && s.Value != 0 {
+				m[s.Value] = s.Name
+			}
+		}
+	}
+	// .dynsym
+	if syms, err := f.DynamicSymbols(); err == nil {
+		for _, s := range syms {
+			if s.Name != "" && s.Value != 0 {
+				if _, exists := m[s.Value]; !exists {
+					m[s.Value] = s.Name
+				}
+			}
+		}
+	}
+	return m
+}
+
+// machoSymbolMap builds a VA->name map from Mach-O symbol table.
+func machoSymbolMap(f *macho.File, imageBase uint64) map[uint64]string {
+	m := make(map[uint64]string)
+	if f.Symtab == nil {
+		return m
+	}
+	for _, s := range f.Symtab.Syms {
+		if s.Name != "" && s.Value != 0 {
+			m[s.Value] = s.Name
+		}
+	}
+	return m
 }
 

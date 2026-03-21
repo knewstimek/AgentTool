@@ -119,12 +119,11 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input AnalyzeInput) (
 		return errorResult("path is a directory, not a file")
 	}
 
-	// File size check — use configured max (default 50MB)
-	maxSize := int64(common.GetMaxFileSize())
-	if fi.Size() > maxSize {
-		return errorResult(fmt.Sprintf("file too large: %d bytes (max %d MB, change with set_config max_file_size_mb)",
-			fi.Size(), maxSize/(1024*1024)))
-	}
+	// No global file size check for analyze -- most operations (disassemble,
+	// call_graph, xref, *_info) use lazy section-based reading and don't load
+	// the entire file. Operations that do (strings, entropy, bin_diff) have
+	// their own per-operation size checks. This allows analyzing multi-GB
+	// binaries with debug symbols (common for game servers).
 
 	var result string
 	switch op {
@@ -197,7 +196,7 @@ imphash (PE import hash for malware classification), rich_header (PE build tool 
 overlay_detect (detect appended data after last section), dwarf_info (debug symbol info),
 xref (find all code references to a target address in PE/ELF/Mach-O; supports x86/x64/ARM64/ARM32),
 function_at (find function boundaries via PE .pdata or heuristic prologue/epilogue scan),
-call_graph (static call graph from a root function; x64 uses .pdata, x86 uses heuristic CALL target detection),
+call_graph (static call graph from a root function; PE/ELF/Mach-O x86/x64, .pdata or heuristic detection),
 follow_ptr (follow pointer chain in PE with symbol annotation, circular reference detection),
 rtti_dump (parse MSVC RTTI from vtable: demangled class name + base classes, pSelf validation),
 struct_layout (dump memory region as structured layout with symbol/section annotation),

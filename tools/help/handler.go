@@ -502,7 +502,7 @@ Static binary analysis tool with 21 operations:
 - dwarf_info: DWARF debug info (compilation units, functions, types)
 - xref: Find code references to target address (PE/ELF/Mach-O, x86/x64/ARM64/ARM32)
 - function_at: Find function boundaries (.pdata or heuristic)
-- call_graph: Static call graph from root function (PE x86/x64)
+- call_graph: Static call graph from root function (PE/ELF/Mach-O x86/x64)
 - follow_ptr: Follow pointer chain with symbol annotation (PE). Detects circular pointer references
 - rtti_dump: Parse MSVC RTTI from vtable (class name + base classes). Includes demangled class names, pSelf cross-validation for x64, and section data caching
 - struct_layout: Dump memory as structured layout with annotations (PE)
@@ -776,12 +776,14 @@ Find function boundaries in PE files.
   Returns function start, end, size, and disassembly.
 
 ### call_graph
-Build a static call graph from a root function (PE x86/x64).
-  analyze(operation="call_graph", file_path="/path/to/binary.exe",
+Build a static call graph from a root function (PE/ELF/Mach-O, x86/x64).
+  analyze(operation="call_graph", file_path="/path/to/binary",
           va="0x140001000")
 
-  x64: uses .pdata for precise function boundaries.
-  x86: heuristic mode -- detects functions from E8 CALL targets (no .pdata needed).
+  Supports PE, ELF, and Mach-O binaries (x86 and x64).
+  x64 PE: uses .pdata for precise function boundaries.
+  x86 / ELF / Mach-O: heuristic mode -- detects functions from E8 CALL targets.
+  ELF/Mach-O: also merges symbol table entries as function starts.
   BFS traversal from the root function, showing:
   - Callers: functions that call the root (1 level, reverse scan)
   - Callees: functions called by the root (tree format, configurable depth)
@@ -791,7 +793,6 @@ Build a static call graph from a root function (PE x86/x64).
     count: Max depth (default: 2, max: 5)
     max_results: Max nodes to visit (default: 200, max: 500)
 
-  Only includes callees that land on .pdata function starts (filters false positives).
   Cycle detection marks revisited nodes as "(already shown)".
 
 ### follow_ptr
@@ -862,7 +863,7 @@ Scan PE .rdata for all MSVC vtables with RTTI. Auto-discovers C++ classes with v
 9. disassemble -- Decode machine code (use va= for PE virtual addresses)
 10. function_at -- Find function boundaries (.pdata or heuristic fallback)
 11. xref -- Find all call/jump/data references to an address (PE/ELF/Mach-O)
-12. call_graph -- Build static call graph from a root function (PE x86/x64)
+12. call_graph -- Build static call graph from a root function (PE/ELF/Mach-O x86/x64)
 13. follow_ptr -- Follow pointer chains (vtable inspection, data structure traversal)
 14. rtti_dump -- Parse MSVC RTTI from vtable (identify C++ class hierarchy)
 15. vtable_scan -- Discover all C++ vtables with RTTI in PE (class mapping)

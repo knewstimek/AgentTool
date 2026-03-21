@@ -1,6 +1,9 @@
 package analyze
 
 import (
+	"debug/elf"
+	"debug/macho"
+	"debug/pe"
 	"fmt"
 	"os"
 	"strconv"
@@ -20,38 +23,31 @@ const (
 // Supports x86 (16/32/64-bit) and ARM (32/64-bit).
 // Reads only the needed portion instead of the entire file to save memory.
 func opDisassemble(input AnalyzeInput) (string, error) {
-	// VA-to-offset: uses shared resolveVA() for PE VA validation and conversion,
-	// then adds disassemble-specific extras (CPU mode, function boundary, symbol map).
+	// VA-to-offset: try PE, then ELF, then Mach-O for VA resolution.
+	// Also auto-detects arch/mode and provides symbol map for annotations.
 	var funcEndFileOff int64 = -1 // function boundary from .pdata or heuristic
 	var symbolMap map[uint64]string // VA -> symbol name for inline annotations
 	if input.VA != "" {
-		resolved, err := resolveVA(input.FilePath, input.VA)
+		resolved, err := disasmResolveVA(input.FilePath, input.VA)
 		if err != nil {
 			return "", err
 		}
-		defer resolved.PEFile.Close()
+		if resolved.closer != nil {
+			defer resolved.closer()
+		}
 
-		input.Offset = int(resolved.FileOffset)
+		input.Offset = int(resolved.fileOffset)
 		if input.BaseAddr == "" {
-			input.BaseAddr = fmt.Sprintf("0x%x", resolved.DisplayBase)
+			input.BaseAddr = fmt.Sprintf("0x%x", resolved.displayBase)
 		}
-
-		// Auto-detect CPU mode from PE Machine field
-		if input.Mode == 0 {
-			switch resolved.PEFile.FileHeader.Machine {
-			case 0x14c: // IMAGE_FILE_MACHINE_I386
-				input.Mode = 32
-			case 0x8664: // IMAGE_FILE_MACHINE_AMD64
-				input.Mode = 64
-			}
+		if input.Arch == "" && resolved.arch != "" {
+			input.Arch = resolved.arch
 		}
-
-		// Auto-stop at function boundary: .pdata first, heuristic fallback
-		if endOff, _, found := pdataOrHeuristicEndOffset(resolved.PEFile, resolved.RVA, uint32(resolved.FileOffset)); found {
-			funcEndFileOff = int64(endOff)
+		if input.Mode == 0 && resolved.mode != 0 {
+			input.Mode = resolved.mode
 		}
-
-		symbolMap = peSymbolMap(resolved.PEFile, resolved.ImageBase)
+		funcEndFileOff = resolved.funcEndFileOff
+		symbolMap = resolved.symbols
 	}
 
 	fi, err := os.Stat(input.FilePath)
@@ -340,6 +336,217 @@ func disasmARM32(data []byte, baseAddr uint64, offset, count int) (string, error
 
 	sb.WriteString(fmt.Sprintf("\n(%d instructions from offset 0x%x, arch=arm, mode=32)", decoded, offset))
 	return sb.String(), nil
+}
+
+// disasmResolved holds the result of VA resolution for any binary format.
+type disasmResolved struct {
+	fileOffset     int64
+	displayBase    uint64
+	arch           string // "x86" or "arm"
+	mode           int    // 16, 32, or 64
+	funcEndFileOff int64  // -1 if unknown
+	symbols        map[uint64]string
+	closer         func() // close the binary file handle
+}
+
+// disasmResolveVA tries PE, then ELF, then Mach-O to resolve a VA to file offset.
+func disasmResolveVA(filePath, vaStr string) (*disasmResolved, error) {
+	va, err := parseHexAddr(vaStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid va: %s", vaStr)
+	}
+
+	// Try PE first
+	if r, err := disasmResolvePE(filePath, va); err == nil {
+		return r, nil
+	}
+	// Try ELF
+	if r, err := disasmResolveELF(filePath, va); err == nil {
+		return r, nil
+	}
+	// Try Mach-O
+	if r, err := disasmResolveMachO(filePath, va); err == nil {
+		return r, nil
+	}
+
+	return nil, fmt.Errorf("va parameter requires a PE, ELF, or Mach-O file (could not parse %s)", filePath)
+}
+
+func disasmResolvePE(filePath string, va uint64) (*disasmResolved, error) {
+	f, err := pe.Open(filePath)
+	if err != nil {
+		return nil, err
+	}
+
+	imageBase := peImageBase(f)
+	if va < imageBase || va-imageBase > 0xFFFFFFFF {
+		f.Close()
+		return nil, fmt.Errorf("va out of range")
+	}
+
+	rva := uint32(va - imageBase)
+	fileOff, _, err := rvaToFileOffset(f, rva)
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+
+	r := &disasmResolved{
+		fileOffset:     int64(fileOff),
+		displayBase:    va - uint64(fileOff),
+		funcEndFileOff: -1,
+		closer:         func() { f.Close() },
+	}
+
+	// Auto-detect arch/mode from PE Machine field
+	switch f.FileHeader.Machine {
+	case 0x14c: // i386
+		r.arch = "x86"
+		r.mode = 32
+	case 0x8664: // AMD64
+		r.arch = "x86"
+		r.mode = 64
+	case 0xaa64: // ARM64
+		r.arch = "arm"
+		r.mode = 64
+	case 0x01c0, 0x01c2, 0x01c4: // ARM, ARMv7 Thumb, ARMv7
+		r.arch = "arm"
+		r.mode = 32
+	}
+
+	// Function boundary from .pdata or heuristic
+	if endOff, _, found := pdataOrHeuristicEndOffset(f, rva, uint32(fileOff)); found {
+		r.funcEndFileOff = int64(endOff)
+	}
+
+	r.symbols = peSymbolMap(f, imageBase)
+	return r, nil
+}
+
+func disasmResolveELF(filePath string, va uint64) (*disasmResolved, error) {
+	f, err := elf.Open(filePath)
+	if err != nil {
+		return nil, err
+	}
+
+	// ELF imageBase = lowest PT_LOAD virtual address (unlike PE which stores
+	// it in the optional header). Needed for symbol map VA keys.
+	var imageBase uint64
+	foundLoad := false
+	for _, p := range f.Progs {
+		if p.Type == elf.PT_LOAD {
+			if !foundLoad || p.Vaddr < imageBase {
+				imageBase = p.Vaddr
+				foundLoad = true
+			}
+		}
+	}
+
+	// Resolve VA to file offset via section headers
+	var fileOff int64 = -1
+	for _, sec := range f.Sections {
+		if sec.Type == elf.SHT_NOBITS {
+			continue // .bss has no file data
+		}
+		secEnd := sec.Addr + sec.Size
+		if secEnd < sec.Addr {
+			continue // overflow in malformed section header
+		}
+		if va >= sec.Addr && va < secEnd {
+			fileOff = int64(sec.Offset) + int64(va-sec.Addr)
+			break
+		}
+	}
+	if fileOff < 0 {
+		f.Close()
+		return nil, fmt.Errorf("va 0x%x not found in any ELF section", va)
+	}
+
+	r := &disasmResolved{
+		fileOffset:     fileOff,
+		displayBase:    va - uint64(fileOff),
+		funcEndFileOff: -1,
+		closer:         func() { f.Close() },
+	}
+
+	// Auto-detect arch/mode
+	switch f.Machine {
+	case elf.EM_386:
+		r.arch = "x86"
+		r.mode = 32
+	case elf.EM_X86_64:
+		r.arch = "x86"
+		r.mode = 64
+	case elf.EM_AARCH64:
+		r.arch = "arm"
+		r.mode = 64
+	case elf.EM_ARM:
+		r.arch = "arm"
+		r.mode = 32
+	}
+
+	r.symbols = elfSymbolMap(f, imageBase)
+	return r, nil
+}
+
+func disasmResolveMachO(filePath string, va uint64) (*disasmResolved, error) {
+	f, err := macho.Open(filePath)
+	if err != nil {
+		return nil, err
+	}
+
+	// Mach-O imageBase = __TEXT segment vmaddr (conventional base for code).
+	// Needed for symbol map VA keys.
+	var imageBase uint64
+	for _, seg := range f.Loads {
+		if s, ok := seg.(*macho.Segment); ok && s.Name == "__TEXT" {
+			imageBase = s.Addr
+			break
+		}
+	}
+
+	// Resolve VA to file offset via sections
+	var fileOff int64 = -1
+	for _, sec := range f.Sections {
+		secEnd := sec.Addr + sec.Size
+		if secEnd < sec.Addr {
+			continue // overflow in malformed section header
+		}
+		if va >= sec.Addr && va < secEnd {
+			fileOff = int64(sec.Offset) + int64(va-sec.Addr)
+			break
+		}
+	}
+	if fileOff < 0 {
+		f.Close()
+		return nil, fmt.Errorf("va 0x%x not found in any Mach-O section", va)
+	}
+
+	r := &disasmResolved{
+		fileOffset:     fileOff,
+		displayBase:    va - uint64(fileOff),
+		funcEndFileOff: -1,
+		closer:         func() { f.Close() },
+	}
+
+	// Auto-detect arch/mode
+	switch f.Cpu {
+	case macho.Cpu386:
+		r.arch = "x86"
+		r.mode = 32
+	case macho.CpuAmd64:
+		r.arch = "x86"
+		r.mode = 64
+	case macho.CpuArm64:
+		r.arch = "arm"
+		r.mode = 64
+	case macho.CpuArm:
+		r.arch = "arm"
+		r.mode = 32
+	}
+
+	r.symbols = machoSymbolMap(f, imageBase)
+	return r, nil
 }
 
 // resolveSymbol looks up target addresses in the symbol map for CALL/JMP/LEA instructions.
