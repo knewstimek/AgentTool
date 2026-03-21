@@ -59,6 +59,18 @@ func opPatternSearch(input AnalyzeInput) (string, error) {
 
 	var sb strings.Builder
 	found := 0
+
+	// Section name resolver for PE files
+	var peSections []peSectionRange
+	if mapper != nil {
+		for _, s := range mapper.file.Sections {
+			peSections = append(peSections, peSectionRange{
+				name:  s.Name,
+				start: s.Offset,
+				end:   s.Offset + s.Size,
+			})
+		}
+	}
 	patLen := len(patternBytes)
 
 	// Chunked reading with overlap to catch matches spanning chunk boundaries
@@ -86,11 +98,19 @@ func opPatternSearch(input AnalyzeInput) (string, error) {
 			}
 
 			if matchPattern(chunk[i:i+patLen], patternBytes, mask) {
-				// Show matched bytes with optional VA for PE files
+				// Show matched bytes with optional VA and section name for PE files
 				matchHex := hex.EncodeToString(chunk[i : i+patLen])
 				va := mapper.toVA(int(absOffset))
+				var secName string
+				if absOffset <= 0xFFFFFFFF {
+					secName = sectionForFileOffset(peSections, uint32(absOffset))
+				}
 				if va != "" {
-					sb.WriteString(fmt.Sprintf("0x%08x (%s): %s\n", absOffset, va, formatHexSpaced(matchHex)))
+					if secName != "" {
+						sb.WriteString(fmt.Sprintf("[%s] 0x%08x (%s): %s\n", secName, absOffset, va, formatHexSpaced(matchHex)))
+					} else {
+						sb.WriteString(fmt.Sprintf("0x%08x (%s): %s\n", absOffset, va, formatHexSpaced(matchHex)))
+					}
 				} else {
 					sb.WriteString(fmt.Sprintf("0x%08x: %s\n", absOffset, formatHexSpaced(matchHex)))
 				}
@@ -153,6 +173,23 @@ func matchPattern(data, pattern []byte, mask []bool) bool {
 		}
 	}
 	return true
+}
+
+// peSectionRange maps file offset ranges to section names.
+type peSectionRange struct {
+	name  string
+	start uint32
+	end   uint32
+}
+
+// sectionForFileOffset returns the section name for a given file offset.
+func sectionForFileOffset(sections []peSectionRange, off uint32) string {
+	for _, s := range sections {
+		if off >= s.start && off < s.end {
+			return s.name
+		}
+	}
+	return ""
 }
 
 // formatHexSpaced inserts spaces every 2 hex chars for readability.

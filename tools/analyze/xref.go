@@ -49,8 +49,8 @@ func opXref(input AnalyzeInput) (string, error) {
 		maxRes = maxXrefMaxResults
 	}
 
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Cross-references to 0x%x:\n\n", targetVA))
+	// Two-pass: collect results first for summary, then format
+	var refs []xrefResult
 	found := 0
 
 	for _, sec := range f.Sections {
@@ -68,10 +68,38 @@ func opXref(input AnalyzeInput) (string, error) {
 		}
 
 		if is64 {
-			found = scanXref64(secData, sec.VirtualAddress, targetRVA, imageBase, maxRes, found, &sb)
+			refs, found = collectXref64(secData, sec.VirtualAddress, targetRVA, imageBase, maxRes, found, refs)
 		} else {
-			found = scanXref32(secData, sec.VirtualAddress, targetRVA, imageBase, maxRes, found, &sb)
+			refs, found = collectXref32(secData, sec.VirtualAddress, targetRVA, imageBase, maxRes, found, refs)
 		}
+	}
+
+	var sb strings.Builder
+
+	// Summary statistics
+	if found > 0 {
+		counts := make(map[string]int)
+		for _, r := range refs {
+			counts[r.refType]++
+		}
+		sb.WriteString(fmt.Sprintf("%d references to 0x%x:", found, targetVA))
+		for _, typ := range []string{"CALL", "JMP", "LEA", "MOV", "PUSH", "Jcc"} {
+			if c, ok := counts[typ]; ok {
+				sb.WriteString(fmt.Sprintf(" %d %s,", c, typ))
+			}
+		}
+		// Trim trailing comma and add newline
+		s := strings.TrimRight(sb.String(), ",")
+		sb.Reset()
+		sb.WriteString(s)
+		sb.WriteString("\n\n")
+	} else {
+		sb.WriteString(fmt.Sprintf("Cross-references to 0x%x:\n\n", targetVA))
+	}
+
+	// Detail lines
+	for _, r := range refs {
+		sb.WriteString(r.line)
 	}
 
 	if found == 0 {
@@ -85,7 +113,185 @@ func opXref(input AnalyzeInput) (string, error) {
 	return sb.String(), nil
 }
 
+// xrefResult holds a single cross-reference result with type classification.
+type xrefResult struct {
+	refType string // CALL, JMP, LEA, MOV, PUSH, Jcc
+	line    string // formatted output line
+}
+
+// collectXref64 scans x64 code for references and collects typed results.
+func collectXref64(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxRes, found int, refs []xrefResult) ([]xrefResult, int) {
+	dataLen := len(data)
+
+	for i := 0; i < dataLen && found < maxRes; i++ {
+		instrRVA := secRVA + uint32(i)
+		instrVA := imageBase + uint64(instrRVA)
+
+		// E8 rel32 -- CALL relative
+		if data[i] == 0xE8 && i+5 <= dataLen {
+			rel := int32(binary.LittleEndian.Uint32(data[i+1:]))
+			target := uint32(int64(instrRVA) + 5 + int64(rel))
+			if target == targetRVA {
+				refs = append(refs, xrefResult{"CALL", fmt.Sprintf("  0x%x: CALL 0x%x  (E8 relative)\n", instrVA, imageBase+uint64(targetRVA))})
+				found++
+				continue
+			}
+		}
+
+		// E9 rel32 -- JMP relative
+		if data[i] == 0xE9 && i+5 <= dataLen {
+			rel := int32(binary.LittleEndian.Uint32(data[i+1:]))
+			target := uint32(int64(instrRVA) + 5 + int64(rel))
+			if target == targetRVA {
+				refs = append(refs, xrefResult{"JMP", fmt.Sprintf("  0x%x: JMP 0x%x  (E9 relative)\n", instrVA, imageBase+uint64(targetRVA))})
+				found++
+				continue
+			}
+		}
+
+		// 0F 80-8F rel32 -- Jcc (conditional jump near)
+		if data[i] == 0x0F && i+6 <= dataLen && data[i+1] >= 0x80 && data[i+1] <= 0x8F {
+			rel := int32(binary.LittleEndian.Uint32(data[i+2:]))
+			target := uint32(int64(instrRVA) + 6 + int64(rel))
+			if target == targetRVA {
+				name := jccNames[data[i+1]-0x80]
+				refs = append(refs, xrefResult{"Jcc", fmt.Sprintf("  0x%x: %s 0x%x  (0F %02X relative)\n", instrVA, name, imageBase+uint64(targetRVA), data[i+1])})
+				found++
+				continue
+			}
+		}
+
+		// REX.W LEA reg, [rip+disp32]
+		if i+7 <= dataLen {
+			rex := data[i]
+			if (rex == 0x48 || rex == 0x4C) && data[i+1] == 0x8D {
+				modrm := data[i+2]
+				mod := modrm >> 6
+				rm := modrm & 0x07
+				if mod == 0x00 && rm == 0x05 {
+					disp := int32(binary.LittleEndian.Uint32(data[i+3:]))
+					target := uint32(int64(instrRVA) + 7 + int64(disp))
+					if target == targetRVA {
+						regIdx := ((rex & 0x04) << 1) | ((modrm >> 3) & 0x07)
+						refs = append(refs, xrefResult{"LEA", fmt.Sprintf("  0x%x: LEA %s, [0x%x]  (RIP-relative)\n", instrVA, x64RegName(regIdx), imageBase+uint64(targetRVA))})
+						found++
+						continue
+					}
+				}
+			}
+		}
+
+		// FF 15/25 disp32 -- indirect CALL/JMP [rip+disp32]
+		if i+6 <= dataLen && data[i] == 0xFF {
+			if data[i+1] == 0x15 || data[i+1] == 0x25 {
+				disp := int32(binary.LittleEndian.Uint32(data[i+2:]))
+				target := uint32(int64(instrRVA) + 6 + int64(disp))
+				if target == targetRVA {
+					op := "CALL"
+					if data[i+1] == 0x25 {
+						op = "JMP"
+					}
+					refs = append(refs, xrefResult{op, fmt.Sprintf("  0x%x: %s [0x%x]  (indirect RIP-relative)\n", instrVA, op, imageBase+uint64(targetRVA))})
+					found++
+					continue
+				}
+			}
+		}
+
+		// 68 imm32 -- PUSH
+		if data[i] == 0x68 && i+5 <= dataLen {
+			imm := int32(binary.LittleEndian.Uint32(data[i+1:]))
+			immVA := uint64(int64(imm))
+			targetVA := imageBase + uint64(targetRVA)
+			if immVA == targetVA {
+				if i+5 < dataLen && data[i+5] == 0xC3 {
+					refs = append(refs, xrefResult{"PUSH", fmt.Sprintf("  0x%x: PUSH 0x%x; RET  (indirect jump via push+ret)\n", instrVA, targetVA)})
+				} else {
+					refs = append(refs, xrefResult{"PUSH", fmt.Sprintf("  0x%x: PUSH 0x%x  (imm32)\n", instrVA, targetVA)})
+				}
+				found++
+				continue
+			}
+		}
+
+		// MOV reg, [rip+disp32]
+		if i+7 <= dataLen {
+			rex := data[i]
+			if (rex == 0x48 || rex == 0x4C) && data[i+1] == 0x8B {
+				modrm := data[i+2]
+				mod := modrm >> 6
+				rm := modrm & 0x07
+				if mod == 0x00 && rm == 0x05 {
+					disp := int32(binary.LittleEndian.Uint32(data[i+3:]))
+					target := uint32(int64(instrRVA) + 7 + int64(disp))
+					if target == targetRVA {
+						regIdx := ((rex & 0x04) << 1) | ((modrm >> 3) & 0x07)
+						refs = append(refs, xrefResult{"MOV", fmt.Sprintf("  0x%x: MOV %s, [0x%x]  (RIP-relative)\n", instrVA, x64RegName(regIdx), imageBase+uint64(targetRVA))})
+						found++
+						continue
+					}
+				}
+			}
+		}
+	}
+	return refs, found
+}
+
+// collectXref32 scans x86 32-bit code for references and collects typed results.
+func collectXref32(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxRes, found int, refs []xrefResult) ([]xrefResult, int) {
+	dataLen := len(data)
+	targetAbsVA := uint32(imageBase) + targetRVA
+
+	for i := 0; i < dataLen && found < maxRes; i++ {
+		instrRVA := secRVA + uint32(i)
+		instrVA := imageBase + uint64(instrRVA)
+
+		// E8/E9 rel32 -- CALL/JMP relative
+		if (data[i] == 0xE8 || data[i] == 0xE9) && i+5 <= dataLen {
+			rel := int32(binary.LittleEndian.Uint32(data[i+1:]))
+			target := uint32(int64(instrRVA) + 5 + int64(rel))
+			if target == targetRVA {
+				op := "CALL"
+				if data[i] == 0xE9 {
+					op = "JMP"
+				}
+				refs = append(refs, xrefResult{op, fmt.Sprintf("  0x%x: %s 0x%x  (relative)\n", instrVA, op, imageBase+uint64(targetRVA))})
+				found++
+				continue
+			}
+		}
+
+		// 0F 80-8F rel32 -- Jcc
+		if data[i] == 0x0F && i+6 <= dataLen && data[i+1] >= 0x80 && data[i+1] <= 0x8F {
+			rel := int32(binary.LittleEndian.Uint32(data[i+2:]))
+			target := uint32(int64(instrRVA) + 6 + int64(rel))
+			if target == targetRVA {
+				name := jccNames[data[i+1]-0x80]
+				refs = append(refs, xrefResult{"Jcc", fmt.Sprintf("  0x%x: %s 0x%x  (relative)\n", instrVA, name, imageBase+uint64(targetRVA))})
+				found++
+				continue
+			}
+		}
+
+		// 68 imm32 -- PUSH
+		if data[i] == 0x68 && i+5 <= dataLen {
+			imm := binary.LittleEndian.Uint32(data[i+1:])
+			if imm == targetAbsVA {
+				if i+5 < dataLen && data[i+5] == 0xC3 {
+					refs = append(refs, xrefResult{"PUSH", fmt.Sprintf("  0x%x: PUSH 0x%x; RET  (indirect jump via push+ret)\n", instrVA, targetAbsVA)})
+				} else {
+					refs = append(refs, xrefResult{"PUSH", fmt.Sprintf("  0x%x: PUSH 0x%x  (absolute)\n", instrVA, targetAbsVA)})
+				}
+				found++
+				continue
+			}
+		}
+	}
+	return refs, found
+}
+
 // scanXref64 scans x64 code for references to targetRVA using RIP-relative addressing.
+// Deprecated: use collectXref64 instead. Kept for backward compatibility.
 func scanXref64(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxRes, found int, sb *strings.Builder) int {
 	dataLen := len(data)
 

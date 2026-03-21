@@ -118,7 +118,7 @@ It auto-detects file encoding and indentation style, preserving them across edit
 - externalip: Get your external (public) IP address
 - sloc: Count source lines of code (SLOC) with per-language summary
 - debug: Interactive debugger via DAP (breakpoints, stepping, variables, stack traces)
-- analyze: Static binary analysis (17 operations: disassemble, PE/ELF/Mach-O parsing, imphash, Rich header, resources, DWARF, strings, hexdump, pattern search, entropy, overlay, binary diff, xref, function_at, call_graph)
+- analyze: Static binary analysis (20 operations: disassemble, PE/ELF/Mach-O parsing, imphash, Rich header, resources, DWARF, strings, hexdump, pattern search, entropy, overlay, binary diff, xref, function_at, call_graph, follow_ptr, rtti_dump, struct_layout)
 - set_config: Change runtime settings (encoding, file size, SSRF policy, DoH/ECH toggle)
 - agent_tool_help: This help tool
 
@@ -485,23 +485,30 @@ Parameters: session_id, operation, adapter_command, adapter_args, address, launc
   expression, context, timeout_sec
 
 ## analyze
-Static binary analysis tool with 14 operations:
-- disassemble: x86/x64/ARM/ARM64 disassembly (pure Go, no CGO)
+Static binary analysis tool with 20 operations:
+- disassemble: x86/x64/ARM/ARM64 disassembly (stop_at_ret for function-scoped)
 - pe_info: PE header parsing with RWX section warnings
 - elf_info: ELF header/sections/segments/symbols with RWX warnings
 - macho_info: Mach-O header/segments/sections/symbols (fat binary support)
 - strings: Extract printable strings (ASCII and UTF-8)
 - hexdump: Hex + ASCII dump of file regions
-- pattern_search: Hex byte pattern matching with ?? wildcards
+- pattern_search: Hex byte pattern matching with ?? wildcards (shows section names)
 - entropy: Shannon entropy per section (detects packed/encrypted regions)
 - bin_diff: Two-file byte comparison
 - resource_info: PE resource directory and version info extraction
 - imphash: PE import hash (MD5) for malware classification
-- rich_header: PE Rich header — build tool fingerprinting
+- rich_header: PE Rich header -- build tool fingerprinting
 - overlay_detect: Detect data appended after last section
 - dwarf_info: DWARF debug info (compilation units, functions, types)
+- xref: Find code references to target address (with type summary)
+- function_at: Find function boundaries (.pdata or heuristic)
+- call_graph: Static call graph from root function
+- follow_ptr: Follow pointer chain with symbol annotation (PE)
+- rtti_dump: Parse MSVC RTTI from vtable (class name + base classes)
+- struct_layout: Dump memory as structured layout with annotations (PE)
 Parameters: operation, file_path, offset, count, mode, arch (x86/arm),
-  base_addr, min_length, max_results, length, section, pattern, file_path_b
+  base_addr, min_length, max_results, length, section, pattern, file_path_b,
+  va, target_va, stop_at_ret
 Use topic='analyze' for detailed guide with examples.
 
 ## set_config
@@ -538,7 +545,8 @@ Disassemble machine code. Supports x86 (16/32/64-bit) and ARM (32/64-bit).
     va: Virtual address (hex) -- auto-converts to file offset using PE headers.
         Also auto-sets base_addr to ImageBase and mode from PE Machine field.
         Example: va="0x140001000" (PE only)
-    count: Number of instructions to decode (default: 50, max: 200)
+    count: Number of instructions to decode (default: 50, max: 600)
+    stop_at_ret: Stop at function return (RET/RETF + padding/prologue boundary)
     mode: CPU mode -- x86: 16/32/64, arm: 32/64 (default: 64)
     base_addr: Base address mapped to file offset 0 (hex string, default: "0").
                Displayed address = base_addr + offset + position.
@@ -781,6 +789,46 @@ Build a static call graph from a root function (x64 PE only).
   Only includes callees that land on .pdata function starts (filters false positives).
   Cycle detection marks revisited nodes as "(already shown)".
 
+### follow_ptr
+Follow a chain of pointers in a PE file with symbol/section annotation.
+  analyze(operation="follow_ptr", file_path="/path/to/binary.exe",
+          va="0x140050000", count=6)
+
+  Reads pointer-sized values starting at VA, follows the chain, and annotates
+  each step with symbol names or section info. Stops on null, unmapped, or depth limit.
+
+  Parameters:
+    va: Starting virtual address (hex, required)
+    count: Maximum depth (default: 4, max: 10)
+
+  Output: [0] 0x140050000 (.rdata) -> 0x140060ABC (MyClass::vtable)
+
+### rtti_dump
+Parse MSVC RTTI (Run-Time Type Information) from a vtable address.
+  analyze(operation="rtti_dump", file_path="/path/to/binary.exe",
+          va="0x140050000")
+
+  Reads vtable[-4] (x86) or vtable[-8] (x64) to find CompleteObjectLocator,
+  then parses TypeDescriptor (class name) and ClassHierarchyDescriptor (base classes).
+
+  Parameters:
+    va: Vtable virtual address (hex, required)
+
+  Output: class name (mangled), base class list with displacements.
+  Auto-detects x86 vs x64 from PE Machine field.
+
+### struct_layout
+Dump a memory region as a structured layout with pointer-sized slots.
+  analyze(operation="struct_layout", file_path="/path/to/binary.exe",
+          va="0x140050000", length=128)
+
+  Each slot is annotated: symbol name, [code]/[data]/[rdata] section, or [null].
+  Useful for inspecting vtables, object layouts, and data structures.
+
+  Parameters:
+    va: Starting virtual address (hex, required)
+    length: Number of bytes to dump (default: 64, max: 512)
+
 ## Typical Workflow
 
 1. pe_info/elf_info/macho_info -- Get section layout, check for W+X sections
@@ -795,8 +843,11 @@ Build a static call graph from a root function (x64 PE only).
 10. function_at -- Find function boundaries (.pdata or heuristic fallback)
 11. xref -- Find all call/jump/data references to an address (PE)
 12. call_graph -- Build static call graph from a root function (x64 PE)
-13. dwarf_info -- Extract debug symbols and function names
-14. bin_diff -- Compare original vs patched versions
+13. follow_ptr -- Follow pointer chains (vtable inspection, data structure traversal)
+14. rtti_dump -- Parse MSVC RTTI from vtable (identify C++ class hierarchy)
+15. struct_layout -- Dump memory as structured layout (vtable, object layout analysis)
+16. dwarf_info -- Extract debug symbols and function names
+17. bin_diff -- Compare original vs patched versions
 
 ### Example: Analyzing a DLL
   # Step 1: Get PE layout

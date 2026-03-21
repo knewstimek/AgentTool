@@ -146,6 +146,9 @@ func opDisassemble(input AnalyzeInput) (string, error) {
 		}
 		return disasmARM32(data, baseAddr, offset, count)
 	default:
+		if input.StopAtRet {
+			return disasmX86Opts(data, baseAddr, offset, count, mode, symbolMap, true)
+		}
 		return disasmX86(data, baseAddr, offset, count, mode, symbolMap)
 	}
 }
@@ -177,14 +180,22 @@ func DisasmBytes(data []byte, baseAddr uint64, arch string, mode int, count int)
 }
 
 func disasmX86(data []byte, baseAddr uint64, offset, count, mode int, symbols map[uint64]string) (string, error) {
+	return disasmX86Opts(data, baseAddr, offset, count, mode, symbols, false)
+}
+
+// disasmX86Opts is the core x86 disassembler with optional stop_at_ret behavior.
+// When stopAtRet is true, stops after a RET/RETF instruction that is followed by
+// INT3/NOP padding or a new function prologue (confirmed function boundary).
+func disasmX86Opts(data []byte, baseAddr uint64, offset, count, mode int, symbols map[uint64]string, stopAtRet bool) (string, error) {
 	var sb strings.Builder
 	pos := 0
 	decoded := 0
+	stoppedAtRet := false
 
 	for decoded < count && pos < len(data) {
 		inst, err := x86asm.Decode(data[pos:], mode)
 		if err != nil {
-			// Failed to decode — emit raw byte and skip
+			// Failed to decode -- emit raw byte and skip
 			addr := baseAddr + uint64(offset) + uint64(pos)
 			sb.WriteString(fmt.Sprintf("0x%x:  %02x                          db 0x%02x\n",
 				addr, data[pos], data[pos]))
@@ -215,10 +226,58 @@ func disasmX86(data []byte, baseAddr uint64, offset, count, mode int, symbols ma
 
 		pos += inst.Len
 		decoded++
+
+		// stop_at_ret: check if this instruction is a RET/RETF and next bytes
+		// indicate a function boundary (padding or new prologue)
+		if stopAtRet && isRetInstruction(instBytes) {
+			if pos >= len(data) || isFuncBoundaryAfterRet(data, pos, mode) {
+				stoppedAtRet = true
+				break
+			}
+		}
 	}
 
-	sb.WriteString(fmt.Sprintf("\n(%d instructions from offset 0x%x, arch=x86, mode=%d)", decoded, offset, mode))
+	suffix := fmt.Sprintf("\n(%d instructions from offset 0x%x, arch=x86, mode=%d", decoded, offset, mode)
+	if stoppedAtRet {
+		suffix += ", stopped at function return"
+	}
+	suffix += ")"
+	sb.WriteString(suffix)
 	return sb.String(), nil
+}
+
+// isRetInstruction checks if the instruction bytes are a RET variant.
+// RET (C3), RET imm16 (C2 xx xx), RETF (CB), RETF imm16 (CA xx xx)
+func isRetInstruction(instBytes []byte) bool {
+	if len(instBytes) == 0 {
+		return false
+	}
+	switch instBytes[0] {
+	case 0xC3, 0xCB: // RET, RETF
+		return true
+	case 0xC2, 0xCA: // RET imm16, RETF imm16
+		return len(instBytes) >= 3
+	}
+	return false
+}
+
+// isFuncBoundaryAfterRet checks if the bytes after a RET indicate a function boundary:
+// - INT3 (0xCC) or NOP (0x90) padding
+// - A known function prologue pattern
+func isFuncBoundaryAfterRet(data []byte, pos, mode int) bool {
+	if pos >= len(data) {
+		return true // end of data = boundary
+	}
+	next := data[pos]
+	// INT3 or NOP padding after RET = definite function boundary
+	if next == 0xCC || next == 0x90 {
+		return true
+	}
+	// New function prologue after RET = definite function boundary
+	if matchesPrologue(data, pos, mode) {
+		return true
+	}
+	return false
 }
 
 func disasmARM64(data []byte, baseAddr uint64, offset, count int) (string, error) {
