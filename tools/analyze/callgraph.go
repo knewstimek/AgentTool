@@ -325,7 +325,7 @@ func scanCallTargets(sections []cgSection, funcBegin, funcEnd uint32, imageBase 
 		for i := 0; i < len(data); {
 			instrRVA := scanStart + uint32(i)
 			inst, err := x86asm.Decode(data[i:], mode)
-			if err != nil {
+			if err != nil || inst.Len <= 0 {
 				i++
 				continue
 			}
@@ -374,7 +374,7 @@ func findCallers(sections []cgSection, targetRVA uint32, imageBase uint64, funcT
 		data := sec.data
 		for i := 0; i < len(data); {
 			inst, err := x86asm.Decode(data[i:], mode)
-			if err != nil {
+			if err != nil || inst.Len <= 0 {
 				i++
 				continue
 			}
