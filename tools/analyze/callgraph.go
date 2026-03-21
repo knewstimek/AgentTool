@@ -66,9 +66,6 @@ func opCallGraph(input AnalyzeInput) (string, error) {
 	}
 
 	is64 := bin.is64
-	if bin.arch != "x86" && bin.arch != "x64" {
-		return "", fmt.Errorf("call_graph currently supports x86/x64 only (detected: %s %s)", bin.format, bin.arch)
-	}
 
 	depth := input.Count // reuse count parameter as max_depth
 	if depth <= 0 {
@@ -94,8 +91,8 @@ func opCallGraph(input AnalyzeInput) (string, error) {
 	rootRVA := uint32(rootVA - imageBase)
 	rootFunc := findFunc(funcTable, rootRVA)
 	if rootFunc == nil {
-		if !is64 && isInExecSection(execSections, rootRVA) {
-			// x86 heuristic: root may not be a CALL target (e.g. entry point,
+		if isInExecSection(execSections, rootRVA) {
+			// Heuristic: root may not be a CALL/BL target (e.g. entry point,
 			// indirect call target). Insert it into the table so BFS can proceed.
 			funcTable = insertFunc(funcTable, rootRVA, execSections)
 			rootFunc = findFunc(funcTable, rootRVA)
@@ -131,8 +128,16 @@ func opCallGraph(input AnalyzeInput) (string, error) {
 			continue
 		}
 
-		// Scan this function's code for CALL targets
-		callees := scanCallTargets(execSections, curFn.begin, curFn.end, imageBase, is64)
+		// Scan this function's code for CALL/BL targets (arch-specific)
+		var callees []cgCallTarget
+		switch bin.arch {
+		case "arm64":
+			callees = scanCallTargetsARM64(execSections, curFn.begin, curFn.end, imageBase)
+		case "arm32":
+			callees = scanCallTargetsARM32(execSections, curFn.begin, curFn.end, imageBase)
+		default: // x86, x64
+			callees = scanCallTargets(execSections, curFn.begin, curFn.end, imageBase, is64)
+		}
 
 		for _, ct := range callees {
 			if ct.indirect {
@@ -167,13 +172,22 @@ func opCallGraph(input AnalyzeInput) (string, error) {
 	}
 
 	// Also find callers of root (reverse direction, 1 level only)
-	rootCallers := findCallers(execSections, rootFunc.begin, imageBase, funcTable, is64)
+	var rootCallers []uint32
+	switch bin.arch {
+	case "arm64":
+		rootCallers = findCallersARM64(execSections, rootFunc.begin, imageBase, funcTable)
+	case "arm32":
+		rootCallers = findCallersARM32(execSections, rootFunc.begin, imageBase, funcTable)
+	default:
+		rootCallers = findCallers(execSections, rootFunc.begin, imageBase, funcTable, is64)
+	}
 
 	// Format output
 	var sb strings.Builder
 	rootName := funcName(imageBase+uint64(rootFunc.begin), symbols)
 	mode := ""
-	if !is64 {
+	if bin.arch != "x64" {
+		// x86/ARM use heuristic function detection (no .pdata)
 		mode = ", heuristic"
 	}
 	sb.WriteString(fmt.Sprintf("Call graph for %s (depth=%d, %d nodes%s):\n\n", rootName, depth, len(visited), mode))
@@ -694,9 +708,14 @@ func cgOpenELF(path string) (*cgBinary, error) {
 	case elf.EM_X86_64:
 		arch = "x64"
 		is64 = true
+	case elf.EM_AARCH64:
+		arch = "arm64"
+		is64 = true
+	case elf.EM_ARM:
+		arch = "arm32"
 	default:
 		f.Close()
-		return nil, fmt.Errorf("ELF: unsupported machine %v (x86/x64 only)", f.Machine)
+		return nil, fmt.Errorf("ELF: unsupported machine %v", f.Machine)
 	}
 
 	// ELF imageBase = lowest PT_LOAD virtual address. Unlike PE (which stores
@@ -737,8 +756,16 @@ func cgOpenELF(path string) (*cgBinary, error) {
 		return nil, fmt.Errorf("ELF: no executable sections")
 	}
 
-	// Heuristic function table from E8 CALL targets
-	funcTable := buildFuncTableFromCalls(execSections, imageBase)
+	// Heuristic function table from CALL/BL targets
+	var funcTable []funcRange
+	switch arch {
+	case "arm64":
+		funcTable = buildFuncTableFromCallsARM64(execSections, imageBase)
+	case "arm32":
+		funcTable = buildFuncTableFromCallsARM32(execSections, imageBase)
+	default:
+		funcTable = buildFuncTableFromCalls(execSections, imageBase)
+	}
 
 	// Merge ELF symbol table entries as function starts. Heuristic CALL-target
 	// detection alone misses functions only reached via indirect calls, jump
@@ -789,9 +816,14 @@ func cgOpenMachO(path string) (*cgBinary, error) {
 	case macho.CpuAmd64:
 		arch = "x64"
 		is64 = true
+	case macho.CpuArm64:
+		arch = "arm64"
+		is64 = true
+	case macho.CpuArm:
+		arch = "arm32"
 	default:
 		f.Close()
-		return nil, fmt.Errorf("Mach-O: unsupported CPU %v (x86/x64 only)", f.Cpu)
+		return nil, fmt.Errorf("Mach-O: unsupported CPU %v", f.Cpu)
 	}
 
 	// Mach-O imageBase = __TEXT segment virtual address. This is the conventional
@@ -829,8 +861,16 @@ func cgOpenMachO(path string) (*cgBinary, error) {
 		return nil, fmt.Errorf("Mach-O: no executable sections")
 	}
 
-	// Heuristic function table from E8 CALL targets
-	funcTable := buildFuncTableFromCalls(execSections, imageBase)
+	// Heuristic function table from CALL/BL targets
+	var funcTable []funcRange
+	switch arch {
+	case "arm64":
+		funcTable = buildFuncTableFromCallsARM64(execSections, imageBase)
+	case "arm32":
+		funcTable = buildFuncTableFromCallsARM32(execSections, imageBase)
+	default:
+		funcTable = buildFuncTableFromCalls(execSections, imageBase)
+	}
 
 	// Merge Mach-O symbol table entries as function starts (same rationale as ELF)
 	symbols := machoSymbolMap(f, imageBase)
@@ -900,5 +940,289 @@ func machoSymbolMap(f *macho.File, imageBase uint64) map[uint64]string {
 		}
 	}
 	return m
+}
+
+// --- ARM64 call graph support ---
+
+// buildFuncTableFromCallsARM64 detects function boundaries by collecting
+// BL (Branch with Link) targets that land in executable sections.
+func buildFuncTableFromCallsARM64(sections []cgSection, imageBase uint64) []funcRange {
+	starts := make(map[uint32]bool)
+	for _, sec := range sections {
+		data := sec.data
+		for i := 0; i+4 <= len(data); i += 4 {
+			instr := binary.LittleEndian.Uint32(data[i:])
+			// BL imm26: 1001 01ii iiii iiii iiii iiii iiii iiii
+			if instr>>26 != 0x25 {
+				continue
+			}
+			instrRVA := sec.rva + uint32(i)
+			instrVA := imageBase + uint64(instrRVA)
+			imm26 := int32(instr&0x03FFFFFF) << 6 >> 6
+			targetVA := instrVA + uint64(int64(imm26)*4)
+			if targetVA < imageBase {
+				continue
+			}
+			tRVA64 := targetVA - imageBase
+			if tRVA64 > 0xFFFFFFFF {
+				continue
+			}
+			target := uint32(tRVA64)
+			if isInExecSection(sections, target) {
+				starts[target] = true
+			}
+		}
+	}
+	return buildFuncRangesFromStarts(starts, sections)
+}
+
+// buildFuncTableFromCallsARM32 detects function boundaries by collecting
+// BL (Branch with Link) targets. Uses PC+8 pipeline offset for ARM32.
+func buildFuncTableFromCallsARM32(sections []cgSection, imageBase uint64) []funcRange {
+	starts := make(map[uint32]bool)
+	for _, sec := range sections {
+		data := sec.data
+		for i := 0; i+4 <= len(data); i += 4 {
+			instr := binary.LittleEndian.Uint32(data[i:])
+			// BL imm24: cccc 1011 iiii iiii iiii iiii iiii iiii
+			// Skip cond==0xF: unconditional extension space (BLX uses different
+			// target calc with H-bit halfword offset, not handled here)
+			if instr>>28 == 0x0F {
+				continue
+			}
+			if (instr>>24)&0x0F != 0x0B {
+				continue
+			}
+			instrRVA := sec.rva + uint32(i)
+			instrVA := imageBase + uint64(instrRVA)
+			imm24 := int32(instr&0x00FFFFFF) << 8 >> 8
+			// ARM32 PC = instrAddr + 8 (pipeline offset)
+			targetVA := instrVA + 8 + uint64(int64(imm24)*4)
+			if targetVA < imageBase {
+				continue
+			}
+			tRVA64 := targetVA - imageBase
+			if tRVA64 > 0xFFFFFFFF {
+				continue
+			}
+			target := uint32(tRVA64)
+			if isInExecSection(sections, target) {
+				starts[target] = true
+			}
+		}
+	}
+	return buildFuncRangesFromStarts(starts, sections)
+}
+
+// buildFuncRangesFromStarts converts a set of function start RVAs into
+// sorted funcRange slice. Shared by ARM64 and ARM32 table builders.
+func buildFuncRangesFromStarts(starts map[uint32]bool, sections []cgSection) []funcRange {
+	if len(starts) == 0 {
+		return nil
+	}
+	sorted := make([]uint32, 0, len(starts))
+	for s := range starts {
+		sorted = append(sorted, s)
+	}
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+
+	table := make([]funcRange, 0, len(sorted))
+	for i, begin := range sorted {
+		var secEnd uint32
+		for _, sec := range sections {
+			se64 := uint64(sec.rva) + uint64(len(sec.data))
+			if se64 > 0xFFFFFFFF {
+				se64 = 0xFFFFFFFF
+			}
+			if uint64(begin) >= uint64(sec.rva) && uint64(begin) < se64 {
+				secEnd = uint32(se64)
+				break
+			}
+		}
+		if secEnd <= begin {
+			continue
+		}
+		var end uint32
+		if i+1 < len(sorted) && sorted[i+1] < secEnd {
+			end = sorted[i+1]
+		} else {
+			end = secEnd
+		}
+		if end > begin {
+			table = append(table, funcRange{begin: begin, end: end})
+		}
+	}
+	return table
+}
+
+// scanCallTargetsARM64 extracts BL target RVAs from an ARM64 function's code.
+func scanCallTargetsARM64(sections []cgSection, funcBegin, funcEnd uint32, imageBase uint64) []cgCallTarget {
+	seen := make(map[uint32]bool)
+	var targets []cgCallTarget
+
+	for _, sec := range sections {
+		secEnd64 := uint64(sec.rva) + uint64(len(sec.data))
+		if secEnd64 > 0xFFFFFFFF {
+			secEnd64 = 0xFFFFFFFF
+		}
+		scanStart := funcBegin
+		if scanStart < sec.rva {
+			scanStart = sec.rva
+		}
+		scanEnd := funcEnd
+		if uint64(scanEnd) > secEnd64 {
+			scanEnd = uint32(secEnd64)
+		}
+		if scanStart >= scanEnd {
+			continue
+		}
+
+		data := sec.data[scanStart-sec.rva : scanEnd-sec.rva]
+		for i := 0; i+4 <= len(data); i += 4 {
+			instr := binary.LittleEndian.Uint32(data[i:])
+			// BL imm26
+			if instr>>26 != 0x25 {
+				continue
+			}
+			instrRVA := scanStart + uint32(i)
+			instrVA := imageBase + uint64(instrRVA)
+			imm26 := int32(instr&0x03FFFFFF) << 6 >> 6
+			targetVA := instrVA + uint64(int64(imm26)*4)
+			if targetVA < imageBase {
+				continue
+			}
+			tRVA64 := targetVA - imageBase
+			if tRVA64 > 0xFFFFFFFF {
+				continue
+			}
+			target := uint32(tRVA64)
+			if !seen[target] {
+				seen[target] = true
+				targets = append(targets, cgCallTarget{rva: target, indirect: false})
+			}
+		}
+	}
+	sort.Slice(targets, func(i, j int) bool { return targets[i].rva < targets[j].rva })
+	return targets
+}
+
+// scanCallTargetsARM32 extracts BL target RVAs from an ARM32 function's code.
+func scanCallTargetsARM32(sections []cgSection, funcBegin, funcEnd uint32, imageBase uint64) []cgCallTarget {
+	seen := make(map[uint32]bool)
+	var targets []cgCallTarget
+
+	for _, sec := range sections {
+		secEnd64 := uint64(sec.rva) + uint64(len(sec.data))
+		if secEnd64 > 0xFFFFFFFF {
+			secEnd64 = 0xFFFFFFFF
+		}
+		scanStart := funcBegin
+		if scanStart < sec.rva {
+			scanStart = sec.rva
+		}
+		scanEnd := funcEnd
+		if uint64(scanEnd) > secEnd64 {
+			scanEnd = uint32(secEnd64)
+		}
+		if scanStart >= scanEnd {
+			continue
+		}
+
+		data := sec.data[scanStart-sec.rva : scanEnd-sec.rva]
+		for i := 0; i+4 <= len(data); i += 4 {
+			instr := binary.LittleEndian.Uint32(data[i:])
+			// Skip cond==0xF: unconditional extension space (BLX uses different
+			// target calc with H-bit halfword offset, not handled here)
+			if instr>>28 == 0x0F {
+				continue
+			}
+			// BL imm24: cccc 1011 ...
+			if (instr>>24)&0x0F != 0x0B {
+				continue
+			}
+			instrRVA := scanStart + uint32(i)
+			instrVA := imageBase + uint64(instrRVA)
+			imm24 := int32(instr&0x00FFFFFF) << 8 >> 8
+			targetVA := instrVA + 8 + uint64(int64(imm24)*4)
+			if targetVA < imageBase {
+				continue
+			}
+			tRVA64 := targetVA - imageBase
+			if tRVA64 > 0xFFFFFFFF {
+				continue
+			}
+			target := uint32(tRVA64)
+			if !seen[target] {
+				seen[target] = true
+				targets = append(targets, cgCallTarget{rva: target, indirect: false})
+			}
+		}
+	}
+	sort.Slice(targets, func(i, j int) bool { return targets[i].rva < targets[j].rva })
+	return targets
+}
+
+// findCallersARM64 scans all executable code for BL instructions targeting funcBeginRVA.
+func findCallersARM64(sections []cgSection, targetRVA uint32, imageBase uint64, funcTable []funcRange) []uint32 {
+	targetVA := imageBase + uint64(targetRVA)
+	seen := make(map[uint32]bool)
+	var callers []uint32
+
+	for _, sec := range sections {
+		data := sec.data
+		for i := 0; i+4 <= len(data); i += 4 {
+			instr := binary.LittleEndian.Uint32(data[i:])
+			if instr>>26 != 0x25 {
+				continue
+			}
+			instrRVA := sec.rva + uint32(i)
+			instrVA := imageBase + uint64(instrRVA)
+			imm26 := int32(instr&0x03FFFFFF) << 6 >> 6
+			blTarget := instrVA + uint64(int64(imm26)*4)
+			if blTarget == targetVA {
+				fn := findFunc(funcTable, instrRVA)
+				if fn != nil && !seen[fn.begin] {
+					seen[fn.begin] = true
+					callers = append(callers, fn.begin)
+				}
+			}
+		}
+	}
+	sort.Slice(callers, func(i, j int) bool { return callers[i] < callers[j] })
+	return callers
+}
+
+// findCallersARM32 scans all executable code for BL instructions targeting funcBeginRVA.
+func findCallersARM32(sections []cgSection, targetRVA uint32, imageBase uint64, funcTable []funcRange) []uint32 {
+	targetVA := imageBase + uint64(targetRVA)
+	seen := make(map[uint32]bool)
+	var callers []uint32
+
+	for _, sec := range sections {
+		data := sec.data
+		for i := 0; i+4 <= len(data); i += 4 {
+			instr := binary.LittleEndian.Uint32(data[i:])
+			// Skip cond==0xF: unconditional extension space (BLX)
+			if instr>>28 == 0x0F {
+				continue
+			}
+			if (instr>>24)&0x0F != 0x0B {
+				continue
+			}
+			instrRVA := sec.rva + uint32(i)
+			instrVA := imageBase + uint64(instrRVA)
+			imm24 := int32(instr&0x00FFFFFF) << 8 >> 8
+			blTarget := instrVA + 8 + uint64(int64(imm24)*4)
+			if blTarget == targetVA {
+				fn := findFunc(funcTable, instrRVA)
+				if fn != nil && !seen[fn.begin] {
+					seen[fn.begin] = true
+					callers = append(callers, fn.begin)
+				}
+			}
+		}
+	}
+	sort.Slice(callers, func(i, j int) bool { return callers[i] < callers[j] })
+	return callers
 }
 

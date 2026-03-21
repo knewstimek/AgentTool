@@ -196,7 +196,7 @@ imphash (PE import hash for malware classification), rich_header (PE build tool 
 overlay_detect (detect appended data after last section), dwarf_info (debug symbol info),
 xref (find all code references to a target address in PE/ELF/Mach-O; supports x86/x64/ARM64/ARM32),
 function_at (find function boundaries via PE .pdata or heuristic prologue/epilogue scan),
-call_graph (static call graph from a root function; PE/ELF/Mach-O x86/x64, .pdata or heuristic detection),
+call_graph (static call graph from a root function; PE/ELF/Mach-O, x86/x64/ARM64/ARM32),
 follow_ptr (follow pointer chain in PE with symbol annotation, circular reference detection),
 rtti_dump (parse MSVC RTTI from vtable: demangled class name + base classes, pSelf validation),
 struct_layout (dump memory region as structured layout with symbol/section annotation),
