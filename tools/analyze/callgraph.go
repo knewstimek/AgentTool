@@ -30,8 +30,8 @@ type cgSection struct {
 }
 
 // opCallGraph builds a static call graph rooted at a given function VA.
-// Uses .pdata for function boundaries and scans CALL instructions for edges.
-// Requires x64 PE with .pdata; x86 PE not supported (no reliable function boundaries).
+// x64 PE: uses .pdata for precise function boundaries.
+// x86 PE: heuristic mode -- detects functions from E8 CALL targets (no .pdata needed).
 func opCallGraph(input AnalyzeInput) (string, error) {
 	vaStr := input.VA
 	if vaStr == "" && input.TargetVA != "" {
@@ -61,9 +61,6 @@ func opCallGraph(input AnalyzeInput) (string, error) {
 	}
 
 	is64 := f.FileHeader.Machine == 0x8664
-	if !is64 {
-		return "", fmt.Errorf("call_graph requires x64 PE (.pdata needed for function boundaries). x86 PE is not supported")
-	}
 
 	depth := input.Count // reuse count parameter as max_depth
 	if depth <= 0 {
@@ -79,12 +76,6 @@ func opCallGraph(input AnalyzeInput) (string, error) {
 	}
 	if maxNodes > maxCallGraphMaxNodes {
 		maxNodes = maxCallGraphMaxNodes
-	}
-
-	// Build function table from .pdata
-	funcTable := buildFuncTable(f, imageBase)
-	if len(funcTable) == 0 {
-		return "", fmt.Errorf("no .pdata found -- call_graph requires exception table for function boundaries")
 	}
 
 	// Build symbol map for name resolution
@@ -103,12 +94,32 @@ func opCallGraph(input AnalyzeInput) (string, error) {
 		execSections = append(execSections, cgSection{rva: sec.VirtualAddress, data: data})
 	}
 
+	// Build function table: .pdata for x64, heuristic for x86
+	var funcTable []funcRange
+	if is64 {
+		funcTable = buildFuncTable(f, imageBase)
+		if len(funcTable) == 0 {
+			return "", fmt.Errorf("no .pdata found -- call_graph requires exception table for function boundaries (x64)")
+		}
+	} else {
+		funcTable = buildFuncTableFromCalls(execSections, imageBase)
+		// Empty table is OK for x86 -- insertFunc will add the root if needed
+	}
+
 	// Resolve root function
 	rootRVA := uint32(rootVA - imageBase)
 	rootFunc := findFunc(funcTable, rootRVA)
 	if rootFunc == nil {
-		return "", fmt.Errorf("no function found at 0x%x. "+
-			"Try function_at with va=\"0x%x\" to find the nearest function", rootVA, rootVA)
+		if !is64 && isInExecSection(execSections, rootRVA) {
+			// x86 heuristic: root may not be a CALL target (e.g. entry point,
+			// indirect call target). Insert it into the table so BFS can proceed.
+			funcTable = insertFunc(funcTable, rootRVA, execSections)
+			rootFunc = findFunc(funcTable, rootRVA)
+		}
+		if rootFunc == nil {
+			return "", fmt.Errorf("no function found at 0x%x. "+
+				"Try function_at with va=\"0x%x\" to find the nearest function", rootVA, rootVA)
+		}
 	}
 
 	// BFS to build call graph
@@ -177,7 +188,11 @@ func opCallGraph(input AnalyzeInput) (string, error) {
 	// Format output
 	var sb strings.Builder
 	rootName := funcName(imageBase+uint64(rootFunc.begin), symbols)
-	sb.WriteString(fmt.Sprintf("Call graph for %s (depth=%d, %d nodes):\n\n", rootName, depth, len(visited)))
+	mode := ""
+	if !is64 {
+		mode = ", heuristic"
+	}
+	sb.WriteString(fmt.Sprintf("Call graph for %s (depth=%d, %d nodes%s):\n\n", rootName, depth, len(visited), mode))
 
 	// Print callers
 	if len(rootCallers) > 0 {
@@ -341,11 +356,25 @@ func scanCallTargets(sections []cgSection, funcBegin, funcEnd uint32, imageBase 
 				}
 			}
 
-			// FF 15 disp32 -- CALL [rip+disp32] (indirect call via IAT)
+			// FF 15 -- indirect call via IAT
+			// x64: CALL [rip+disp32], x86: CALL [abs32]
 			if instBytes[0] == 0xFF && inst.Len >= 6 && instBytes[1] == 0x15 {
-				disp := int32(binary.LittleEndian.Uint32(instBytes[2:6]))
-				target := uint32(int64(instrRVA) + int64(inst.Len) + int64(disp))
-				if !seen[target] {
+				var target uint32
+				var valid bool
+				if is64 {
+					disp := int32(binary.LittleEndian.Uint32(instBytes[2:6]))
+					target = uint32(int64(instrRVA) + int64(inst.Len) + int64(disp))
+					valid = true
+				} else {
+					// x86 FF 15: absolute address, convert to RVA
+					addr := binary.LittleEndian.Uint32(instBytes[2:6])
+					base32 := uint32(imageBase)
+					if addr >= base32 {
+						target = addr - base32
+						valid = true
+					}
+				}
+				if valid && !seen[target] {
 					seen[target] = true
 					targets = append(targets, cgCallTarget{rva: target, indirect: true})
 				}
@@ -452,5 +481,121 @@ func printCallTree(sb *strings.Builder, va uint64, edges []cgEdge, imports map[u
 			sb.WriteString(fmt.Sprintf("%s  -> %s [IAT]\n", indent, apiName))
 		}
 	}
+}
+
+// buildFuncTableFromCalls detects x86 function boundaries heuristically
+// by collecting all E8 CALL targets that land in executable sections.
+// Each target is assumed to be a function entry; the function extends
+// until the next detected entry or section end.
+func buildFuncTableFromCalls(sections []cgSection, imageBase uint64) []funcRange {
+	// Step 1: collect unique E8 CALL targets via instruction-level scan
+	starts := make(map[uint32]bool)
+	for _, sec := range sections {
+		data := sec.data
+		for i := 0; i < len(data); {
+			inst, err := x86asm.Decode(data[i:], 32)
+			if err != nil || inst.Len <= 0 {
+				i++
+				continue
+			}
+			if data[i] == 0xE8 && inst.Len == 5 {
+				instrRVA := sec.rva + uint32(i)
+				rel := int32(binary.LittleEndian.Uint32(data[i+1:]))
+				target := uint32(int64(instrRVA) + 5 + int64(rel))
+				if isInExecSection(sections, target) {
+					starts[target] = true
+				}
+			}
+			i += inst.Len
+		}
+	}
+
+	if len(starts) == 0 {
+		return nil
+	}
+
+	// Step 2: sort unique function starts
+	sorted := make([]uint32, 0, len(starts))
+	for s := range starts {
+		sorted = append(sorted, s)
+	}
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+
+	// Step 3: build funcRange -- end = min(next func start, section end)
+	table := make([]funcRange, 0, len(sorted))
+	for i, begin := range sorted {
+		// Find section boundary for this function
+		var secEnd uint32
+		for _, sec := range sections {
+			se64 := uint64(sec.rva) + uint64(len(sec.data))
+			if se64 > 0xFFFFFFFF {
+				se64 = 0xFFFFFFFF
+			}
+			if uint64(begin) >= uint64(sec.rva) && uint64(begin) < se64 {
+				secEnd = uint32(se64)
+				break
+			}
+		}
+		if secEnd <= begin {
+			continue
+		}
+
+		var end uint32
+		if i+1 < len(sorted) && sorted[i+1] < secEnd {
+			// Next function is within same section
+			end = sorted[i+1]
+		} else {
+			// Last function in section or next function is in different section
+			end = secEnd
+		}
+		if end > begin {
+			table = append(table, funcRange{begin: begin, end: end})
+		}
+	}
+
+	return table
+}
+
+// insertFunc adds a function entry at rva into a sorted funcTable,
+// splitting an existing range if necessary. Used when the root VA
+// is not a known CALL target (e.g. entry point, indirect call target).
+func insertFunc(table []funcRange, rva uint32, sections []cgSection) []funcRange {
+	// Already in table as a function start?
+	if fn := findFunc(table, rva); fn != nil && fn.begin == rva {
+		return table
+	}
+
+	// Find end: next function start after rva, or section end
+	var end uint32
+	idx := sort.Search(len(table), func(i int) bool { return table[i].begin > rva })
+	if idx < len(table) {
+		end = table[idx].begin
+	} else {
+		for _, sec := range sections {
+			secEnd64 := uint64(sec.rva) + uint64(len(sec.data))
+			if uint64(rva) >= uint64(sec.rva) && uint64(rva) < secEnd64 {
+				if secEnd64 > 0xFFFFFFFF {
+					secEnd64 = 0xFFFFFFFF
+				}
+				end = uint32(secEnd64)
+				break
+			}
+		}
+	}
+	if end <= rva {
+		return table
+	}
+
+	// Insert and re-sort
+	table = append(table, funcRange{begin: rva, end: end})
+	sort.Slice(table, func(i, j int) bool { return table[i].begin < table[j].begin })
+
+	// Fix previous entry's end if it was split (re-find after sort)
+	newIdx := sort.Search(len(table), func(i int) bool { return table[i].begin >= rva })
+	if newIdx > 0 && table[newIdx-1].end > rva {
+		table[newIdx-1].end = rva
+	}
+
+	return table
 }
 

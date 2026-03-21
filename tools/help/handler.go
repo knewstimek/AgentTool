@@ -500,9 +500,9 @@ Static binary analysis tool with 21 operations:
 - rich_header: PE Rich header -- build tool fingerprinting
 - overlay_detect: Detect data appended after last section
 - dwarf_info: DWARF debug info (compilation units, functions, types)
-- xref: Find code references to target address (with type summary)
+- xref: Find code references to target address (PE/ELF/Mach-O, x86/x64/ARM64/ARM32)
 - function_at: Find function boundaries (.pdata or heuristic)
-- call_graph: Static call graph from root function
+- call_graph: Static call graph from root function (PE x86/x64)
 - follow_ptr: Follow pointer chain with symbol annotation (PE). Detects circular pointer references
 - rtti_dump: Parse MSVC RTTI from vtable (class name + base classes). Includes demangled class names, pSelf cross-validation for x64, and section data caching
 - struct_layout: Dump memory as structured layout with annotations (PE)
@@ -737,20 +737,23 @@ Extract DWARF debug information from PE, ELF, or Mach-O binaries.
     - "Binary appears stripped" if no DWARF data found
 
 ### xref
-Find all code locations that reference a target address (PE only).
-  analyze(operation="xref", file_path="/path/to/binary.exe",
+Find all code locations that reference a target address (PE, ELF, Mach-O).
+  analyze(operation="xref", file_path="/path/to/binary",
           target_va="0x140001000")
 
   Scans executable sections for instruction patterns that reference the target:
-    x64: E8/E9 (CALL/JMP relative), 0F 8x (Jcc), LEA [rip+disp32],
-         FF 15/25 (indirect CALL/JMP [rip+disp32]), MOV [rip+disp32]
-    x86: E8/E9 (relative), 0F 8x (Jcc), 68 imm32 (PUSH absolute)
+    x64: E8/E9 (CALL/JMP relative), 0F 8x (Jcc), LEA/MOV [rip+disp32],
+         FF 15/25 (indirect CALL/JMP), PUSH imm32
+    x86: E8/E9 (relative), 0F 8x (Jcc), FF 15/25 [abs32], A1/A3 (MOV),
+         68 imm32 (PUSH absolute)
+    ARM64: BL, B, B.cond, ADRP+ADD, ADRP+LDR (page-relative pairs)
+    ARM32: BL, B (with PC+8 pipeline offset)
 
   Parameters:
     target_va: Virtual address to find references to (hex, required)
     max_results: Maximum results (default: 200, max: 1000)
 
-  Auto-detects x86 vs x64 from PE Machine field.
+  Auto-detects format (PE/ELF/Mach-O) and architecture from binary headers.
 
 ### function_at
 Find function boundaries in PE files.
@@ -773,11 +776,12 @@ Find function boundaries in PE files.
   Returns function start, end, size, and disassembly.
 
 ### call_graph
-Build a static call graph from a root function (x64 PE only).
+Build a static call graph from a root function (PE x86/x64).
   analyze(operation="call_graph", file_path="/path/to/binary.exe",
           va="0x140001000")
 
-  Uses .pdata for function boundaries and scans CALL (E8 rel32) instructions.
+  x64: uses .pdata for precise function boundaries.
+  x86: heuristic mode -- detects functions from E8 CALL targets (no .pdata needed).
   BFS traversal from the root function, showing:
   - Callers: functions that call the root (1 level, reverse scan)
   - Callees: functions called by the root (tree format, configurable depth)
@@ -857,8 +861,8 @@ Scan PE .rdata for all MSVC vtables with RTTI. Auto-discovers C++ classes with v
 8. hexdump -- Examine specific data regions at file offsets
 9. disassemble -- Decode machine code (use va= for PE virtual addresses)
 10. function_at -- Find function boundaries (.pdata or heuristic fallback)
-11. xref -- Find all call/jump/data references to an address (PE)
-12. call_graph -- Build static call graph from a root function (x64 PE)
+11. xref -- Find all call/jump/data references to an address (PE/ELF/Mach-O)
+12. call_graph -- Build static call graph from a root function (PE x86/x64)
 13. follow_ptr -- Follow pointer chains (vtable inspection, data structure traversal)
 14. rtti_dump -- Parse MSVC RTTI from vtable (identify C++ class hierarchy)
 15. vtable_scan -- Discover all C++ vtables with RTTI in PE (class mapping)

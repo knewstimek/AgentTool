@@ -634,3 +634,48 @@ func TestRTTIDump_X64_Demangled(t *testing.T) {
 		t.Errorf("expected x64 COL signature 1, got:\n%s", result)
 	}
 }
+
+// --- call_graph x86 ---
+
+func TestCallGraph_X86(t *testing.T) {
+	skipIfNoCrackme(t)
+
+	// Use a function inside .text of x86 32-bit PE crackme
+	result, err := opCallGraph(AnalyzeInput{
+		FilePath: testCrackme,
+		VA:       "0x401000", // start of .text section
+		Count:    2,          // depth=2
+	})
+	if err != nil {
+		t.Fatalf("call_graph x86 failed: %v", err)
+	}
+	t.Logf("x86 call_graph result:\n%s", result)
+
+	// Should produce a call graph with nodes
+	if !strings.Contains(result, "Call graph for") {
+		t.Errorf("expected call graph header, got:\n%s", result)
+	}
+	if !strings.Contains(result, "Callees:") {
+		t.Errorf("expected Callees section, got:\n%s", result)
+	}
+}
+
+func TestCallGraph_X86_EntryPoint(t *testing.T) {
+	skipIfNoCrackme(t)
+
+	// Entry point is not a CALL target -- tests insertFunc fallback
+	// Entry point RVA=0x4f401d, VA=imageBase+RVA=0x400000+0x4f401d=0x8F401D
+	result, err := opCallGraph(AnalyzeInput{
+		FilePath: testCrackme,
+		VA:       "0x8F401D",
+		Count:    1,
+	})
+	if err != nil {
+		t.Fatalf("call_graph x86 entry point failed: %v", err)
+	}
+	t.Logf("x86 call_graph entry point:\n%s", result)
+
+	if !strings.Contains(result, "Call graph for") {
+		t.Errorf("expected call graph header")
+	}
+}
