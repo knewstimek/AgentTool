@@ -11,8 +11,11 @@ import (
 // Supports both x86 and x64 MSVC RTTI format.
 //
 // MSVC RTTI layout:
-//   x86: vtable[-4] -> CompleteObjectLocator (absolute pointer)
-//   x64: vtable[-8] -> CompleteObjectLocator (RVA-based, relative to image base)
+//   x86: vtable[-4] -> CompleteObjectLocator (absolute VA pointer)
+//   x64: vtable[-8] -> CompleteObjectLocator (absolute VA pointer)
+//   Note: the vtable slot is always a full VA pointer. Only the COL's
+//   internal fields differ: x86 (signature=0) uses absolute VAs,
+//   x64 (signature=1) uses image-base-relative RVAs.
 //
 // CompleteObjectLocator:
 //   signature(4) + offset(4) + cdOffset(4) + pTypeDescriptor(4) + pClassHierarchyDescriptor(4)
@@ -47,15 +50,14 @@ func opRTTIDump(input AnalyzeInput) (string, error) {
 		ptrSize = 8
 	}
 
-	// Read vtable[-ptrSize] to get COL pointer/RVA
-	// x64: COL reference is a 32-bit RVA stored in a pointer-sized slot
-	// x86: COL reference is a 32-bit absolute VA
-	// Both cases: read 4 bytes (the significant part of the slot)
+	// Read vtable[-ptrSize] to get COL pointer.
+	// Both x86 and x64: the vtable slot is pointer-sized and contains
+	// a full VA pointing to the CompleteObjectLocator.
 	if vtableVA < uint64(ptrSize) {
 		return "", fmt.Errorf("va 0x%x is too small for RTTI (vtable[-%d] would underflow)", vtableVA, ptrSize)
 	}
 	colPtrVA := vtableVA - uint64(ptrSize)
-	colRef, err := readPEValueAtVA(f, imageBase, colPtrVA, 4)
+	colRef, err := readPEValueAtVA(f, imageBase, colPtrVA, ptrSize)
 	if err != nil {
 		return "", fmt.Errorf("no RTTI at this vtable -- vtable[-%d] (0x%x) read failed: %w. Verify this is a valid vtable address", ptrSize, colPtrVA, err)
 	}
@@ -63,17 +65,10 @@ func opRTTIDump(input AnalyzeInput) (string, error) {
 		return "", fmt.Errorf("no RTTI at this vtable -- vtable[-%d] is null", ptrSize)
 	}
 
-	// Resolve COL address
-	var colVA uint64
-	if is64 {
-		// x64: colRef is an RVA (32-bit), resolve relative to image base
-		colVA = imageBase + colRef
-	} else {
-		// x86: colRef is an absolute VA -- must be >= imageBase
-		if colRef < imageBase {
-			return "", fmt.Errorf("no RTTI -- vtable[-%d] = 0x%x (below image base 0x%x, not a valid VA)", ptrSize, colRef, imageBase)
-		}
-		colVA = colRef
+	// Resolve COL address -- colRef is a full VA (both x86/x64)
+	colVA := colRef
+	if colVA < imageBase {
+		return "", fmt.Errorf("no RTTI -- vtable[-%d] = 0x%x (below image base 0x%x, not a valid COL pointer)", ptrSize, colRef, imageBase)
 	}
 
 	// Read CompleteObjectLocator
@@ -162,11 +157,21 @@ func readCOL(f *pe.File, imageBase, colVA uint64, is64 bool) (*colData, error) {
 func readTypeDescriptorName(f *pe.File, imageBase, tdVA uint64, ptrSize int) (string, error) {
 	// Skip pVFTable + spare to get to name offset
 	nameOffset := ptrSize * 2
-	// Read enough bytes for the name (mangled names are usually < 256 chars)
+	// Try reading up to 256 chars for the name. If near section boundary,
+	// read what's available (names are null-terminated, usually < 100 chars).
 	maxNameLen := 256
 	data, err := readPEBytesAtVA(f, imageBase, tdVA, nameOffset+maxNameLen)
 	if err != nil {
-		return "", err
+		// Retry with smaller read for section-boundary cases
+		for tryLen := 128; tryLen >= 32; tryLen /= 2 {
+			data, err = readPEBytesAtVA(f, imageBase, tdVA, nameOffset+tryLen)
+			if err == nil {
+				break
+			}
+		}
+		if err != nil {
+			return "", err
+		}
 	}
 
 	// Extract null-terminated string
