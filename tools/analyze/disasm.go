@@ -247,16 +247,22 @@ func disasmX86Opts(data []byte, baseAddr uint64, offset, count, mode int, symbol
 }
 
 // isRetInstruction checks if the instruction bytes are a RET variant.
-// RET (C3), RET imm16 (C2 xx xx), RETF (CB), RETF imm16 (CA xx xx)
+// Handles: RET (C3), RET imm16 (C2), RETF (CB), RETF imm16 (CA),
+// and prefixed forms: BND RET (F2 C3), REP RET (F3 C3).
 func isRetInstruction(instBytes []byte) bool {
 	if len(instBytes) == 0 {
 		return false
 	}
-	switch instBytes[0] {
+	op := instBytes[0]
+	// Skip BND (F2) or REP (F3) prefix -- compilers emit "bnd ret" or "rep ret"
+	if (op == 0xF2 || op == 0xF3) && len(instBytes) >= 2 {
+		op = instBytes[1]
+	}
+	switch op {
 	case 0xC3, 0xCB: // RET, RETF
 		return true
 	case 0xC2, 0xCA: // RET imm16, RETF imm16
-		return len(instBytes) >= 3
+		return true
 	}
 	return false
 }
