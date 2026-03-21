@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"golang.org/x/arch/x86/x86asm"
 )
 
 const (
@@ -296,6 +298,10 @@ type cgCallTarget struct {
 func scanCallTargets(sections []cgSection, funcBegin, funcEnd uint32, imageBase uint64, is64 bool) []cgCallTarget {
 	seen := make(map[uint32]bool)
 	var targets []cgCallTarget
+	mode := 32
+	if is64 {
+		mode = 64
+	}
 
 	for _, sec := range sections {
 		secEnd64 := uint64(sec.rva) + uint64(len(sec.data))
@@ -315,12 +321,19 @@ func scanCallTargets(sections []cgSection, funcBegin, funcEnd uint32, imageBase 
 
 		data := sec.data[scanStart-sec.rva : scanEnd-sec.rva]
 
-		for i := 0; i < len(data); i++ {
+		// Instruction-level scan to avoid false positives from mid-instruction bytes
+		for i := 0; i < len(data); {
 			instrRVA := scanStart + uint32(i)
+			inst, err := x86asm.Decode(data[i:], mode)
+			if err != nil {
+				i++
+				continue
+			}
+			instBytes := data[i : i+inst.Len]
 
 			// E8 rel32 -- CALL relative (direct call)
-			if data[i] == 0xE8 && i+5 <= len(data) {
-				rel := int32(binary.LittleEndian.Uint32(data[i+1:]))
+			if instBytes[0] == 0xE8 && inst.Len == 5 {
+				rel := int32(binary.LittleEndian.Uint32(instBytes[1:]))
 				target := uint32(int64(instrRVA) + 5 + int64(rel))
 				if !seen[target] {
 					seen[target] = true
@@ -328,15 +341,17 @@ func scanCallTargets(sections []cgSection, funcBegin, funcEnd uint32, imageBase 
 				}
 			}
 
-			// FF 15 disp32 -- CALL [rip+disp32] (indirect call via IAT, x64 only)
-			if is64 && data[i] == 0xFF && i+6 <= len(data) && data[i+1] == 0x15 {
-				disp := int32(binary.LittleEndian.Uint32(data[i+2:]))
-				target := uint32(int64(instrRVA) + 6 + int64(disp))
+			// FF 15 disp32 -- CALL [rip+disp32] (indirect call via IAT)
+			if instBytes[0] == 0xFF && inst.Len >= 6 && instBytes[1] == 0x15 {
+				disp := int32(binary.LittleEndian.Uint32(instBytes[2:6]))
+				target := uint32(int64(instrRVA) + int64(inst.Len) + int64(disp))
 				if !seen[target] {
 					seen[target] = true
 					targets = append(targets, cgCallTarget{rva: target, indirect: true})
 				}
 			}
+
+			i += inst.Len
 		}
 	}
 
@@ -346,19 +361,28 @@ func scanCallTargets(sections []cgSection, funcBegin, funcEnd uint32, imageBase 
 
 // findCallers scans all executable code for CALL instructions targeting funcBeginRVA.
 // Returns RVAs of functions that contain such calls (deduplicated).
+// Uses instruction-level decoding to avoid false positives from mid-instruction bytes.
 func findCallers(sections []cgSection, targetRVA uint32, imageBase uint64, funcTable []funcRange, is64 bool) []uint32 {
 	seen := make(map[uint32]bool)
 	var callers []uint32
+	mode := 32
+	if is64 {
+		mode = 64
+	}
 
 	for _, sec := range sections {
 		data := sec.data
-		for i := 0; i < len(data); i++ {
-			if data[i] == 0xE8 && i+5 <= len(data) {
+		for i := 0; i < len(data); {
+			inst, err := x86asm.Decode(data[i:], mode)
+			if err != nil {
+				i++
+				continue
+			}
+			if data[i] == 0xE8 && inst.Len == 5 {
 				instrRVA := sec.rva + uint32(i)
 				rel := int32(binary.LittleEndian.Uint32(data[i+1:]))
 				target := uint32(int64(instrRVA) + 5 + int64(rel))
 				if target == targetRVA {
-					// Find which function this instruction belongs to
 					fn := findFunc(funcTable, instrRVA)
 					if fn != nil && !seen[fn.begin] {
 						seen[fn.begin] = true
@@ -366,6 +390,7 @@ func findCallers(sections []cgSection, targetRVA uint32, imageBase uint64, funcT
 					}
 				}
 			}
+			i += inst.Len
 		}
 	}
 
