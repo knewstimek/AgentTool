@@ -118,7 +118,7 @@ It auto-detects file encoding and indentation style, preserving them across edit
 - externalip: Get your external (public) IP address
 - sloc: Count source lines of code (SLOC) with per-language summary
 - debug: Interactive debugger via DAP (breakpoints, stepping, variables, stack traces)
-- analyze: Static binary analysis (20 operations: disassemble, PE/ELF/Mach-O parsing, imphash, Rich header, resources, DWARF, strings, hexdump, pattern search, entropy, overlay, binary diff, xref, function_at, call_graph, follow_ptr, rtti_dump, struct_layout)
+- analyze: Static binary analysis (21 operations: disassemble, PE/ELF/Mach-O parsing, imphash, Rich header, resources, DWARF, strings, hexdump, pattern search, entropy, overlay, binary diff, xref, function_at, call_graph, follow_ptr, rtti_dump, struct_layout, vtable_scan)
 - set_config: Change runtime settings (encoding, file size, SSRF policy, DoH/ECH toggle)
 - agent_tool_help: This help tool
 
@@ -485,7 +485,7 @@ Parameters: session_id, operation, adapter_command, adapter_args, address, launc
   expression, context, timeout_sec
 
 ## analyze
-Static binary analysis tool with 20 operations:
+Static binary analysis tool with 21 operations:
 - disassemble: x86/x64/ARM/ARM64 disassembly (stop_at_ret for function-scoped)
 - pe_info: PE header parsing with RWX section warnings
 - elf_info: ELF header/sections/segments/symbols with RWX warnings
@@ -503,9 +503,10 @@ Static binary analysis tool with 20 operations:
 - xref: Find code references to target address (with type summary)
 - function_at: Find function boundaries (.pdata or heuristic)
 - call_graph: Static call graph from root function
-- follow_ptr: Follow pointer chain with symbol annotation (PE)
-- rtti_dump: Parse MSVC RTTI from vtable (class name + base classes)
+- follow_ptr: Follow pointer chain with symbol annotation (PE). Detects circular pointer references
+- rtti_dump: Parse MSVC RTTI from vtable (class name + base classes). Includes demangled class names, pSelf cross-validation for x64, and section data caching
 - struct_layout: Dump memory as structured layout with annotations (PE)
+- vtable_scan: Scan PE .rdata for all MSVC vtables with RTTI (auto-discovers C++ classes)
 Parameters: operation, file_path, offset, count, mode, arch (x86/arm),
   base_addr, min_length, max_results, length, section, pattern, file_path_b,
   va, target_va, stop_at_ret
@@ -795,7 +796,8 @@ Follow a chain of pointers in a PE file with symbol/section annotation.
           va="0x140050000", count=6)
 
   Reads pointer-sized values starting at VA, follows the chain, and annotates
-  each step with symbol names or section info. Stops on null, unmapped, or depth limit.
+  each step with symbol names or section info. Stops on null, unmapped, depth limit,
+  or circular reference (revisited address).
 
   Parameters:
     va: Starting virtual address (hex, required)
@@ -814,7 +816,8 @@ Parse MSVC RTTI (Run-Time Type Information) from a vtable address.
   Parameters:
     va: Vtable virtual address (hex, required)
 
-  Output: class name (mangled), base class list with displacements.
+  Output: class name (mangled + demangled, e.g. std::bad_exception), base class list
+  with displacements. Includes pSelf cross-validation for x64 and section data caching.
   Auto-detects x86 vs x64 from PE Machine field.
 
 ### struct_layout
@@ -828,6 +831,19 @@ Dump a memory region as a structured layout with pointer-sized slots.
   Parameters:
     va: Starting virtual address (hex, required)
     length: Number of bytes to dump (default: 64, max: 512)
+
+### vtable_scan
+Scan PE .rdata for all MSVC vtables with RTTI. Auto-discovers C++ classes with virtual functions.
+  analyze(operation="vtable_scan", file_path="/path/to/binary.exe")
+
+  Scans the .rdata section for pointers to RTTI CompleteObjectLocators, then parses
+  each vtable's TypeDescriptor to extract demangled class names. No parameters needed
+  (auto-detects x86/x64 from PE Machine field).
+
+  Returns vtable VAs with demangled class names. Useful for mapping class hierarchy
+  before using rtti_dump on individual vtables.
+
+  Parameters: none (auto-detects architecture)
 
 ## Typical Workflow
 
@@ -845,9 +861,10 @@ Dump a memory region as a structured layout with pointer-sized slots.
 12. call_graph -- Build static call graph from a root function (x64 PE)
 13. follow_ptr -- Follow pointer chains (vtable inspection, data structure traversal)
 14. rtti_dump -- Parse MSVC RTTI from vtable (identify C++ class hierarchy)
-15. struct_layout -- Dump memory as structured layout (vtable, object layout analysis)
-16. dwarf_info -- Extract debug symbols and function names
-17. bin_diff -- Compare original vs patched versions
+15. vtable_scan -- Discover all C++ vtables with RTTI in PE (class mapping)
+16. struct_layout -- Dump memory as structured layout (vtable, object layout analysis)
+17. dwarf_info -- Extract debug symbols and function names
+18. bin_diff -- Compare original vs patched versions
 
 ### Example: Analyzing a DLL
   # Step 1: Get PE layout

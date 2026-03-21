@@ -14,7 +14,7 @@ import (
 
 // AnalyzeInput defines parameters for the static binary analysis tool.
 type AnalyzeInput struct {
-	Operation string `json:"operation" jsonschema:"Operation: disassemble, pe_info, elf_info, macho_info, strings, hexdump, pattern_search, entropy, bin_diff, resource_info, imphash, rich_header, overlay_detect, dwarf_info, xref, function_at, call_graph, follow_ptr, rtti_dump, struct_layout,required"`
+	Operation string `json:"operation" jsonschema:"Operation: disassemble, pe_info, elf_info, macho_info, strings, hexdump, pattern_search, entropy, bin_diff, resource_info, imphash, rich_header, overlay_detect, dwarf_info, xref, function_at, call_graph, follow_ptr, rtti_dump, struct_layout, vtable_scan,required"`
 	FilePath  string `json:"file_path" jsonschema:"Absolute path to the binary file,required"`
 
 	// disassemble / function_at / follow_ptr parameters
@@ -78,12 +78,13 @@ var validOperations = map[string]bool{
 	"follow_ptr":     true,
 	"rtti_dump":      true,
 	"struct_layout":  true,
+	"vtable_scan":   true,
 }
 
 // Handle dispatches to the appropriate operation.
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input AnalyzeInput) (*mcp.CallToolResult, AnalyzeOutput, error) {
 	op := strings.ToLower(strings.TrimSpace(input.Operation))
-	allOps := "disassemble, pe_info, elf_info, macho_info, strings, hexdump, pattern_search, entropy, bin_diff, resource_info, imphash, rich_header, overlay_detect, dwarf_info, xref, function_at, call_graph, follow_ptr, rtti_dump, struct_layout"
+	allOps := "disassemble, pe_info, elf_info, macho_info, strings, hexdump, pattern_search, entropy, bin_diff, resource_info, imphash, rich_header, overlay_detect, dwarf_info, xref, function_at, call_graph, follow_ptr, rtti_dump, struct_layout, vtable_scan"
 	if op == "" {
 		return errorResult("operation is required (" + allOps + ")")
 	}
@@ -167,6 +168,8 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input AnalyzeInput) (
 		result, err = opRTTIDump(input)
 	case "struct_layout":
 		result, err = opStructLayout(input)
+	case "vtable_scan":
+		result, err = opVtableScan(input)
 	}
 
 	if err != nil {
@@ -195,9 +198,10 @@ overlay_detect (detect appended data after last section), dwarf_info (debug symb
 xref (find all code references to a target address in PE, with type summary),
 function_at (find function boundaries via PE .pdata or heuristic prologue/epilogue scan),
 call_graph (static call graph from a root function via .pdata + CALL scanning),
-follow_ptr (follow pointer chain in PE with symbol annotation),
-rtti_dump (parse MSVC RTTI from vtable: class name + base classes),
-struct_layout (dump memory region as structured layout with symbol/section annotation).
+follow_ptr (follow pointer chain in PE with symbol annotation, circular reference detection),
+rtti_dump (parse MSVC RTTI from vtable: demangled class name + base classes, pSelf validation),
+struct_layout (dump memory region as structured layout with symbol/section annotation),
+vtable_scan (scan PE .rdata for all vtables with RTTI -- auto-discovers C++ classes).
 Pure Go implementation -- no external tools needed. Supports x86, x64, ARM, ARM64.
 For PE files: use 'va' parameter instead of 'offset' for auto VA display, symbol annotation, and function boundary detection.
 PE strings/pattern_search automatically show VA alongside file offsets.

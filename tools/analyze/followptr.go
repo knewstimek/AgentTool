@@ -2,7 +2,6 @@ package analyze
 
 import (
 	"debug/pe"
-	"encoding/binary"
 	"fmt"
 	"strings"
 )
@@ -54,14 +53,21 @@ func opFollowPtr(input AnalyzeInput) (string, error) {
 	}
 
 	symbols := peSymbolMap(f, imageBase)
+	cache := make(secCache)
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Pointer chain from 0x%x (%d-bit):\n\n", startVA, ptrSize*8))
 
 	currentVA := startVA
+	visited := make(map[uint64]bool, count)
 	for i := 0; i < count; i++ {
+		if visited[currentVA] {
+			sb.WriteString(fmt.Sprintf("[%d] 0x%x -> (circular reference -- already visited)\n", i, currentVA))
+			break
+		}
+		visited[currentVA] = true
 		// Read pointer at currentVA
-		val, err := readPEValueAtVA(f, imageBase, currentVA, ptrSize)
+		val, err := cachedReadValue(f, imageBase, currentVA, ptrSize, cache)
 		if err != nil {
 			sb.WriteString(fmt.Sprintf("[%d] 0x%x -> (read failed: %s)\n", i, currentVA, err))
 			break
@@ -98,41 +104,6 @@ func opFollowPtr(input AnalyzeInput) (string, error) {
 	}
 
 	return sb.String(), nil
-}
-
-// readPEValueAtVA reads a pointer-sized value from a PE file at the given VA.
-func readPEValueAtVA(f *pe.File, imageBase, va uint64, ptrSize int) (uint64, error) {
-	if va < imageBase {
-		return 0, fmt.Errorf("VA 0x%x below image base 0x%x", va, imageBase)
-	}
-	diff := va - imageBase
-	if diff > 0xFFFFFFFF {
-		return 0, fmt.Errorf("VA 0x%x too far from image base 0x%x (RVA exceeds 4GB)", va, imageBase)
-	}
-	rva := uint32(diff)
-	fileOff, _, err := rvaToFileOffset(f, rva)
-	if err != nil {
-		return 0, err
-	}
-
-	// Find section containing this offset and read from it
-	for _, s := range f.Sections {
-		if fileOff >= s.Offset && fileOff < s.Offset+s.Size {
-			secData, err := s.Data()
-			if err != nil {
-				return 0, fmt.Errorf("cannot read section: %w", err)
-			}
-			off := int(fileOff - s.Offset)
-			if off+ptrSize > len(secData) {
-				return 0, fmt.Errorf("read past section boundary")
-			}
-			if ptrSize == 8 {
-				return binary.LittleEndian.Uint64(secData[off : off+8]), nil
-			}
-			return uint64(binary.LittleEndian.Uint32(secData[off : off+4])), nil
-		}
-	}
-	return 0, fmt.Errorf("offset 0x%x not in any section", fileOff)
 }
 
 // annotateVA returns a short annotation for a VA: symbol name, section name, or empty.

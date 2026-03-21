@@ -529,16 +529,108 @@ func TestStructLayout_X64(t *testing.T) {
 	}
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
+// --- vtable_scan tests ---
+
+func TestVtableScan_X64(t *testing.T) {
+	skipIfNoCrackmeX64(t)
+	input := AnalyzeInput{
+		FilePath:  testCrackmeX64,
+		Operation: "vtable_scan",
 	}
-	return b
+	result, err := opVtableScan(input)
+	if err != nil {
+		t.Fatalf("vtable_scan x64 failed: %v", err)
+	}
+	// Should find at least type_info, exception, bad_exception
+	if !strings.Contains(result, "type_info") {
+		t.Errorf("expected type_info vtable, got:\n%s", result)
+	}
+	if !strings.Contains(result, "exception") {
+		t.Errorf("expected exception vtable, got:\n%s", result)
+	}
+	t.Logf("x64 vtable_scan:\n%s", result)
 }
 
-func max(a, b int) int {
-	if a > b {
-		return a
+func TestVtableScan_X86(t *testing.T) {
+	skipIfNoCrackme(t)
+	input := AnalyzeInput{
+		FilePath:  testCrackme,
+		Operation: "vtable_scan",
 	}
-	return b
+	result, err := opVtableScan(input)
+	if err != nil {
+		t.Fatalf("vtable_scan x86 failed: %v", err)
+	}
+	if !strings.Contains(result, "vtable") {
+		t.Errorf("expected vtable results, got:\n%s", result)
+	}
+	t.Logf("x86 vtable_scan:\n%s", result)
+}
+
+// --- demangling tests ---
+
+func TestDemangleMSVC(t *testing.T) {
+	tests := []struct {
+		input, expected string
+	}{
+		{".?AVtype_info@@", "type_info"},
+		{".?AVbad_exception@std@@", "std::bad_exception"},
+		{".?AVexception@std@@", "std::exception"},
+		{".?AUtagRECT@@", "struct tagRECT"},
+		{".?AW4Color@ui@@", "enum ui::Color"},
+		{".?AVInner@Outer@ns@@", "ns::Outer::Inner"},
+		{"not_mangled", "not_mangled"},
+		{".?AV@@", ".?AV@@"},  // empty name, keep original
+	}
+	for _, tt := range tests {
+		got := demangleMSVC(tt.input)
+		if got != tt.expected {
+			t.Errorf("demangleMSVC(%q) = %q, want %q", tt.input, got, tt.expected)
+		}
+	}
+}
+
+// --- xref x64 positive test ---
+
+func TestXref_X64_Positive(t *testing.T) {
+	skipIfNoCrackmeX64(t)
+	// __security_init_cookie (0x140002a54) is called from entry point
+	input := AnalyzeInput{
+		FilePath:  testCrackmeX64,
+		Operation: "xref",
+		TargetVA:  "0x140002a54",
+	}
+	result, err := opXref(input)
+	if err != nil {
+		t.Fatalf("xref x64 failed: %v", err)
+	}
+	if !strings.Contains(result, "CALL") {
+		t.Errorf("expected CALL reference, got:\n%s", result)
+	}
+	if !strings.Contains(result, "1 CALL") {
+		t.Errorf("expected summary with CALL count, got:\n%s", result)
+	}
+}
+
+// --- RTTI demangling integration test ---
+
+func TestRTTIDump_X64_Demangled(t *testing.T) {
+	skipIfNoCrackmeX64(t)
+	input := AnalyzeInput{
+		FilePath:  testCrackmeX64,
+		Operation: "rtti_dump",
+		VA:        "0x140020840",
+	}
+	result, err := opRTTIDump(input)
+	if err != nil {
+		t.Fatalf("opRTTIDump x64 failed: %v", err)
+	}
+	// Should show demangled name
+	if !strings.Contains(result, "type_info") {
+		t.Errorf("expected demangled type_info, got:\n%s", result)
+	}
+	// Should show pSelf validation passed (no error)
+	if !strings.Contains(result, "signature:  1") {
+		t.Errorf("expected x64 COL signature 1, got:\n%s", result)
+	}
 }
