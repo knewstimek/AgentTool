@@ -59,3 +59,7 @@ func opClose(input WintoolInput) (*CallResult, WintoolOutput, error) {
 func opFocus(input WintoolInput) (*CallResult, WintoolOutput, error) {
 	return errorResult(errNotSupported)
 }
+
+func opClipboard(input WintoolInput) (*CallResult, WintoolOutput, error) {
+	return errorResult(errNotSupported)
+}

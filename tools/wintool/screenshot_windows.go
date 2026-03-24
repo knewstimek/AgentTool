@@ -3,12 +3,14 @@
 package wintool
 
 import (
+	"bytes"
 	"fmt"
 	"image"
 	"image/png"
 	"os"
 	"unsafe"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/sys/windows"
 )
 
@@ -150,20 +152,32 @@ func opScreenshot(input WintoolInput) (*CallResult, WintoolOutput, error) {
 		img.Pix[i+3] = 255         // A (opaque)
 	}
 
-	// Save to temp file so agents can view it via their image-reading tools.
-	// This is more universally supported than MCP ImageContent.
-	tmpFile, err := os.CreateTemp("", "wintool-screenshot-*.png")
-	if err != nil {
-		return errorResult("failed to create temp file: %v", err)
-	}
-	defer tmpFile.Close()
-
-	if err := png.Encode(tmpFile, img); err != nil {
-		os.Remove(tmpFile.Name())
+	// Encode PNG to buffer
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
 		return errorResult("PNG encode failed: %v", err)
 	}
+	pngData := buf.Bytes()
 
-	fi, _ := tmpFile.Stat()
-	msg := fmt.Sprintf("Screenshot saved: %s (%dx%d, %d bytes)", tmpFile.Name(), w, h, fi.Size())
-	return successResult(msg)
+	// save_path: "temp" -> auto temp file, absolute path -> that path, empty -> ImageContent
+	if input.SavePath != "" {
+		saveTo, sErr := resolveSavePath(input.SavePath, "wintool-screenshot-*.png")
+		if sErr != nil {
+			return errorResult("%v", sErr)
+		}
+		if ferr := os.WriteFile(saveTo, pngData, 0644); ferr != nil {
+			return errorResult("failed to write file: %v", ferr)
+		}
+		msg := fmt.Sprintf("Screenshot saved: %s (%dx%d, %d bytes)", saveTo, w, h, len(pngData))
+		return successResult(msg)
+	}
+
+	// Default: return as MCP ImageContent (base64)
+	msg := fmt.Sprintf("Screenshot: %dx%d (%d bytes PNG)", w, h, len(pngData))
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{
+			&mcp.ImageContent{Data: pngData, MIMEType: "image/png"},
+			&mcp.TextContent{Text: msg},
+		},
+	}, WintoolOutput{Result: msg}, nil
 }

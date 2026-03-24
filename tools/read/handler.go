@@ -15,6 +15,23 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// imageExts maps file extensions to MIME types for image files.
+var imageExts = map[string]string{
+	".png":  "image/png",
+	".jpg":  "image/jpeg",
+	".jpeg": "image/jpeg",
+	".gif":  "image/gif",
+	".bmp":  "image/bmp",
+	".webp": "image/webp",
+	".ico":  "image/x-icon",
+	".svg":  "image/svg+xml",
+	".tiff": "image/tiff",
+	".tif":  "image/tiff",
+}
+
+// maxImageSize is the maximum image file size we'll return as base64 (20MB).
+const maxImageSize = 20 * 1024 * 1024
+
 // readHashThreshold is the maximum file size for automatically including a hash.
 // Files larger than this require a separate call to the checksum tool.
 const readHashThreshold = 10 * 1024 * 1024 // 10MB
@@ -128,6 +145,12 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ReadInput) (*mc
 		return errorResult(fmt.Sprintf("path is a directory, not a file: %s", input.FilePath))
 	}
 
+	// Image files: return as MCP ImageContent (base64-encoded)
+	ext := strings.ToLower(filepath.Ext(input.FilePath))
+	if mime, isImage := imageExts[ext]; isImage {
+		return handleImage(input.FilePath, fi, mime)
+	}
+
 	// .editorconfig charset hint
 	hintCharset := edit.FindEditorConfigCharset(input.FilePath)
 
@@ -221,10 +244,35 @@ func Register(server *mcp.Server) {
 		Name: "read",
 		Description: `Reads a file and returns its contents with line numbers.
 Encoding-aware: auto-detects file encoding (UTF-8, EUC-KR, Shift-JIS, etc.).
-Supports offset/limit for reading specific line ranges.
+Image files (PNG, JPG, GIF, BMP, WebP, TIFF, ICO) are returned as ImageContent (base64).
+SVG files are returned as text. Supports offset/limit for reading specific line ranges.
 Negative offset reads from end (e.g. offset=-5 reads last 5 lines).
 Offset accepts integer, string range "100-200", or [start, end] array.`,
 	}, Handle)
+}
+
+func handleImage(path string, fi os.FileInfo, mime string) (*mcp.CallToolResult, ReadOutput, error) {
+	if fi.Size() > maxImageSize {
+		return errorResult(fmt.Sprintf("image too large (%d bytes, max %d). Use download or compress first", fi.Size(), maxImageSize))
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return errorResult(fmt.Sprintf("failed to read image: %v", err))
+	}
+	// SVG is text-based, return as text instead of binary image
+	if mime == "image/svg+xml" {
+		text := string(data)
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: text}},
+		}, ReadOutput{Content: text, Encoding: "utf-8", TotalLines: strings.Count(text, "\n") + 1}, nil
+	}
+	msg := fmt.Sprintf("Image: %s (%d bytes)", filepath.Base(path), fi.Size())
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{
+			&mcp.ImageContent{Data: data, MIMEType: mime},
+			&mcp.TextContent{Text: msg},
+		},
+	}, ReadOutput{Content: msg, Encoding: "binary"}, nil
 }
 
 func errorResult(msg string) (*mcp.CallToolResult, ReadOutput, error) {

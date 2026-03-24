@@ -216,7 +216,8 @@ Parameters: file_path, old_string, new_string, replace_all, dry_run, indent_styl
 
 ## read
 Read a file with encoding auto-detection. Returns content with line numbers.
-Supports negative offset to read from end (e.g. offset=-5 reads last 5 lines).
+Image files (PNG, JPG, GIF, BMP, WebP, TIFF, ICO) are returned as base64 ImageContent.
+SVG files are returned as text. Supports negative offset to read from end.
 Offset accepts integer, string range "100-200", or [start, end] array.
 Parameters: file_path, offset (integer, "start-end" string, or [start,end] array), limit
 
@@ -1289,7 +1290,12 @@ macOS and Linux are not supported.
 ### Observation
   - screenshot: Capture a window as base64 PNG (works even if occluded)
     Uses PrintWindow (PW_RENDERFULLCONTENT), falls back to BitBlt
-    Max resolution: 4096x4096. Returns data:image/png;base64,...
+    Max resolution: 4096x4096. Default: returns ImageContent (base64).
+    Use save_path="temp" for temp file, or save_path="/path/to/file.png".
+  - clipboard: Read image from system clipboard as PNG
+    Supports 24-bit and 32-bit DIBs (BI_RGB and BI_BITFIELDS).
+    Use after Win+Shift+S or image copy.
+    Default: returns ImageContent (base64). Use save_path for file output.
   - gettext: Read text from a window/control via WM_GETTEXT
 
 ### Interaction
@@ -1304,9 +1310,13 @@ macOS and Linux are not supported.
 
 ## Workflow Examples
 
+### Read clipboard image (e.g. after Win+Shift+S):
+  1. clipboard -> returns ImageContent (agent can "see" it directly)
+  2. Or: clipboard(save_path="temp") -> saves to temp file, read it later
+
 ### Find and screenshot a window:
   1. list (or find title="Notepad") -> get HWND (e.g. 0x1A2B3C)
-  2. screenshot(hwnd="0x1A2B3C") -> base64 PNG (agent can "see" it)
+  2. screenshot(hwnd="0x1A2B3C") -> returns ImageContent (agent can "see" it)
   3. tree(hwnd="0x1A2B3C") -> find Edit control HWND
   4. gettext(hwnd=edit_hwnd) -> read current text
 
@@ -1325,5 +1335,6 @@ macOS and Linux are not supported.
   - HWND is specified as hex string: "0x1A2B3C" or "1A2B3C"
   - Coordinates for click are client-relative (not screen coordinates)
   - SetForegroundWindow may fail if agent-tool is not the foreground process
-  - screenshot returns base64-encoded PNG suitable for multimodal AI analysis`
+  - screenshot/clipboard return ImageContent by default (base64 PNG)
+    Use save_path to save to file instead (save_path="temp" or absolute path)`
 }

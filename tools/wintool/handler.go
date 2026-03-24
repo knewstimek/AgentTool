@@ -3,6 +3,8 @@ package wintool
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -47,6 +49,9 @@ type WintoolInput struct {
 
 	// limits
 	MaxResults int `json:"max_results,omitempty" jsonschema:"Maximum number of results. Default: 100, Max: 1000"`
+
+	// screenshot / clipboard
+	SavePath string `json:"save_path,omitempty" jsonschema:"Save image to this path instead of returning base64. For screenshot/clipboard"`
 }
 
 // WintoolOutput is the MCP output type.
@@ -56,7 +61,7 @@ type WintoolOutput struct {
 
 var validOps = map[string]bool{
 	"list": true, "tree": true, "find": true, "inspect": true,
-	"screenshot": true, "gettext": true, "settext": true,
+	"screenshot": true, "clipboard": true, "gettext": true, "settext": true,
 	"click": true, "type": true, "send": true,
 	"show": true, "move": true, "close": true, "focus": true,
 }
@@ -65,7 +70,7 @@ var validOps = map[string]bool{
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input WintoolInput) (*mcp.CallToolResult, WintoolOutput, error) {
 	op := strings.ToLower(strings.TrimSpace(input.Operation))
 	if !validOps[op] {
-		return errorResult("invalid operation %q (use: list, tree, find, inspect, screenshot, gettext, settext, click, type, send, show, move, close, focus)", op)
+		return errorResult("invalid operation %q (use: list, tree, find, inspect, screenshot, clipboard, gettext, settext, click, type, send, show, move, close, focus)", op)
 	}
 
 	if input.PID < 0 {
@@ -90,6 +95,8 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input WintoolInput) (
 		return opInspect(input)
 	case "screenshot":
 		return opScreenshot(input)
+	case "clipboard":
+		return opClipboard(input)
 	case "gettext":
 		return opGettext(input)
 	case "settext":
@@ -119,9 +126,10 @@ func Register(server *mcp.Server) {
 		Name: "wintool",
 		Description: `Windows GUI automation tool for finding, inspecting, and controlling windows.
 Find windows by title/class/PID, enumerate child controls, capture screenshots (base64 PNG),
-read/set text, click, type, send raw messages, show/hide/minimize/maximize, move/resize, close, focus.
+read clipboard images, read/set text, click, type, send raw messages, show/hide/minimize/maximize, move/resize, close, focus.
 Windows only. macOS and Linux are not supported.
-Operations: list, tree, find, inspect, screenshot, gettext, settext, click, type, send, show, move, close, focus.`,
+Operations: list, tree, find, inspect, screenshot, clipboard, gettext, settext, click, type, send, show, move, close, focus.
+clipboard: reads image from system clipboard and saves as PNG temp file. Use after Win+Shift+S or Copy.`,
 	}, Handle)
 }
 
@@ -168,4 +176,33 @@ func errorResult(format string, args ...any) (*mcp.CallToolResult, WintoolOutput
 		Content: []mcp.Content{&mcp.TextContent{Text: msg}},
 		IsError: true,
 	}, WintoolOutput{Result: msg}, nil
+}
+
+// resolveSavePath validates and resolves save_path for screenshot/clipboard.
+// Returns the resolved absolute path to write to.
+// "temp" creates a temp file with the given prefix; absolute paths are validated
+// against dangerous/reserved paths (same checks as delete/rename/mkdir).
+func resolveSavePath(savePath, tempPrefix string) (string, error) {
+	if strings.EqualFold(savePath, "temp") {
+		tmpFile, err := os.CreateTemp("", tempPrefix)
+		if err != nil {
+			return "", fmt.Errorf("failed to create temp file: %w", err)
+		}
+		tmpFile.Close()
+		return tmpFile.Name(), nil
+	}
+	cleaned := filepath.Clean(savePath)
+	if !filepath.IsAbs(cleaned) {
+		return "", fmt.Errorf("save_path must be an absolute path or \"temp\"")
+	}
+	if err := common.CheckDangerousPath(cleaned); err != nil {
+		return "", err
+	}
+	if err := common.CheckWindowsReserved(cleaned); err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(cleaned), 0755); err != nil {
+		return "", fmt.Errorf("failed to create directory: %w", err)
+	}
+	return cleaned, nil
 }
