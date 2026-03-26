@@ -56,6 +56,7 @@ import (
 	"agent-tool/tools/webfetch"
 	"agent-tool/tools/websearch"
 	"agent-tool/tools/yamlquery"
+	"agent-tool/tools/ipc"
 	"agent-tool/tools/wintool"
 	"agent-tool/tools/write"
 
@@ -209,6 +210,7 @@ Tool groups: file | system (bash, procexec, proclist, prockill, sysinfo, envvar,
 	analyze.Register(server)
 	memtool.Register(server)
 	wintool.Register(server)
+	ipc.Register(server)
 	help.Register(server)
 
 	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {

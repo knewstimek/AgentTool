@@ -42,11 +42,13 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input HelpInput) (*mc
 		text = helpMemtool()
 	case "wintool", "window", "win", "gui":
 		text = helpWintool()
+	case "ipc":
+		text = helpIPC()
 	case "troubleshooting", "trouble":
 		text = helpTroubleshooting()
 	default:
 		text = "Unknown topic: " + topic + "\n\n" +
-			"Available topics: overview, encoding, indentation, tools, debug, analyze, memtool, wintool, troubleshooting"
+			"Available topics: overview, encoding, indentation, tools, debug, analyze, memtool, wintool, ipc, troubleshooting"
 	}
 
 	return &mcp.CallToolResult{
@@ -1337,4 +1339,48 @@ macOS and Linux are not supported.
   - SetForegroundWindow may fail if agent-tool is not the foreground process
   - screenshot/clipboard return ImageContent by default (base64 PNG)
     Use save_path to save to file instead (save_path="temp" or absolute path)`
+}
+
+func helpIPC() string {
+	return `# ipc -- Inter-Process Communication
+
+TCP-based message passing between AI agent sessions (same or different machines).
+Protocol: [2-byte type BE][4-byte length BE][payload].
+
+## Operations
+
+  - send: Connect to a remote host and send a text message
+    Required: host (e.g. "192.168.1.5:19900"), message
+  - receive: Listen on a port and block until a message arrives
+    Optional: port (default 19900), timeout (default 60s, max 300s), bind (default 0.0.0.0)
+    Auto-responds to PING with PONG
+  - ping: Send PING to remote, wait for PONG, measure RTT
+    Required: host
+
+## Protocol Types
+  0x0000 PING (heartbeat, no payload)
+  0x0001 PONG (heartbeat response, no payload)
+  0x0002 MESSAGE (text payload, max 1MB)
+
+## Workflow Example
+
+### Two sessions on different machines:
+  Session A (machine 192.168.1.5):
+    ipc(operation="receive", port=19900, timeout=120)  -- blocks waiting
+
+  Session B (another machine):
+    ipc(operation="send", host="192.168.1.5:19900", message="packet struct info...")
+
+  Session A receives the message instantly and can process it.
+
+### Connection check:
+  Session A: ipc(operation="receive", port=19900, timeout=30)
+  Session B: ipc(operation="ping", host="192.168.1.5:19900")
+  -> "PONG from 192.168.1.5:19900 (rtt=1.234ms)"
+
+## Notes
+  - receive blocks the MCP tool call (no token consumption during wait)
+  - For local-only use, set bind="127.0.0.1" on receive
+  - Max message size: 1MB, max timeout: 300 seconds
+  - One message per connection (request-response pattern, not streaming)`
 }
