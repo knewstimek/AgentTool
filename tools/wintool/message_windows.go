@@ -24,7 +24,6 @@ var (
 	procAttachConsole             = modKernel32.NewProc("AttachConsole")
 	procFreeConsole               = modKernel32.NewProc("FreeConsole")
 	procWriteConsoleInputW        = modKernel32.NewProc("WriteConsoleInputW")
-	procGetStdHandle              = modKernel32.NewProc("GetStdHandle")
 	procGetConsoleWindow          = modKernel32.NewProc("GetConsoleWindow")
 )
 
@@ -220,8 +219,7 @@ type keyEventRecord struct {
 }
 
 const (
-	keyEvent       = 0x0001
-	stdInputHandle = ^uintptr(10 - 1) // STD_INPUT_HANDLE = (DWORD)-10
+	keyEvent = 0x0001
 )
 
 // typeConsole types text into a console window via WriteConsoleInput.
@@ -263,11 +261,20 @@ func typeConsole(hwnd uintptr, text string) (*CallResult, WintoolOutput, error) 
 		}
 	}()
 
-	// Get the console input handle
-	hInput, _, _ := procGetStdHandle.Call(stdInputHandle)
-	if hInput == 0 || hInput == ^uintptr(0) {
-		return errorResult("GetStdHandle(STD_INPUT_HANDLE) failed for PID %d", pid)
+	// Open the console input buffer directly via CONIN$.
+	// GetStdHandle won't work here because MCP servers use pipe-based stdio,
+	// and AttachConsole doesn't change the existing standard handles.
+	conin, _ := syscall.UTF16PtrFromString("CONIN$")
+	hInput, err2 := syscall.CreateFile(
+		conin,
+		syscall.GENERIC_READ|syscall.GENERIC_WRITE,
+		syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE,
+		nil, syscall.OPEN_EXISTING, 0, 0,
+	)
+	if err2 != nil {
+		return errorResult("CreateFile(CONIN$) failed for PID %d: %v", pid, err2)
 	}
+	defer syscall.CloseHandle(hInput)
 
 	// Build KEY_EVENT_RECORD pairs (key down + key up) for each character
 	utf16Chars := utf16.Encode([]rune(text))
@@ -289,7 +296,7 @@ func typeConsole(hwnd uintptr, text string) (*CallResult, WintoolOutput, error) 
 
 	var written uint32
 	ret, _, err = procWriteConsoleInputW.Call(
-		hInput,
+		uintptr(hInput),
 		uintptr(unsafe.Pointer(&events[0])),
 		uintptr(len(events)),
 		uintptr(unsafe.Pointer(&written)),
