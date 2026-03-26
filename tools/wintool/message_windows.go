@@ -5,6 +5,7 @@ package wintool
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"syscall"
 	"unicode/utf16"
 	"unsafe"
@@ -13,12 +14,23 @@ import (
 )
 
 var (
-	procSendMessageW      = modUser32.NewProc("SendMessageW")
-	procPostMessageW      = modUser32.NewProc("PostMessageW")
+	procSendMessageW        = modUser32.NewProc("SendMessageW")
+	procPostMessageW        = modUser32.NewProc("PostMessageW")
 	procSetForegroundWindow = modUser32.NewProc("SetForegroundWindow")
-	procShowWindow        = modUser32.NewProc("ShowWindow")
-	procMoveWindow        = modUser32.NewProc("MoveWindow")
+	procShowWindow          = modUser32.NewProc("ShowWindow")
+	procMoveWindow          = modUser32.NewProc("MoveWindow")
+
+	procGetWindowThreadProcessId2 = modUser32.NewProc("GetWindowThreadProcessId")
+	procAttachConsole             = modKernel32.NewProc("AttachConsole")
+	procFreeConsole               = modKernel32.NewProc("FreeConsole")
+	procWriteConsoleInputW        = modKernel32.NewProc("WriteConsoleInputW")
+	procGetStdHandle              = modKernel32.NewProc("GetStdHandle")
+	procGetConsoleWindow          = modKernel32.NewProc("GetConsoleWindow")
 )
+
+// consoleMu protects AttachConsole/FreeConsole which are process-global.
+// Only one goroutine can attach to a console at a time.
+var consoleMu sync.Mutex
 
 // Common window message constants.
 const (
@@ -164,7 +176,7 @@ func opClick(input WintoolInput) (*CallResult, WintoolOutput, error) {
 	return successResult(fmt.Sprintf("Clicked %s at (%d,%d) on 0x%X", button, input.X, input.Y, hwnd))
 }
 
-// opType sends keyboard characters via WM_CHAR.
+// opType sends keyboard characters via WM_CHAR, or WriteConsoleInput for console windows.
 func opType(input WintoolInput) (*CallResult, WintoolOutput, error) {
 	hwnd, errResult, errOutput := requireHWND(input)
 	if errResult != nil {
@@ -177,14 +189,116 @@ func opType(input WintoolInput) (*CallResult, WintoolOutput, error) {
 		return errorResult("text is required for type operation")
 	}
 
-	// WM_CHAR expects UTF-16 code units, so BMP-outside characters
-	// (emoji, etc.) must be sent as surrogate pairs.
+	// Console windows (cmd.exe, PowerShell) need WriteConsoleInput
+	// because they read from the console input buffer, not WM_CHAR.
+	className := getClassName(hwnd)
+	if className == "ConsoleWindowClass" {
+		return typeConsole(hwnd, input.Text)
+	}
+
+	// Regular GUI windows: WM_CHAR with UTF-16 encoding.
+	// BMP-outside characters (emoji, etc.) sent as surrogate pairs.
 	utf16Chars := utf16.Encode([]rune(input.Text))
 	for _, ch := range utf16Chars {
 		sendMessage(hwnd, wmChar, uintptr(ch), 0)
 	}
 
 	return successResult(fmt.Sprintf("Typed %d characters on 0x%X", len(utf16Chars), hwnd))
+}
+
+// KEY_EVENT_RECORD for WriteConsoleInput.
+// https://learn.microsoft.com/en-us/windows/console/key-event-record-str
+type keyEventRecord struct {
+	EventType uint16
+	_         uint16 // padding
+	KeyDown   int32
+	RepeatCnt uint16
+	VKeyCode  uint16
+	VScanCode uint16
+	UChar     uint16 // wchar
+	CtrlState uint32
+}
+
+const (
+	keyEvent       = 0x0001
+	stdInputHandle = ^uintptr(10 - 1) // STD_INPUT_HANDLE = (DWORD)-10
+)
+
+// typeConsole types text into a console window via WriteConsoleInput.
+// Attaches to the console of the target process, writes key events, then detaches.
+// Uses mutex because AttachConsole/FreeConsole are process-global (one console at a time).
+func typeConsole(hwnd uintptr, text string) (*CallResult, WintoolOutput, error) {
+	consoleMu.Lock()
+	defer consoleMu.Unlock()
+
+	// Get the PID of the console window's process
+	var pid uint32
+	procGetWindowThreadProcessId2.Call(hwnd, uintptr(unsafe.Pointer(&pid)))
+	if pid == 0 {
+		return errorResult("failed to get PID for console window 0x%X", hwnd)
+	}
+
+	// Remember if we had our own console, so we can restore it after.
+	// MCP servers typically run without a console (pipe-based stdio),
+	// but when run from a terminal (debugging), we need to restore it.
+	hadConsole, _, _ := procGetConsoleWindow.Call()
+
+	// Detach from our own console (if any), attach to target's console
+	procFreeConsole.Call()
+	ret, _, err := procAttachConsole.Call(uintptr(pid))
+	if ret == 0 {
+		// Restore our own console on failure
+		if hadConsole != 0 {
+			const attachParentProcess = ^uintptr(1 - 1) // (DWORD)-1
+			procAttachConsole.Call(attachParentProcess)
+		}
+		return errorResult("AttachConsole(%d) failed: %v", pid, err)
+	}
+	defer func() {
+		procFreeConsole.Call()
+		// Restore our own console
+		if hadConsole != 0 {
+			const attachParentProcess = ^uintptr(1 - 1) // (DWORD)-1
+			procAttachConsole.Call(attachParentProcess)
+		}
+	}()
+
+	// Get the console input handle
+	hInput, _, _ := procGetStdHandle.Call(stdInputHandle)
+	if hInput == 0 || hInput == ^uintptr(0) {
+		return errorResult("GetStdHandle(STD_INPUT_HANDLE) failed for PID %d", pid)
+	}
+
+	// Build KEY_EVENT_RECORD pairs (key down + key up) for each character
+	utf16Chars := utf16.Encode([]rune(text))
+	events := make([]keyEventRecord, 0, len(utf16Chars)*2)
+	for _, ch := range utf16Chars {
+		events = append(events, keyEventRecord{
+			EventType: keyEvent,
+			KeyDown:   1,
+			RepeatCnt: 1,
+			UChar:     ch,
+		})
+		events = append(events, keyEventRecord{
+			EventType: keyEvent,
+			KeyDown:   0,
+			RepeatCnt: 1,
+			UChar:     ch,
+		})
+	}
+
+	var written uint32
+	ret, _, err = procWriteConsoleInputW.Call(
+		hInput,
+		uintptr(unsafe.Pointer(&events[0])),
+		uintptr(len(events)),
+		uintptr(unsafe.Pointer(&written)),
+	)
+	if ret == 0 {
+		return errorResult("WriteConsoleInput failed: %v", err)
+	}
+
+	return successResult(fmt.Sprintf("Typed %d characters to console (PID %d, 0x%X) via WriteConsoleInput", len(utf16Chars), pid, hwnd))
 }
 
 // opSend sends a raw SendMessage/PostMessage.

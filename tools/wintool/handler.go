@@ -129,7 +129,9 @@ Find windows by title/class/PID, enumerate child controls, capture screenshots (
 read clipboard images, read/set text, click, type, send raw messages, show/hide/minimize/maximize, move/resize, close, focus.
 Windows only. macOS and Linux are not supported.
 Operations: list, tree, find, inspect, screenshot, clipboard, gettext, settext, click, type, send, show, move, close, focus.
-clipboard: reads image from system clipboard and saves as PNG temp file. Use after Win+Shift+S or Copy.`,
+clipboard: reads image from system clipboard and saves as PNG temp file. Use after Win+Shift+S or Copy.
+type: sends keyboard input. Auto-detects console windows (ConsoleWindowClass) and uses WriteConsoleInput.
+Tip: type + send(msg=WM_KEYDOWN, wparam=VK_RETURN) can inject commands into other terminal/IDE sessions. Works with Electron (VSCode) too.`,
 	}, Handle)
 }
 

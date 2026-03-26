@@ -1303,7 +1303,9 @@ macOS and Linux are not supported.
 ### Interaction
   - settext: Set text on a window/control via WM_SETTEXT
   - click: Click at client-relative coordinates (left/right/middle)
-  - type: Send keyboard characters via WM_CHAR
+  - type: Send keyboard characters. Auto-detects ConsoleWindowClass and uses
+    WriteConsoleInput (for cmd/PowerShell). GUI windows use WM_CHAR.
+    Tip: type + send(msg=0x0100, wparam=0x0D) injects commands into terminals/IDEs
   - send: Raw SendMessage/PostMessage with custom msg/wParam/lParam
   - close: Send WM_CLOSE to a window
   - focus: Bring window to foreground (SetForegroundWindow)
