@@ -20,6 +20,14 @@ func opIndex(input CodeGraphInput) (string, error) {
 	if !filepath.IsAbs(root) {
 		return "", fmt.Errorf("path must be absolute")
 	}
+	if err := common.CheckDangerousPath(root); err != nil {
+		return "", err
+	}
+	if !common.GetAllowSymlinks() {
+		if lfi, err := os.Lstat(root); err == nil && lfi.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("symlinks are not allowed (see set_config allow_symlinks)")
+		}
+	}
 	fi, err := os.Stat(root)
 	if err != nil {
 		return "", fmt.Errorf("cannot access path: %w", err)
@@ -152,6 +160,9 @@ func opFind(input CodeGraphInput) (string, error) {
 		sb.WriteString("\n")
 		count++
 	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("query error: %w", err)
+	}
 
 	if count == 0 {
 		return fmt.Sprintf("No symbols found matching %q. Run codegraph(op=\"index\", path=\"...\") first.", input.Name), nil
@@ -198,6 +209,9 @@ func opCallers(input CodeGraphInput) (string, error) {
 		}
 		sb.WriteString("\n")
 		count++
+	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("query error: %w", err)
 	}
 
 	if count == 0 {
@@ -252,9 +266,14 @@ func opCallees(input CodeGraphInput) (string, error) {
 	for rows.Next() {
 		var callee string
 		var line int
-		rows.Scan(&callee, &line)
+		if err := rows.Scan(&callee, &line); err != nil {
+			continue
+		}
 		sb.WriteString(fmt.Sprintf("  line:%d  %s\n", line, callee))
 		count++
+	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("query error: %w", err)
 	}
 
 	if count == 0 {
@@ -400,6 +419,9 @@ func opMethods(input CodeGraphInput) (string, error) {
 		sb.WriteString(fmt.Sprintf("  %s  %s:%d\n", qn, path, line))
 		count++
 	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("query error: %w", err)
+	}
 
 	if count == 0 {
 		return fmt.Sprintf("No methods found for class %q.", input.Name), nil
@@ -444,6 +466,10 @@ func opInherits(input CodeGraphInput) (string, error) {
 		sb.WriteString(fmt.Sprintf("  %s  (%s:%d)\n", parent, path, line))
 		parentCount++
 	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return "", fmt.Errorf("query error: %w", err)
+	}
 	rows.Close()
 	if parentCount == 0 {
 		sb.WriteString("  (none)\n")
@@ -470,6 +496,10 @@ func opInherits(input CodeGraphInput) (string, error) {
 		}
 		sb.WriteString(fmt.Sprintf("  %s  (%s:%d)\n", child, path, line))
 		childCount++
+	}
+	if err := rows2.Err(); err != nil {
+		rows2.Close()
+		return "", fmt.Errorf("query error: %w", err)
 	}
 	rows2.Close()
 	if childCount == 0 {
@@ -526,16 +556,15 @@ func detectLanguage(path, hint string) string {
 		return "go"
 	case ".cs":
 		return "csharp"
-	case ".js":
-		return "javascript"
-	case ".ts", ".tsx":
-		return "typescript"
+	// JS/TS: WASM not yet available, uncomment when added
+	// case ".js", ".jsx":
+	// 	return "javascript"
+	// case ".ts", ".tsx":
+	// 	return "typescript"
 	case ".rs":
 		return "rust"
 	case ".java":
 		return "java"
-	case ".jsx":
-		return "javascript"
 	}
 	return ""
 }

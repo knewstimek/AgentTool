@@ -88,7 +88,7 @@ Operations:
   symbols(path) - List all symbols in a file.
   methods(name) - List all methods of a class.
   inherits(name) - Show inheritance hierarchy of a class.
-Supports: C/C++, Python, Go, C#, JavaScript, TypeScript, Rust, Java.
+Supports: C/C++, Python, Go, C#, Rust, Java.
 Index is stored at project root as .codegraph.db (add to .gitignore).
 No LLM calls, no embeddings -- pure data lookup, zero token cost.
 Powered by tree-sitter (MIT) via wazero (pure Go WASM runtime).`,

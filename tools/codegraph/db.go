@@ -192,7 +192,9 @@ func storeParseResult(db *sql.DB, filePath, lang string, result *ParseResult) er
 
 	for _, s := range result.Calls {
 		if s.Capture == "callee" && s.Name != "" {
-			stmtCall.Exec(fileID, s.Line, s.Name, s.Scope)
+			if _, err := stmtCall.Exec(fileID, s.Line, s.Name, s.Scope); err != nil {
+				return fmt.Errorf("insert call: %w", err)
+			}
 		}
 	}
 
@@ -205,7 +207,9 @@ func storeParseResult(db *sql.DB, filePath, lang string, result *ParseResult) er
 		defer stmtInc.Close()
 		for _, s := range result.Imports {
 			if s.Name != "" {
-				stmtInc.Exec(fileID, s.Name, s.Line)
+				if _, err := stmtInc.Exec(fileID, s.Name, s.Line); err != nil {
+					return fmt.Errorf("insert include: %w", err)
+				}
 			}
 		}
 	}
@@ -218,7 +222,9 @@ func storeParseResult(db *sql.DB, filePath, lang string, result *ParseResult) er
 		}
 		defer stmtInh.Close()
 		for _, inh := range result.Inheritance {
-			stmtInh.Exec(inh.ClassName, inh.ParentName, fileID, inh.Line)
+			if _, err := stmtInh.Exec(inh.ClassName, inh.ParentName, fileID, inh.Line); err != nil {
+				return fmt.Errorf("insert inheritance: %w", err)
+			}
 		}
 	}
 
