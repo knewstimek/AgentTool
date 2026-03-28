@@ -46,6 +46,7 @@ type langQueries struct {
 	classes   string
 	functions string
 	calls     string
+	imports   string
 }
 
 // engines holds lazily-initialized per-language engines.
@@ -120,36 +121,42 @@ func langConfig(lang string) ([]byte, langQueries, error) {
 			classes:   queryCPPClasses,
 			functions: queryCPPFunctions,
 			calls:     queryCPPCalls,
+			imports:   queryCPPIncludes,
 		}, nil
 	case "python":
 		return pythonWasm, langQueries{
 			classes:   queryPythonClasses,
 			functions: queryPythonFunctions,
 			calls:     queryPythonCalls,
+			imports:   queryPythonImports,
 		}, nil
 	case "go":
 		return goWasm, langQueries{
 			classes:   queryGoTypes,
 			functions: queryGoFunctions,
 			calls:     queryGoCalls,
+			imports:   queryGoImports,
 		}, nil
 	case "csharp":
 		return csharpWasm, langQueries{
 			classes:   queryCSharpClasses,
 			functions: queryCSharpFunctions,
 			calls:     queryCSharpCalls,
+			imports:   queryCSharpUsings,
 		}, nil
 	case "rust":
 		return rustWasm, langQueries{
 			classes:   queryRustTypes,
 			functions: queryRustFunctions,
 			calls:     queryRustCalls,
+			imports:   queryRustUses,
 		}, nil
 	case "java":
 		return javaWasm, langQueries{
 			classes:   queryJavaClasses,
 			functions: queryJavaFunctions,
 			calls:     queryJavaCalls,
+			imports:   queryJavaImports,
 		}, nil
 	default:
 		return nil, langQueries{}, fmt.Errorf("unsupported language: %s (available: cpp, python, go, csharp, rust, java)", lang)
@@ -176,10 +183,11 @@ type Inheritance struct {
 
 // ParseResult holds parsed symbols from a source file.
 type ParseResult struct {
-	Classes      []Symbol
-	Functions    []Symbol
-	Calls        []Symbol
-	Inheritance  []Inheritance
+	Classes     []Symbol
+	Functions   []Symbol
+	Calls       []Symbol
+	Imports     []Symbol
+	Inheritance []Inheritance
 }
 
 // ---- Tree-sitter query patterns per language ----
@@ -252,6 +260,37 @@ const queryCSharpFunctions = `
 const queryCSharpCalls = `
 (invocation_expression
   function: (_) @callee) @call
+`
+
+// C/C++ include
+const queryCPPIncludes = `
+(preproc_include) @import
+`
+
+// Python imports
+const queryPythonImports = `
+(import_statement) @import
+(import_from_statement) @import
+`
+
+// Go imports
+const queryGoImports = `
+(import_declaration) @import
+`
+
+// C# usings
+const queryCSharpUsings = `
+(using_directive) @import
+`
+
+// Rust use declarations
+const queryRustUses = `
+(use_declaration) @import
+`
+
+// Java imports
+const queryJavaImports = `
+(import_declaration) @import
 `
 
 // Rust query patterns (from code-graph-rag, MIT license)
@@ -410,6 +449,11 @@ func (e *engine) Parse(source string) (*ParseResult, error) {
 	result.Calls, err = runQuery(e.queries.calls)
 	if err != nil {
 		return nil, fmt.Errorf("call query: %w", err)
+	}
+
+	result.Imports, err = runQuery(e.queries.imports)
+	if err != nil {
+		return nil, fmt.Errorf("import query: %w", err)
 	}
 
 	// Extract inheritance relationships

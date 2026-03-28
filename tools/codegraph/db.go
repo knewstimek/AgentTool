@@ -58,6 +58,16 @@ CREATE TABLE IF NOT EXISTS inheritance (
 
 CREATE INDEX IF NOT EXISTS idx_inh_class ON inheritance(class_name);
 CREATE INDEX IF NOT EXISTS idx_inh_parent ON inheritance(parent_name);
+
+CREATE TABLE IF NOT EXISTS includes (
+	id INTEGER PRIMARY KEY,
+	file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+	included TEXT NOT NULL,
+	line INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_includes_file ON includes(file_id);
+CREATE INDEX IF NOT EXISTS idx_includes_included ON includes(included);
 `
 
 // openDB opens or creates the codegraph database at the project root.
@@ -124,6 +134,9 @@ func storeParseResult(db *sql.DB, filePath, lang string, result *ParseResult) er
 		if _, err := tx.Exec("DELETE FROM inheritance WHERE file_id = ?", fileID); err != nil {
 			return fmt.Errorf("delete old inheritance: %w", err)
 		}
+		if _, err := tx.Exec("DELETE FROM includes WHERE file_id = ?", fileID); err != nil {
+			return fmt.Errorf("delete old includes: %w", err)
+		}
 		if _, err := tx.Exec("UPDATE files SET hash = ?, language = ? WHERE id = ?", hash, lang, fileID); err != nil {
 			return fmt.Errorf("update file hash: %w", err)
 		}
@@ -180,6 +193,20 @@ func storeParseResult(db *sql.DB, filePath, lang string, result *ParseResult) er
 	for _, s := range result.Calls {
 		if s.Capture == "callee" && s.Name != "" {
 			stmtCall.Exec(fileID, s.Line, s.Name, s.Scope)
+		}
+	}
+
+	// Insert includes/imports
+	if len(result.Imports) > 0 {
+		stmtInc, err := tx.Prepare("INSERT INTO includes (file_id, included, line) VALUES (?, ?, ?)")
+		if err != nil {
+			return err
+		}
+		defer stmtInc.Close()
+		for _, s := range result.Imports {
+			if s.Name != "" {
+				stmtInc.Exec(fileID, s.Name, s.Line)
+			}
 		}
 	}
 

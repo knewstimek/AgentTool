@@ -326,6 +326,14 @@ func opSymbols(input CodeGraphInput) (string, error) {
 		sb.WriteString("\n")
 	}
 
+	if len(result.Imports) > 0 {
+		sb.WriteString("Imports/Includes:\n")
+		for _, s := range result.Imports {
+			sb.WriteString(fmt.Sprintf("  %s  line:%d\n", s.Name, s.Line))
+		}
+		sb.WriteString("\n")
+	}
+
 	if len(result.Inheritance) > 0 {
 		sb.WriteString("Inheritance:\n")
 		for _, inh := range result.Inheritance {
