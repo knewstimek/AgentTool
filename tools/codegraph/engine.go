@@ -15,65 +15,138 @@ import (
 //go:embed wasm/tree-sitter-cpp.wasm
 var cppWasm []byte
 
-// engine holds the wazero runtime and tree-sitter WASM module instance.
-// It is lazily initialized on first use and reused across calls.
-// ParseCPP is serialized with mu because WASM linear memory is shared.
+//go:embed wasm/tree-sitter-python.wasm
+var pythonWasm []byte
+
+//go:embed wasm/tree-sitter-go.wasm
+var goWasm []byte
+
+//go:embed wasm/tree-sitter-c_sharp.wasm
+var csharpWasm []byte
+
+// engine holds a wazero runtime and tree-sitter WASM module for one language.
+// Parse is serialized with mu because WASM linear memory is shared.
 type engine struct {
 	mu      sync.Mutex
 	runtime wazero.Runtime
 	mod     api.Module
-	langPtr uint64 // pointer to TSLanguage in WASM memory
+	langPtr uint64
+	lang    string // language identifier
+	queries langQueries
 }
 
-var (
-	engineOnce sync.Once
-	engineInst *engine
-	engineErr  error
-)
-
-// getEngine returns the singleton engine, initializing it on first call.
-func getEngine() (*engine, error) {
-	engineOnce.Do(func() {
-		engineInst, engineErr = newEngine()
-	})
-	return engineInst, engineErr
+// langQueries holds tree-sitter query patterns for a language.
+type langQueries struct {
+	classes   string
+	functions string
+	calls     string
 }
 
-func newEngine() (*engine, error) {
+// engines holds lazily-initialized per-language engines.
+var engines = struct {
+	mu   sync.Mutex
+	byLang map[string]*engine
+}{byLang: make(map[string]*engine)}
+
+// getEngine returns the engine for a language, initializing it on first call.
+func getEngine(lang string) (*engine, error) {
+	engines.mu.Lock()
+	defer engines.mu.Unlock()
+
+	if e, ok := engines.byLang[lang]; ok {
+		return e, nil
+	}
+
+	e, err := newEngine(lang)
+	if err != nil {
+		return nil, err
+	}
+	engines.byLang[lang] = e
+	return e, nil
+}
+
+func newEngine(lang string) (*engine, error) {
+	wasmBytes, queries, err := langConfig(lang)
+	if err != nil {
+		return nil, err
+	}
+
 	ctx := context.Background()
-
 	r := wazero.NewRuntime(ctx)
 	wasi_snapshot_preview1.MustInstantiate(ctx, r)
 
-	mod, err := r.Instantiate(ctx, cppWasm)
+	mod, err := r.Instantiate(ctx, wasmBytes)
 	if err != nil {
 		r.Close(ctx)
-		return nil, fmt.Errorf("tree-sitter WASM init failed: %w", err)
+		return nil, fmt.Errorf("tree-sitter WASM init (%s): %w", lang, err)
 	}
 
-	// Get C++ language pointer
-	langRes, err := mod.ExportedFunction("get_language_cpp").Call(ctx)
+	// All language WASMs export get_language (or get_language_cpp for cpp)
+	getFn := mod.ExportedFunction("get_language")
+	if getFn == nil {
+		getFn = mod.ExportedFunction("get_language_cpp")
+	}
+	if getFn == nil {
+		r.Close(ctx)
+		return nil, fmt.Errorf("get_language not exported (%s)", lang)
+	}
+
+	langRes, err := getFn.Call(ctx)
 	if err != nil {
 		r.Close(ctx)
-		return nil, fmt.Errorf("get_language_cpp failed: %w", err)
+		return nil, fmt.Errorf("get_language failed (%s): %w", lang, err)
 	}
 
 	return &engine{
 		runtime: r,
 		mod:     mod,
 		langPtr: langRes[0],
+		lang:    lang,
+		queries: queries,
 	}, nil
+}
+
+// langConfig returns WASM bytes and query patterns for a language.
+func langConfig(lang string) ([]byte, langQueries, error) {
+	switch lang {
+	case "cpp":
+		return cppWasm, langQueries{
+			classes:   queryCPPClasses,
+			functions: queryCPPFunctions,
+			calls:     queryCPPCalls,
+		}, nil
+	case "python":
+		return pythonWasm, langQueries{
+			classes:   queryPythonClasses,
+			functions: queryPythonFunctions,
+			calls:     queryPythonCalls,
+		}, nil
+	case "go":
+		return goWasm, langQueries{
+			classes:   queryGoTypes,
+			functions: queryGoFunctions,
+			calls:     queryGoCalls,
+		}, nil
+	case "csharp":
+		return csharpWasm, langQueries{
+			classes:   queryCSharpClasses,
+			functions: queryCSharpFunctions,
+			calls:     queryCSharpCalls,
+		}, nil
+	default:
+		return nil, langQueries{}, fmt.Errorf("unsupported language: %s (available: cpp, python, go, csharp)", lang)
+	}
 }
 
 // Symbol represents an extracted code symbol.
 type Symbol struct {
-	Capture  string // "class", "function", "call", "callee"
-	NodeType string // tree-sitter node type
-	Name     string // symbol name
-	Line     int    // 1-based line number
-	Col      int    // 0-based column
-	Parent   string // parent node type
-	Scope    string // enclosing class/namespace name
+	Capture  string
+	NodeType string
+	Name     string
+	Line     int
+	Col      int
+	Parent   string
+	Scope    string
 }
 
 // ParseResult holds parsed symbols from a source file.
@@ -83,8 +156,10 @@ type ParseResult struct {
 	Calls     []Symbol
 }
 
-// tree-sitter query patterns (from code-graph-rag, MIT license)
-const classQueryCPP = `
+// ---- Tree-sitter query patterns per language ----
+// C++ queries from code-graph-rag (vitali87, MIT license)
+
+const queryCPPClasses = `
 (class_specifier) @class
 (struct_specifier) @class
 (union_specifier) @class
@@ -93,21 +168,65 @@ const classQueryCPP = `
 (template_declaration (struct_specifier)) @class
 `
 
-const functionQueryCPP = `
+const queryCPPFunctions = `
 (function_definition) @function
 (declaration
   declarator: (function_declarator)) @function
 (template_declaration (function_definition)) @function
 `
 
-const callQueryCPP = `
+const queryCPPCalls = `
 (call_expression
   function: (_) @callee) @call
 `
 
-// ParseCPP parses C++ source code and extracts symbols.
-// Serialized with mutex because WASM linear memory is shared across calls.
-func (e *engine) ParseCPP(source string) (*ParseResult, error) {
+const queryPythonClasses = `
+(class_definition) @class
+`
+
+const queryPythonFunctions = `
+(function_definition) @function
+(decorated_definition (function_definition)) @function
+`
+
+const queryPythonCalls = `
+(call
+  function: (_) @callee) @call
+`
+
+const queryGoTypes = `
+(type_declaration (type_spec)) @class
+`
+
+const queryGoFunctions = `
+(function_declaration) @function
+(method_declaration) @function
+`
+
+const queryGoCalls = `
+(call_expression
+  function: (_) @callee) @call
+`
+
+const queryCSharpClasses = `
+(class_declaration) @class
+(struct_declaration) @class
+(interface_declaration) @class
+(enum_declaration) @class
+`
+
+const queryCSharpFunctions = `
+(method_declaration) @function
+(constructor_declaration) @function
+`
+
+const queryCSharpCalls = `
+(invocation_expression
+  function: (_) @callee) @call
+`
+
+// Parse parses source code and extracts symbols using the engine's language.
+func (e *engine) Parse(source string) (*ParseResult, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -119,14 +238,12 @@ func (e *engine) ParseCPP(source string) (*ParseResult, error) {
 	ctx := context.Background()
 	mem := e.mod.Memory()
 
-	// Allocate and write source to WASM memory
 	srcPtr, err := e.allocString(ctx, source)
 	if err != nil {
 		return nil, err
 	}
 	defer e.free(ctx, srcPtr)
 
-	// Create parser
 	parserRes, err := e.mod.ExportedFunction("ts_parser_new").Call(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("ts_parser_new: %w", err)
@@ -134,13 +251,11 @@ func (e *engine) ParseCPP(source string) (*ParseResult, error) {
 	parserPtr := parserRes[0]
 	defer e.mod.ExportedFunction("ts_parser_delete").Call(ctx, parserPtr)
 
-	// Set language
 	setRes, err := e.mod.ExportedFunction("ts_parser_set_language").Call(ctx, parserPtr, e.langPtr)
 	if err != nil || setRes[0] == 0 {
 		return nil, fmt.Errorf("ts_parser_set_language failed")
 	}
 
-	// Parse
 	treeRes, err := e.mod.ExportedFunction("ts_parser_parse_string").Call(ctx, parserPtr, 0, uint64(srcPtr), uint64(len(source)))
 	if err != nil {
 		return nil, fmt.Errorf("ts_parser_parse_string: %w", err)
@@ -151,7 +266,6 @@ func (e *engine) ParseCPP(source string) (*ParseResult, error) {
 	}
 	defer e.mod.ExportedFunction("ts_tree_delete").Call(ctx, treePtr)
 
-	// Get root node (sret: first param is output pointer)
 	nodePtr, err := e.allocBuf(ctx, 32)
 	if err != nil {
 		return nil, err
@@ -159,8 +273,7 @@ func (e *engine) ParseCPP(source string) (*ParseResult, error) {
 	defer e.free(ctx, nodePtr)
 	e.mod.ExportedFunction("ts_tree_root_node").Call(ctx, uint64(nodePtr), treePtr)
 
-	// Output buffer for extract_symbols
-	outBufSize := uint32(131072) // 128KB
+	outBufSize := uint32(131072)
 	outPtr, err := e.allocBuf(ctx, outBufSize)
 	if err != nil {
 		return nil, err
@@ -172,15 +285,16 @@ func (e *engine) ParseCPP(source string) (*ParseResult, error) {
 		return nil, fmt.Errorf("extract_symbols not exported")
 	}
 
-	// Helper to run a query and parse results
 	runQuery := func(query string) ([]Symbol, error) {
+		if query == "" {
+			return nil, nil
+		}
 		qPtr, err := e.allocString(ctx, query)
 		if err != nil {
 			return nil, err
 		}
 		defer e.free(ctx, qPtr)
 
-		// Clear output buffer
 		zeros := make([]byte, outBufSize)
 		mem.Write(outPtr, zeros)
 
@@ -212,17 +326,17 @@ func (e *engine) ParseCPP(source string) (*ParseResult, error) {
 
 	result := &ParseResult{}
 
-	result.Classes, err = runQuery(classQueryCPP)
+	result.Classes, err = runQuery(e.queries.classes)
 	if err != nil {
 		return nil, fmt.Errorf("class query: %w", err)
 	}
 
-	result.Functions, err = runQuery(functionQueryCPP)
+	result.Functions, err = runQuery(e.queries.functions)
 	if err != nil {
 		return nil, fmt.Errorf("function query: %w", err)
 	}
 
-	result.Calls, err = runQuery(callQueryCPP)
+	result.Calls, err = runQuery(e.queries.calls)
 	if err != nil {
 		return nil, fmt.Errorf("call query: %w", err)
 	}
@@ -230,8 +344,6 @@ func (e *engine) ParseCPP(source string) (*ParseResult, error) {
 	return result, nil
 }
 
-// parseSymbolOutput parses the pipe-delimited output from extract_symbols.
-// Format: capture|node_type|name|line|col|parent_type|scope
 func parseSymbolOutput(output string) []Symbol {
 	lines := strings.Split(strings.TrimSpace(output), "\n")
 	var symbols []Symbol
@@ -259,7 +371,6 @@ func parseSymbolOutput(output string) []Symbol {
 	return symbols
 }
 
-// allocString writes a null-terminated string to WASM memory.
 func (e *engine) allocString(ctx context.Context, s string) (uint32, error) {
 	b := []byte(s)
 	res, err := e.mod.ExportedFunction("alloc_string").Call(ctx, uint64(len(b)+1))
@@ -275,7 +386,6 @@ func (e *engine) allocString(ctx context.Context, s string) (uint32, error) {
 	return ptr, nil
 }
 
-// allocBuf allocates zeroed memory in WASM.
 func (e *engine) allocBuf(ctx context.Context, size uint32) (uint32, error) {
 	res, err := e.mod.ExportedFunction("alloc_buf").Call(ctx, uint64(size))
 	if err != nil {
@@ -288,7 +398,6 @@ func (e *engine) allocBuf(ctx context.Context, size uint32) (uint32, error) {
 	return ptr, nil
 }
 
-// free releases WASM memory.
 func (e *engine) free(ctx context.Context, ptr uint32) {
 	e.mod.ExportedFunction("ts_free").Call(ctx, uint64(ptr))
 }

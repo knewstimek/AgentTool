@@ -28,11 +28,6 @@ func opIndex(input CodeGraphInput) (string, error) {
 		return "", fmt.Errorf("path must be a directory")
 	}
 
-	eng, err := getEngine()
-	if err != nil {
-		return "", fmt.Errorf("engine init: %w", err)
-	}
-
 	db, err := openDB(root)
 	if err != nil {
 		return "", fmt.Errorf("db: %w", err)
@@ -71,7 +66,7 @@ func opIndex(input CodeGraphInput) (string, error) {
 		}
 
 		lang := detectLanguage(path, input.Language)
-		if lang == "" || lang != "cpp" { // only cpp for now
+		if lang == "" {
 			return nil
 		}
 
@@ -88,7 +83,13 @@ func opIndex(input CodeGraphInput) (string, error) {
 			return nil
 		}
 
-		result, err := eng.ParseCPP(string(data))
+		eng, err := getEngine(lang)
+		if err != nil {
+			errors++
+			return nil
+		}
+
+		result, err := eng.Parse(string(data))
 		if err != nil {
 			errors++
 			return nil
@@ -276,10 +277,6 @@ func opSymbols(input CodeGraphInput) (string, error) {
 	if lang == "" {
 		return "", fmt.Errorf("unsupported file type: %s", filepath.Ext(path))
 	}
-	if lang != "cpp" {
-		return "", fmt.Errorf("language %q not yet supported (only cpp)", lang)
-	}
-
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", fmt.Errorf("cannot read file: %w", err)
@@ -288,12 +285,12 @@ func opSymbols(input CodeGraphInput) (string, error) {
 		return "", fmt.Errorf("file too large (%d bytes, max 10MB)", len(data))
 	}
 
-	eng, err := getEngine()
+	eng, err := getEngine(lang)
 	if err != nil {
 		return "", fmt.Errorf("engine init: %w", err)
 	}
 
-	result, err := eng.ParseCPP(string(data))
+	result, err := eng.Parse(string(data))
 	if err != nil {
 		return "", fmt.Errorf("parse failed: %w", err)
 	}
