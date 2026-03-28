@@ -450,6 +450,8 @@ func detectLanguage(path, hint string) string {
 		return "rust"
 	case ".java":
 		return "java"
+	case ".jsx":
+		return "javascript"
 	}
 	return ""
 }

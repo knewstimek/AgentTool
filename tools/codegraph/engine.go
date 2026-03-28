@@ -24,6 +24,12 @@ var goWasm []byte
 //go:embed wasm/tree-sitter-c_sharp.wasm
 var csharpWasm []byte
 
+//go:embed wasm/tree-sitter-rust.wasm
+var rustWasm []byte
+
+//go:embed wasm/tree-sitter-java.wasm
+var javaWasm []byte
+
 // engine holds a wazero runtime and tree-sitter WASM module for one language.
 // Parse is serialized with mu because WASM linear memory is shared.
 type engine struct {
@@ -133,8 +139,20 @@ func langConfig(lang string) ([]byte, langQueries, error) {
 			functions: queryCSharpFunctions,
 			calls:     queryCSharpCalls,
 		}, nil
+	case "rust":
+		return rustWasm, langQueries{
+			classes:   queryRustTypes,
+			functions: queryRustFunctions,
+			calls:     queryRustCalls,
+		}, nil
+	case "java":
+		return javaWasm, langQueries{
+			classes:   queryJavaClasses,
+			functions: queryJavaFunctions,
+			calls:     queryJavaCalls,
+		}, nil
 	default:
-		return nil, langQueries{}, fmt.Errorf("unsupported language: %s (available: cpp, python, go, csharp)", lang)
+		return nil, langQueries{}, fmt.Errorf("unsupported language: %s (available: cpp, python, go, csharp, rust, java)", lang)
 	}
 }
 
@@ -180,6 +198,7 @@ const queryCPPCalls = `
   function: (_) @callee) @call
 `
 
+// Python query patterns
 const queryPythonClasses = `
 (class_definition) @class
 `
@@ -194,6 +213,7 @@ const queryPythonCalls = `
   function: (_) @callee) @call
 `
 
+// Go query patterns
 const queryGoTypes = `
 (type_declaration (type_spec)) @class
 `
@@ -208,6 +228,7 @@ const queryGoCalls = `
   function: (_) @callee) @call
 `
 
+// C# query patterns
 const queryCSharpClasses = `
 (class_declaration) @class
 (struct_declaration) @class
@@ -223,6 +244,48 @@ const queryCSharpFunctions = `
 const queryCSharpCalls = `
 (invocation_expression
   function: (_) @callee) @call
+`
+
+// Rust query patterns (from code-graph-rag, MIT license)
+const queryRustTypes = `
+(struct_item) @class
+(enum_item) @class
+(union_item) @class
+(trait_item) @class
+(type_item) @class
+(impl_item) @class
+`
+
+const queryRustFunctions = `
+(function_item) @function
+(function_signature_item) @function
+`
+
+const queryRustCalls = `
+(call_expression
+  function: (_) @callee) @call
+(macro_invocation
+  macro: (identifier) @callee) @call
+`
+
+// Java query patterns (from code-graph-rag, MIT license)
+const queryJavaClasses = `
+(class_declaration) @class
+(interface_declaration) @class
+(enum_declaration) @class
+(record_declaration) @class
+`
+
+const queryJavaFunctions = `
+(method_declaration) @function
+(constructor_declaration) @function
+`
+
+const queryJavaCalls = `
+(method_invocation
+  name: (identifier) @callee) @call
+(object_creation_expression
+  type: (type_identifier) @callee) @call
 `
 
 // Parse parses source code and extracts symbols using the engine's language.
