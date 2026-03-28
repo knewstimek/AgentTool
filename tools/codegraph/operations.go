@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"agent-tool/common"
@@ -42,14 +44,21 @@ func opIndex(input CodeGraphInput) (string, error) {
 	}
 	defer db.Close()
 
-	var indexed, skipped, errors int
+	var indexed, skipped int
+	var indexedAtomic, skippedAtomic, errorsAtomic int64
 	t0 := time.Now()
 
-	err = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+	// Phase 1: collect files to index
+	type fileEntry struct {
+		path string
+		lang string
+	}
+	var files []fileEntry
+
+	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			return nil // skip inaccessible
+			return nil
 		}
-		// Symlink check
 		if !common.GetAllowSymlinks() {
 			if lfi, lerr := os.Lstat(path); lerr == nil && lfi.Mode()&os.ModeSymlink != 0 {
 				if info.IsDir() {
@@ -58,10 +67,8 @@ func opIndex(input CodeGraphInput) (string, error) {
 				return nil
 			}
 		}
-
 		if info.IsDir() {
 			base := filepath.Base(path)
-			// Skip common non-source directories
 			if base == ".git" || base == "node_modules" || base == "__pycache__" ||
 				base == ".vs" || base == ".vscode" || base == "build" || base == "bin" ||
 				base == "obj" || base == "Debug" || base == "Release" || base == "x64" {
@@ -70,50 +77,89 @@ func opIndex(input CodeGraphInput) (string, error) {
 			return nil
 		}
 		if info.Size() > 10*1024*1024 {
-			return nil // skip files > 10MB
+			return nil
 		}
-
 		lang := detectLanguage(path, input.Language)
 		if lang == "" {
 			return nil
 		}
-
-		// Check if file changed
 		changed, _ := isFileChanged(db, path)
 		if !changed {
-			skipped++
+			atomic.AddInt64(&skippedAtomic, 1)
 			return nil
 		}
-
-		data, err := os.ReadFile(path)
-		if err != nil {
-			errors++
-			return nil
-		}
-
-		eng, err := getEngine(lang)
-		if err != nil {
-			errors++
-			return nil
-		}
-
-		result, err := eng.Parse(string(data))
-		if err != nil {
-			errors++
-			return nil
-		}
-
-		if err := storeParseResult(db, path, lang, result); err != nil {
-			errors++
-			return nil
-		}
-
-		indexed++
+		files = append(files, fileEntry{path, lang})
 		return nil
 	})
-	if err != nil {
-		return "", err
+
+	// Phase 2: parallel parse + sequential DB store
+	type parseJob struct {
+		path   string
+		lang   string
+		result *ParseResult
 	}
+
+	resultsCh := make(chan parseJob, 64)
+	var wg sync.WaitGroup
+
+	// Worker goroutines for parsing
+	numWorkers := poolSize
+	if len(files) < numWorkers {
+		numWorkers = len(files)
+	}
+	if numWorkers < 1 {
+		numWorkers = 1
+	}
+	fileCh := make(chan fileEntry, len(files))
+	for _, f := range files {
+		fileCh <- f
+	}
+	close(fileCh)
+
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for f := range fileCh {
+				data, err := os.ReadFile(f.path)
+				if err != nil {
+					atomic.AddInt64(&errorsAtomic, 1)
+					continue
+				}
+				eng, err := getEngine(f.lang)
+				if err != nil {
+					atomic.AddInt64(&errorsAtomic, 1)
+					continue
+				}
+				result, err := eng.Parse(string(data))
+				putEngine(eng)
+				if err != nil {
+					atomic.AddInt64(&errorsAtomic, 1)
+					continue
+				}
+				resultsCh <- parseJob{f.path, f.lang, result}
+			}
+		}()
+	}
+
+	// Close results channel when all workers done
+	go func() {
+		wg.Wait()
+		close(resultsCh)
+	}()
+
+	// Sequential DB store (SQLite is not concurrent-write safe)
+	for job := range resultsCh {
+		if err := storeParseResult(db, job.path, job.lang, job.result); err != nil {
+			atomic.AddInt64(&errorsAtomic, 1)
+			continue
+		}
+		atomic.AddInt64(&indexedAtomic, 1)
+	}
+
+	indexed = int(indexedAtomic)
+	skipped = int(skippedAtomic)
+	errors := int(errorsAtomic)
 
 	elapsed := time.Since(t0)
 	return fmt.Sprintf("Index complete: %d files indexed, %d unchanged (skipped), %d errors\nTime: %s\nDB: %s",
@@ -182,14 +228,15 @@ func opCallers(input CodeGraphInput) (string, error) {
 	}
 	defer db.Close()
 
-	escaped := escapeLike(input.Name)
+	// Exact match only for callers - LIKE '%name%' causes false positives
+	// (e.g. "SetDead" matching "WIN_ResetDeadKeys")
 	rows, err := db.Query(`
 		SELECT c.callee_name, f.path, c.caller_line, c.scope
 		FROM calls c JOIN files f ON c.caller_file_id = f.id
-		WHERE c.callee_name = ? OR c.callee_name LIKE ? ESCAPE '\'
+		WHERE c.callee_name = ?
 		ORDER BY f.path, c.caller_line
 		LIMIT 100
-	`, input.Name, "%"+escaped+"%")
+	`, input.Name)
 	if err != nil {
 		return "", err
 	}
@@ -310,6 +357,7 @@ func opSymbols(input CodeGraphInput) (string, error) {
 	}
 
 	result, err := eng.Parse(string(data))
+	putEngine(eng)
 	if err != nil {
 		return "", fmt.Errorf("parse failed: %w", err)
 	}

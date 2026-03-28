@@ -33,12 +33,14 @@ var javaWasm []byte
 // engine holds a wazero runtime and tree-sitter WASM module for one language.
 // Parse is serialized with mu because WASM linear memory is shared.
 type engine struct {
-	mu      sync.Mutex
-	runtime wazero.Runtime
-	mod     api.Module
-	langPtr uint64
-	lang    string // language identifier
-	queries langQueries
+	runtime   wazero.Runtime
+	mod       api.Module
+	langPtr   uint64
+	lang      string // language identifier
+	queries   langQueries
+	parserPtr uint64 // cached parser (reused across Parse calls)
+	outBufPtr uint32 // cached output buffer
+	outBufSz  uint32
 }
 
 // langQueries holds tree-sitter query patterns for a language.
@@ -49,27 +51,57 @@ type langQueries struct {
 	imports   string
 }
 
-// engines holds lazily-initialized per-language engines.
-var engines = struct {
-	mu   sync.Mutex
-	byLang map[string]*engine
-}{byLang: make(map[string]*engine)}
+// poolSize is the number of parallel engines per language.
+// Each engine is ~7MB (WASM module), so 4 engines = ~28MB per language.
+const poolSize = 4
 
-// getEngine returns the engine for a language, initializing it on first call.
+// enginePool holds a pool of engines for one language.
+type enginePool struct {
+	ch chan *engine
+}
+
+var pools = struct {
+	mu     sync.Mutex
+	byLang map[string]*enginePool
+}{byLang: make(map[string]*enginePool)}
+
+// getEngine borrows an engine from the pool. Caller must call putEngine when done.
 func getEngine(lang string) (*engine, error) {
-	engines.mu.Lock()
-	defer engines.mu.Unlock()
+	pools.mu.Lock()
+	pool, ok := pools.byLang[lang]
+	if !ok {
+		pool = &enginePool{ch: make(chan *engine, poolSize)}
+		pools.byLang[lang] = pool
+	}
+	pools.mu.Unlock()
 
-	if e, ok := engines.byLang[lang]; ok {
+	// Try to get an existing engine from pool (non-blocking)
+	select {
+	case e := <-pool.ch:
 		return e, nil
+	default:
 	}
 
-	e, err := newEngine(lang)
-	if err != nil {
-		return nil, err
+	// Pool empty, create a new one (up to poolSize will be created over time)
+	return newEngine(lang)
+}
+
+// putEngine returns an engine to the pool for reuse.
+func putEngine(e *engine) {
+	pools.mu.Lock()
+	pool, ok := pools.byLang[e.lang]
+	pools.mu.Unlock()
+	if !ok {
+		return
 	}
-	engines.byLang[lang] = e
-	return e, nil
+
+	// Return to pool if not full, otherwise discard
+	select {
+	case pool.ch <- e:
+	default:
+		// Pool full, close this engine
+		e.runtime.Close(context.Background())
+	}
 }
 
 func newEngine(lang string) (*engine, error) {
@@ -104,13 +136,38 @@ func newEngine(lang string) (*engine, error) {
 		return nil, fmt.Errorf("get_language failed (%s): %w", lang, err)
 	}
 
-	return &engine{
+	e := &engine{
 		runtime: r,
 		mod:     mod,
 		langPtr: langRes[0],
 		lang:    lang,
 		queries: queries,
-	}, nil
+	}
+
+	// Pre-allocate parser and output buffer for reuse
+	ctx2 := context.Background()
+	parserRes, err := mod.ExportedFunction("ts_parser_new").Call(ctx2)
+	if err != nil {
+		r.Close(ctx)
+		return nil, fmt.Errorf("ts_parser_new failed (%s): %w", lang, err)
+	}
+	e.parserPtr = parserRes[0]
+
+	setRes, err := mod.ExportedFunction("ts_parser_set_language").Call(ctx2, e.parserPtr, e.langPtr)
+	if err != nil || setRes[0] == 0 {
+		r.Close(ctx)
+		return nil, fmt.Errorf("ts_parser_set_language failed (%s)", lang)
+	}
+
+	e.outBufSz = 131072 // 128KB
+	outPtr, err := e.allocBuf(ctx2, e.outBufSz)
+	if err != nil {
+		r.Close(ctx)
+		return nil, fmt.Errorf("alloc output buffer failed (%s): %w", lang, err)
+	}
+	e.outBufPtr = outPtr
+
+	return e, nil
 }
 
 // langConfig returns WASM bytes and query patterns for a language.
@@ -336,10 +393,9 @@ const queryJavaCalls = `
 `
 
 // Parse parses source code and extracts symbols using the engine's language.
+// Parse parses source code. Caller must ensure exclusive access
+// (engine pool guarantees this - each engine is used by one goroutine at a time).
 func (e *engine) Parse(source string) (*ParseResult, error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
 	const maxSourceSize = 10 * 1024 * 1024
 	if len(source) > maxSourceSize {
 		return nil, fmt.Errorf("source too large (%d bytes, max %d)", len(source), maxSourceSize)
@@ -354,19 +410,8 @@ func (e *engine) Parse(source string) (*ParseResult, error) {
 	}
 	defer e.free(ctx, srcPtr)
 
-	parserRes, err := e.mod.ExportedFunction("ts_parser_new").Call(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("ts_parser_new: %w", err)
-	}
-	parserPtr := parserRes[0]
-	defer e.mod.ExportedFunction("ts_parser_delete").Call(ctx, parserPtr)
-
-	setRes, err := e.mod.ExportedFunction("ts_parser_set_language").Call(ctx, parserPtr, e.langPtr)
-	if err != nil || setRes[0] == 0 {
-		return nil, fmt.Errorf("ts_parser_set_language failed")
-	}
-
-	treeRes, err := e.mod.ExportedFunction("ts_parser_parse_string").Call(ctx, parserPtr, 0, uint64(srcPtr), uint64(len(source)))
+	// Reuse cached parser (already has language set)
+	treeRes, err := e.mod.ExportedFunction("ts_parser_parse_string").Call(ctx, e.parserPtr, 0, uint64(srcPtr), uint64(len(source)))
 	if err != nil {
 		return nil, fmt.Errorf("ts_parser_parse_string: %w", err)
 	}
@@ -383,12 +428,9 @@ func (e *engine) Parse(source string) (*ParseResult, error) {
 	defer e.free(ctx, nodePtr)
 	e.mod.ExportedFunction("ts_tree_root_node").Call(ctx, uint64(nodePtr), treePtr)
 
-	outBufSize := uint32(131072)
-	outPtr, err := e.allocBuf(ctx, outBufSize)
-	if err != nil {
-		return nil, err
-	}
-	defer e.free(ctx, outPtr)
+	// Reuse cached output buffer
+	outBufSize := e.outBufSz
+	outPtr := e.outBufPtr
 
 	extractFn := e.mod.ExportedFunction("extract_symbols")
 	if extractFn == nil {
