@@ -326,6 +326,14 @@ func opSymbols(input CodeGraphInput) (string, error) {
 		sb.WriteString("\n")
 	}
 
+	if len(result.Inheritance) > 0 {
+		sb.WriteString("Inheritance:\n")
+		for _, inh := range result.Inheritance {
+			sb.WriteString(fmt.Sprintf("  %s -> %s  line:%d\n", inh.ClassName, inh.ParentName, inh.Line))
+		}
+		sb.WriteString("\n")
+	}
+
 	if len(result.Calls) > 0 {
 		callCount := 0
 		for _, s := range result.Calls {
@@ -396,7 +404,75 @@ func opInherits(input CodeGraphInput) (string, error) {
 	if input.Name == "" {
 		return "", fmt.Errorf("name is required for inherits operation")
 	}
-	return "", fmt.Errorf("codegraph inherits: not yet implemented (requires base class extraction from AST)")
+
+	db, err := validateAndOpenDB(input.Path)
+	if err != nil {
+		return "", err
+	}
+	defer db.Close()
+
+	var sb strings.Builder
+
+	// Parents (what does this class extend/implement?)
+	rows, err := db.Query(`
+		SELECT i.parent_name, f.path, i.line
+		FROM inheritance i JOIN files f ON i.file_id = f.id
+		WHERE i.class_name = ?
+		ORDER BY f.path, i.line
+	`, input.Name)
+	if err != nil {
+		return "", err
+	}
+
+	sb.WriteString(fmt.Sprintf("Inheritance of %q:\n\n", input.Name))
+	sb.WriteString("Parents (extends/implements):\n")
+	parentCount := 0
+	for rows.Next() {
+		var parent, path string
+		var line int
+		if err := rows.Scan(&parent, &path, &line); err != nil {
+			continue
+		}
+		sb.WriteString(fmt.Sprintf("  %s  (%s:%d)\n", parent, path, line))
+		parentCount++
+	}
+	rows.Close()
+	if parentCount == 0 {
+		sb.WriteString("  (none)\n")
+	}
+
+	// Children (what classes extend this one?)
+	rows2, err := db.Query(`
+		SELECT i.class_name, f.path, i.line
+		FROM inheritance i JOIN files f ON i.file_id = f.id
+		WHERE i.parent_name = ?
+		ORDER BY f.path, i.line
+	`, input.Name)
+	if err != nil {
+		return "", err
+	}
+
+	sb.WriteString("\nChildren (extended by):\n")
+	childCount := 0
+	for rows2.Next() {
+		var child, path string
+		var line int
+		if err := rows2.Scan(&child, &path, &line); err != nil {
+			continue
+		}
+		sb.WriteString(fmt.Sprintf("  %s  (%s:%d)\n", child, path, line))
+		childCount++
+	}
+	rows2.Close()
+	if childCount == 0 {
+		sb.WriteString("  (none)\n")
+	}
+
+	if parentCount == 0 && childCount == 0 {
+		return fmt.Sprintf("No inheritance info for %q. Run codegraph(op=\"index\") first.", input.Name), nil
+	}
+
+	return sb.String(), nil
 }
 
 // escapeLike escapes LIKE wildcard characters to prevent unintended pattern matching.

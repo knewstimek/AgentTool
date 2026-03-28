@@ -167,11 +167,19 @@ type Symbol struct {
 	Scope    string
 }
 
+// Inheritance represents a class -> parent relationship.
+type Inheritance struct {
+	ClassName  string
+	ParentName string
+	Line       int
+}
+
 // ParseResult holds parsed symbols from a source file.
 type ParseResult struct {
-	Classes   []Symbol
-	Functions []Symbol
-	Calls     []Symbol
+	Classes      []Symbol
+	Functions    []Symbol
+	Calls        []Symbol
+	Inheritance  []Inheritance
 }
 
 // ---- Tree-sitter query patterns per language ----
@@ -404,7 +412,61 @@ func (e *engine) Parse(source string) (*ParseResult, error) {
 		return nil, fmt.Errorf("call query: %w", err)
 	}
 
+	// Extract inheritance relationships
+	inheritFn := e.mod.ExportedFunction("extract_inheritance")
+	if inheritFn != nil {
+		inhBufSize := uint32(32768)
+		inhPtr, ierr := e.allocBuf(ctx, inhBufSize)
+		if ierr == nil {
+			defer e.free(ctx, inhPtr)
+			zeros := make([]byte, inhBufSize)
+			mem.Write(inhPtr, zeros)
+
+			inhRes, ierr := inheritFn.Call(ctx,
+				uint64(nodePtr),
+				uint64(srcPtr),
+				uint64(inhPtr), uint64(inhBufSize),
+			)
+			if ierr == nil {
+				inhLen := uint32(inhRes[0])
+				if inhLen > inhBufSize {
+					inhLen = inhBufSize
+				}
+				if inhLen > 0 {
+					inhBytes, ok := mem.Read(inhPtr, inhLen)
+					if ok {
+						result.Inheritance = parseInheritanceOutput(string(inhBytes))
+					}
+				}
+			}
+		}
+	}
+
 	return result, nil
+}
+
+// parseInheritanceOutput parses pipe-delimited output: class|parent|line
+func parseInheritanceOutput(output string) []Inheritance {
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	var result []Inheritance
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "|", 3)
+		if len(parts) < 2 {
+			continue
+		}
+		inh := Inheritance{
+			ClassName:  parts[0],
+			ParentName: parts[1],
+		}
+		if len(parts) >= 3 {
+			fmt.Sscanf(parts[2], "%d", &inh.Line)
+		}
+		result = append(result, inh)
+	}
+	return result
 }
 
 func parseSymbolOutput(output string) []Symbol {

@@ -47,6 +47,17 @@ CREATE INDEX IF NOT EXISTS idx_symbols_kind ON symbols(kind);
 CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(file_id);
 CREATE INDEX IF NOT EXISTS idx_calls_callee ON calls(callee_name);
 CREATE INDEX IF NOT EXISTS idx_calls_file ON calls(caller_file_id);
+
+CREATE TABLE IF NOT EXISTS inheritance (
+	id INTEGER PRIMARY KEY,
+	class_name TEXT NOT NULL,
+	parent_name TEXT NOT NULL,
+	file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+	line INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_inh_class ON inheritance(class_name);
+CREATE INDEX IF NOT EXISTS idx_inh_parent ON inheritance(parent_name);
 `
 
 // openDB opens or creates the codegraph database at the project root.
@@ -110,6 +121,9 @@ func storeParseResult(db *sql.DB, filePath, lang string, result *ParseResult) er
 		if _, err := tx.Exec("DELETE FROM calls WHERE file_id = ?", fileID); err != nil {
 			return fmt.Errorf("delete old calls: %w", err)
 		}
+		if _, err := tx.Exec("DELETE FROM inheritance WHERE file_id = ?", fileID); err != nil {
+			return fmt.Errorf("delete old inheritance: %w", err)
+		}
 		if _, err := tx.Exec("UPDATE files SET hash = ?, language = ? WHERE id = ?", hash, lang, fileID); err != nil {
 			return fmt.Errorf("update file hash: %w", err)
 		}
@@ -166,6 +180,18 @@ func storeParseResult(db *sql.DB, filePath, lang string, result *ParseResult) er
 	for _, s := range result.Calls {
 		if s.Capture == "callee" && s.Name != "" {
 			stmtCall.Exec(fileID, s.Line, s.Name, s.Scope)
+		}
+	}
+
+	// Insert inheritance
+	if len(result.Inheritance) > 0 {
+		stmtInh, err := tx.Prepare("INSERT INTO inheritance (class_name, parent_name, file_id, line) VALUES (?, ?, ?, ?)")
+		if err != nil {
+			return err
+		}
+		defer stmtInh.Close()
+		for _, inh := range result.Inheritance {
+			stmtInh.Exec(inh.ClassName, inh.ParentName, fileID, inh.Line)
 		}
 	}
 
