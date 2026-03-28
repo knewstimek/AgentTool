@@ -101,13 +101,21 @@ func fileHash(path string) (string, error) {
 	return fmt.Sprintf("%d_%d", fi.Size(), fi.ModTime().UnixNano()), nil
 }
 
-// storeParseResult saves parsed symbols and calls to the database.
+// storeParseResult saves parsed symbols and calls in its own transaction.
 func storeParseResult(db *sql.DB, filePath, lang string, result *ParseResult) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	if err := storeParseResultTx(tx, filePath, lang, result); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// storeParseResultTx saves parsed symbols using an existing transaction.
+func storeParseResultTx(tx *sql.Tx, filePath, lang string, result *ParseResult) error {
 
 	hash, err := fileHash(filePath)
 	if err != nil {
@@ -234,7 +242,7 @@ func storeParseResult(db *sql.DB, filePath, lang string, result *ParseResult) er
 		}
 	}
 
-	return tx.Commit()
+	return nil
 }
 
 // findLastScopeOp finds the last "::" in a name (for qualified names).

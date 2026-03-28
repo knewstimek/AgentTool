@@ -148,14 +148,42 @@ func opIndex(input CodeGraphInput) (string, error) {
 		close(resultsCh)
 	}()
 
-	// Sequential DB store (SQLite is not concurrent-write safe)
-	for job := range resultsCh {
-		if err := storeParseResult(db, job.path, job.lang, job.result); err != nil {
-			atomic.AddInt64(&errorsAtomic, 1)
-			continue
+	// Sequential DB store with batch transactions
+	// SQLite is much faster when multiple inserts are in one transaction
+	batchSize := 100
+	batch := make([]parseJob, 0, batchSize)
+
+	flushBatch := func() {
+		if len(batch) == 0 {
+			return
 		}
-		atomic.AddInt64(&indexedAtomic, 1)
+		tx, err := db.Begin()
+		if err != nil {
+			atomic.AddInt64(&errorsAtomic, int64(len(batch)))
+			batch = batch[:0]
+			return
+		}
+		for _, job := range batch {
+			if err := storeParseResultTx(tx, job.path, job.lang, job.result); err != nil {
+				atomic.AddInt64(&errorsAtomic, 1)
+				continue
+			}
+			atomic.AddInt64(&indexedAtomic, 1)
+		}
+		if err := tx.Commit(); err != nil {
+			// Commit failed, count remaining as errors
+			atomic.AddInt64(&errorsAtomic, 1)
+		}
+		batch = batch[:0]
 	}
+
+	for job := range resultsCh {
+		batch = append(batch, job)
+		if len(batch) >= batchSize {
+			flushBatch()
+		}
+	}
+	flushBatch() // flush remaining
 
 	indexed = int(indexedAtomic)
 	skipped = int(skippedAtomic)

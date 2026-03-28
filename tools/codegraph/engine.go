@@ -392,9 +392,8 @@ const queryJavaCalls = `
   type: (type_identifier) @callee) @call
 `
 
-// Parse parses source code and extracts symbols using the engine's language.
-// Parse parses source code. Caller must ensure exclusive access
-// (engine pool guarantees this - each engine is used by one goroutine at a time).
+// Parse parses source code and extracts all symbols in a single WASM call.
+// Caller must ensure exclusive access (engine pool guarantees this).
 func (e *engine) Parse(source string) (*ParseResult, error) {
 	const maxSourceSize = 10 * 1024 * 1024
 	if len(source) > maxSourceSize {
@@ -404,13 +403,120 @@ func (e *engine) Parse(source string) (*ParseResult, error) {
 	ctx := context.Background()
 	mem := e.mod.Memory()
 
+	// Try fast path: parse_and_extract_all (single WASM call)
+	fastFn := e.mod.ExportedFunction("parse_and_extract_all")
+	if fastFn != nil {
+		return e.parseFast(ctx, mem, fastFn, source)
+	}
+
+	// Fallback: individual calls (should not happen with current WASM builds)
+	return e.parseSlow(ctx, mem, source)
+}
+
+// parseFast uses parse_and_extract_all for minimal WASM boundary crossings.
+func (e *engine) parseFast(ctx context.Context, mem api.Memory, fastFn api.Function, source string) (*ParseResult, error) {
 	srcPtr, err := e.allocString(ctx, source)
 	if err != nil {
 		return nil, err
 	}
 	defer e.free(ctx, srcPtr)
 
-	// Reuse cached parser (already has language set)
+	// Allocate query strings
+	cqPtr, err := e.allocString(ctx, e.queries.classes)
+	if err != nil {
+		return nil, err
+	}
+	defer e.free(ctx, cqPtr)
+
+	fqPtr, err := e.allocString(ctx, e.queries.functions)
+	if err != nil {
+		return nil, err
+	}
+	defer e.free(ctx, fqPtr)
+
+	callqPtr, err := e.allocString(ctx, e.queries.calls)
+	if err != nil {
+		return nil, err
+	}
+	defer e.free(ctx, callqPtr)
+
+	impq := e.queries.imports
+	if impq == "" {
+		impq = " " // empty query placeholder
+	}
+	iqPtr, err := e.allocString(ctx, impq)
+	if err != nil {
+		return nil, err
+	}
+	defer e.free(ctx, iqPtr)
+
+	// Clear output buffer
+	outBufSize := e.outBufSz
+	outPtr := e.outBufPtr
+	zeros := make([]byte, outBufSize)
+	mem.Write(outPtr, zeros)
+
+	// Single WASM call: parse + 4 queries + inheritance
+	res, err := fastFn.Call(ctx,
+		e.langPtr,
+		e.parserPtr,
+		uint64(srcPtr), uint64(len(source)),
+		uint64(cqPtr), uint64(len(e.queries.classes)),
+		uint64(fqPtr), uint64(len(e.queries.functions)),
+		uint64(callqPtr), uint64(len(e.queries.calls)),
+		uint64(iqPtr), uint64(len(impq)),
+		uint64(outPtr), uint64(outBufSize),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("parse_and_extract_all: %w", err)
+	}
+
+	resultLen := uint32(res[0])
+	if resultLen == 0 {
+		return &ParseResult{}, nil
+	}
+	if resultLen > outBufSize {
+		resultLen = outBufSize
+	}
+
+	outBytes, ok := mem.Read(outPtr, resultLen)
+	if !ok {
+		return nil, fmt.Errorf("failed to read WASM output buffer")
+	}
+
+	output := string(outBytes)
+
+	// Split by "---\n" separators: classes | functions | calls | imports | inheritance
+	sections := strings.SplitN(output, "---\n", 5)
+
+	result := &ParseResult{}
+	if len(sections) > 0 {
+		result.Classes = parseSymbolOutput(sections[0])
+	}
+	if len(sections) > 1 {
+		result.Functions = parseSymbolOutput(sections[1])
+	}
+	if len(sections) > 2 {
+		result.Calls = parseSymbolOutput(sections[2])
+	}
+	if len(sections) > 3 {
+		result.Imports = parseSymbolOutput(sections[3])
+	}
+	if len(sections) > 4 {
+		result.Inheritance = parseInheritanceOutput(sections[4])
+	}
+
+	return result, nil
+}
+
+// parseSlow is the fallback path using individual WASM calls.
+func (e *engine) parseSlow(ctx context.Context, mem api.Memory, source string) (*ParseResult, error) {
+	srcPtr, err := e.allocString(ctx, source)
+	if err != nil {
+		return nil, err
+	}
+	defer e.free(ctx, srcPtr)
+
 	treeRes, err := e.mod.ExportedFunction("ts_parser_parse_string").Call(ctx, e.parserPtr, 0, uint64(srcPtr), uint64(len(source)))
 	if err != nil {
 		return nil, fmt.Errorf("ts_parser_parse_string: %w", err)
@@ -428,7 +534,6 @@ func (e *engine) Parse(source string) (*ParseResult, error) {
 	defer e.free(ctx, nodePtr)
 	e.mod.ExportedFunction("ts_tree_root_node").Call(ctx, uint64(nodePtr), treePtr)
 
-	// Reuse cached output buffer
 	outBufSize := e.outBufSz
 	outPtr := e.outBufPtr
 
@@ -451,11 +556,9 @@ func (e *engine) Parse(source string) (*ParseResult, error) {
 		mem.Write(outPtr, zeros)
 
 		result, err := extractFn.Call(ctx,
-			e.langPtr,
-			uint64(nodePtr),
+			e.langPtr, uint64(nodePtr),
 			uint64(qPtr), uint64(len(query)),
-			uint64(srcPtr),
-			uint64(outPtr), uint64(outBufSize),
+			uint64(srcPtr), uint64(outPtr), uint64(outBufSize),
 		)
 		if err != nil {
 			return nil, err
@@ -468,7 +571,6 @@ func (e *engine) Parse(source string) (*ParseResult, error) {
 		if resultLen > outBufSize {
 			resultLen = outBufSize
 		}
-
 		outBytes, ok := mem.Read(outPtr, resultLen)
 		if !ok {
 			return nil, fmt.Errorf("failed to read WASM output buffer")
@@ -477,57 +579,14 @@ func (e *engine) Parse(source string) (*ParseResult, error) {
 	}
 
 	result := &ParseResult{}
-
 	result.Classes, err = runQuery(e.queries.classes)
-	if err != nil {
-		return nil, fmt.Errorf("class query: %w", err)
-	}
-
+	if err != nil { return nil, err }
 	result.Functions, err = runQuery(e.queries.functions)
-	if err != nil {
-		return nil, fmt.Errorf("function query: %w", err)
-	}
-
+	if err != nil { return nil, err }
 	result.Calls, err = runQuery(e.queries.calls)
-	if err != nil {
-		return nil, fmt.Errorf("call query: %w", err)
-	}
-
+	if err != nil { return nil, err }
 	result.Imports, err = runQuery(e.queries.imports)
-	if err != nil {
-		return nil, fmt.Errorf("import query: %w", err)
-	}
-
-	// Extract inheritance relationships
-	inheritFn := e.mod.ExportedFunction("extract_inheritance")
-	if inheritFn != nil {
-		inhBufSize := uint32(32768)
-		inhPtr, ierr := e.allocBuf(ctx, inhBufSize)
-		if ierr == nil {
-			defer e.free(ctx, inhPtr)
-			zeros := make([]byte, inhBufSize)
-			mem.Write(inhPtr, zeros)
-
-			inhRes, ierr := inheritFn.Call(ctx,
-				uint64(nodePtr),
-				uint64(srcPtr),
-				uint64(inhPtr), uint64(inhBufSize),
-			)
-			if ierr == nil {
-				inhLen := uint32(inhRes[0])
-				if inhLen > inhBufSize {
-					inhLen = inhBufSize
-				}
-				if inhLen > 0 {
-					inhBytes, ok := mem.Read(inhPtr, inhLen)
-					if ok {
-						result.Inheritance = parseInheritanceOutput(string(inhBytes))
-					}
-				}
-			}
-		}
-	}
-
+	if err != nil { return nil, err }
 	return result, nil
 }
 
