@@ -82,7 +82,8 @@ func getEngine(lang string) (*engine, error) {
 	default:
 	}
 
-	// Pool empty, create a new one (up to poolSize will be created over time)
+	// Pool empty, create a new one. More than poolSize engines may exist
+	// temporarily under high concurrency. Excess are closed by putEngine.
 	return newEngine(lang)
 }
 
@@ -532,7 +533,9 @@ func (e *engine) parseSlow(ctx context.Context, mem api.Memory, source string) (
 		return nil, err
 	}
 	defer e.free(ctx, nodePtr)
-	e.mod.ExportedFunction("ts_tree_root_node").Call(ctx, uint64(nodePtr), treePtr)
+	if _, err := e.mod.ExportedFunction("ts_tree_root_node").Call(ctx, uint64(nodePtr), treePtr); err != nil {
+		return nil, fmt.Errorf("ts_tree_root_node: %w", err)
+	}
 
 	outBufSize := e.outBufSz
 	outPtr := e.outBufPtr

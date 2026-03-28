@@ -104,6 +104,12 @@ func opIndex(input CodeGraphInput) (string, error) {
 
 	// Worker goroutines for parsing
 	numWorkers := poolSize
+	if input.Workers > 0 {
+		numWorkers = input.Workers
+		if numWorkers > 32 {
+			numWorkers = 32 // cap to prevent excessive memory usage
+		}
+	}
 	if len(files) < numWorkers {
 		numWorkers = len(files)
 	}
@@ -163,16 +169,20 @@ func opIndex(input CodeGraphInput) (string, error) {
 			batch = batch[:0]
 			return
 		}
+		defer tx.Rollback() // no-op after successful Commit
+		var committed int64
 		for _, job := range batch {
 			if err := storeParseResultTx(tx, job.path, job.lang, job.result); err != nil {
 				atomic.AddInt64(&errorsAtomic, 1)
 				continue
 			}
-			atomic.AddInt64(&indexedAtomic, 1)
+			committed++
 		}
 		if err := tx.Commit(); err != nil {
-			// Commit failed, count remaining as errors
-			atomic.AddInt64(&errorsAtomic, 1)
+			// Commit failed = all rolled back, count all as errors
+			atomic.AddInt64(&errorsAtomic, committed)
+		} else {
+			atomic.AddInt64(&indexedAtomic, committed)
 		}
 		batch = batch[:0]
 	}

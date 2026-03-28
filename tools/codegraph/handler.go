@@ -15,7 +15,8 @@ type CodeGraphInput struct {
 	Operation string `json:"operation" jsonschema:"Operation: index, find, callers, callees, symbols, methods, inherits,required"`
 	Path      string `json:"path,omitempty" jsonschema:"Project directory path (for index) or file path (for symbols)"`
 	Name      string `json:"name,omitempty" jsonschema:"Symbol name to search for (for find, callers, callees, methods, inherits)"`
-	Language  string `json:"language,omitempty" jsonschema:"Language hint: cpp, python, go, csharp, javascript, typescript, rust, java. Default: auto-detect from file extension"`
+	Language  string `json:"language,omitempty" jsonschema:"Language hint: cpp, python, go, csharp, rust, java. Default: auto-detect from file extension"`
+	Workers   int    `json:"workers,omitempty" jsonschema:"Number of parallel parse workers for index operation. Default: 4. Higher = faster but more memory (~7MB per worker)"`
 }
 
 // CodeGraphOutput holds the tool result.

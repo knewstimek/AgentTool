@@ -164,7 +164,9 @@ func storeParseResultTx(tx *sql.Tx, filePath, lang string, result *ParseResult) 
 		if s.Scope != "" {
 			qn = s.Scope + "::" + s.Name
 		}
-		stmtSym.Exec(s.Name, qn, "class", fileID, s.Line, s.Col, s.Scope, s.Parent)
+		if _, err := stmtSym.Exec(s.Name, qn, "class", fileID, s.Line, s.Col, s.Scope, s.Parent); err != nil {
+			return fmt.Errorf("insert class symbol: %w", err)
+		}
 	}
 
 	for _, s := range result.Functions {
@@ -194,7 +196,9 @@ func storeParseResultTx(tx *sql.Tx, filePath, lang string, result *ParseResult) 
 			qn = s.Scope + "::" + name
 		}
 
-		stmtSym.Exec(name, qn, kind, fileID, s.Line, s.Col, s.Scope, s.Parent)
+		if _, err := stmtSym.Exec(name, qn, kind, fileID, s.Line, s.Col, s.Scope, s.Parent); err != nil {
+			return fmt.Errorf("insert symbol: %w", err)
+		}
 	}
 
 	// Insert calls
