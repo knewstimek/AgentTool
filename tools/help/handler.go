@@ -11,7 +11,7 @@ import (
 )
 
 type HelpInput struct {
-	Topic string `json:"topic,omitempty" jsonschema:"Help topic. Available: overview, encoding, indentation, tools, debug, analyze, memtool, wintool, troubleshooting. Empty = overview"`
+	Topic string `json:"topic,omitempty" jsonschema:"Help topic. Available: overview, encoding, indentation, tools, debug, analyze, memtool, wintool, codegraph, ipc, troubleshooting. Empty = overview"`
 }
 
 type HelpOutput struct {
@@ -44,11 +44,13 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input HelpInput) (*mc
 		text = helpWintool()
 	case "ipc":
 		text = helpIPC()
+	case "codegraph", "code-graph", "graph", "ast":
+		text = helpCodegraph()
 	case "troubleshooting", "trouble":
 		text = helpTroubleshooting()
 	default:
 		text = "Unknown topic: " + topic + "\n\n" +
-			"Available topics: overview, encoding, indentation, tools, debug, analyze, memtool, wintool, ipc, troubleshooting"
+			"Available topics: overview, encoding, indentation, tools, debug, analyze, memtool, wintool, codegraph, ipc, troubleshooting"
 	}
 
 	return &mcp.CallToolResult{
@@ -1385,4 +1387,53 @@ Protocol: [2-byte type BE][4-byte length BE][payload].
   - For local-only use, set bind="127.0.0.1" on receive
   - Max message size: 1MB, max timeout: 300 seconds
   - One message per connection (request-response pattern, not streaming)`
+}
+
+func helpCodegraph() string {
+	return `# codegraph - AST-based Code Indexing
+
+Parses source code with tree-sitter (via WASM) and stores symbols/relationships
+in a local SQLite index. Enables precise symbol lookup without grep noise.
+
+## Operations
+
+  codegraph(op="index", path="/project/root")
+    Build or update the code index. Incremental: only re-parses changed files.
+    Creates .codegraph.db at the project root (add to .gitignore).
+
+  codegraph(op="find", name="Monster", path="/project/root")
+    Find symbol definitions by name. Searches name and qualified_name.
+
+  codegraph(op="callers", name="takeDamage", path="/project/root")
+    Find all call sites that invoke a function/method.
+
+  codegraph(op="callees", name="main", path="/project/root")
+    Find all functions called by a function (within its body).
+
+  codegraph(op="symbols", path="/path/to/file.cpp")
+    List all symbols in a file (classes, functions, calls). No index needed.
+
+  codegraph(op="methods", name="Monster", path="/project/root")
+    List all methods of a class.
+
+## Workflow
+
+  1. codegraph(op="index", path="/project/root")   -- build index (once)
+  2. codegraph(op="find", name="Player")            -- find definitions
+  3. codegraph(op="methods", name="Player")          -- list methods
+  4. codegraph(op="callers", name="takeDamage")      -- who calls this?
+  5. After editing, re-run index to update changed files
+
+## Supported Languages
+
+  Currently: C/C++ (.cpp, .cc, .cxx, .c, .h, .hpp)
+  Planned: Python, Go, C#, JavaScript, TypeScript, Rust, Java
+
+## Key Points
+
+  - No external dependencies (tree-sitter runs as WASM inside the binary)
+  - Index is local per-project (.codegraph.db)
+  - Incremental updates (only changed files re-parsed)
+  - symbols operation works without an index (parses file on-the-fly)
+  - Pure data lookup, no LLM calls, zero token cost`
 }

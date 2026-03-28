@@ -11,6 +11,7 @@ import (
 	"agent-tool/install"
 	bashtool "agent-tool/tools/bash"
 	"agent-tool/tools/analyze"
+	"agent-tool/tools/codegraph"
 	"agent-tool/tools/backup"
 	"agent-tool/tools/download"
 	"agent-tool/tools/checksum"
@@ -211,6 +212,7 @@ Tool groups: file | system (bash, procexec, proclist, prockill, sysinfo, envvar,
 	memtool.Register(server)
 	wintool.Register(server)
 	ipc.Register(server)
+	codegraph.Register(server)
 	help.Register(server)
 
 	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
