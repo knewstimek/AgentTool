@@ -321,7 +321,7 @@ func opSymbols(input CodeGraphInput) (string, error) {
 			if s.Parent == "field_declaration_list" {
 				parent = " [inline]"
 			}
-			sb.WriteString(fmt.Sprintf("  %s  line:%d%s%s\n", s.Name, s.Line, scope, parent))
+			sb.WriteString(fmt.Sprintf("  %s  line:%d%s%s\n", cleanSymbolName(s.Name), s.Line, scope, parent))
 		}
 		sb.WriteString("\n")
 	}
