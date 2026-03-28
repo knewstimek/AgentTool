@@ -167,16 +167,20 @@ func storeParseResult(db *sql.DB, filePath, lang string, result *ParseResult) er
 
 		// Detect method vs function
 		if s.Parent == "field_declaration_list" {
+			// C++/C# inline method inside class body
 			kind = "method"
 			if s.Scope != "" {
 				qn = s.Scope + "::" + name
 			}
 		} else if idx := findLastScopeOp(name); idx >= 0 {
-			// Out-of-class method: Monster::takeDamage
+			// C++ out-of-class method: Monster::takeDamage
 			kind = "method"
 			qn = name
 			name = name[idx+2:] // just the method name
 		} else if s.Scope != "" {
+			// Has scope (class/struct/impl/interface) -> method
+			// Go receiver, Python class method, Java/C# method, Rust impl method
+			kind = "method"
 			qn = s.Scope + "::" + name
 		}
 
