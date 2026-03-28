@@ -81,6 +81,8 @@ func openDB(projectRoot string) (*sql.DB, error) {
 	// WAL mode for concurrent reads
 	db.Exec("PRAGMA journal_mode=WAL")
 	db.Exec("PRAGMA foreign_keys=ON")
+	// Case-sensitive LIKE to avoid matching checkDangerousPath when searching CheckDangerousPath
+	db.Exec("PRAGMA case_sensitive_like=ON")
 
 	if _, err := db.Exec(schemaSQL); err != nil {
 		db.Close()

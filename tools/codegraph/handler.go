@@ -91,6 +91,9 @@ Operations:
 Supports: C/C++, Python, Go, C#, Rust, Java.
 Index is stored at project root as .codegraph.db (add to .gitignore).
 No LLM calls, no embeddings -- pure data lookup, zero token cost.
+Tip: Run index once at the start of a session, then use find/callers/methods to navigate.
+Re-run index after bulk edits to update changed files (incremental, fast).
+symbols works without an index (parses on-the-fly, good for single files).
 Powered by tree-sitter (MIT) via wazero (pure Go WASM runtime).`,
 	}, Handle)
 }
