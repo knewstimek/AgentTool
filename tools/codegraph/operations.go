@@ -694,7 +694,7 @@ func loadGitignore(root string) *gitignoreSet {
 		}
 		if info.IsDir() {
 			base := filepath.Base(path)
-			if base == ".git" {
+			if base == ".git" || isSkippedDir(base) {
 				return filepath.SkipDir
 			}
 			// Skip symlink directories to prevent traversal outside project root
@@ -1062,23 +1062,27 @@ func opCallTree(input CodeGraphInput) (string, error) {
 	}
 
 	visited := make(map[string]bool)
-	buildCallTree(db, &sb, input.Name, direction, 0, maxDepth, visited)
+	nodeCount := 0
+	buildCallTree(db, &sb, input.Name, direction, 0, maxDepth, visited, &nodeCount)
 
 	return sb.String(), nil
 }
 
+// maxCallTreeNodes caps total output nodes to prevent exponential blowup.
+const maxCallTreeNodes = 500
+
 // buildCallTree recursively builds a call tree with indentation.
-func buildCallTree(db *sql.DB, sb *strings.Builder, name, direction string, depth, maxDepth int, visited map[string]bool) {
-	if depth >= maxDepth {
+func buildCallTree(db *sql.DB, sb *strings.Builder, name, direction string, depth, maxDepth int, visited map[string]bool, nodeCount *int) {
+	if depth >= maxDepth || *nodeCount >= maxCallTreeNodes {
 		return
 	}
 	if visited[name] {
 		indent := strings.Repeat("  ", depth+1)
-		sb.WriteString(fmt.Sprintf("%s(recursive: %s)\n", indent, name))
+		sb.WriteString(fmt.Sprintf("%s(circular: %s)\n", indent, name))
 		return
 	}
 	visited[name] = true
-	defer func() { visited[name] = false }() // allow re-entry from different paths
+	// Do NOT unset visited -- prevents exponential blowup in DAGs.
 
 	var rows *sql.Rows
 	var err error
@@ -1123,26 +1127,29 @@ func buildCallTree(db *sql.DB, sb *strings.Builder, name, direction string, dept
 
 	indent := strings.Repeat("  ", depth+1)
 	for rows.Next() {
+		if *nodeCount >= maxCallTreeNodes {
+			sb.WriteString(fmt.Sprintf("%s(truncated at %d nodes)\n", indent, maxCallTreeNodes))
+			break
+		}
 		var ref, path string
 		var line int
 		if err := rows.Scan(&ref, &path, &line); err != nil {
 			continue
 		}
+		*nodeCount++
 		if direction == "up" {
-			// ref is scope (caller's enclosing function)
 			caller := ref
 			if caller == "" {
 				caller = "(global)"
 			}
 			sb.WriteString(fmt.Sprintf("%s%s  (%s:%d)\n", indent, caller, path, line))
 			if caller != "(global)" && depth+1 < maxDepth {
-				buildCallTree(db, sb, caller, direction, depth+1, maxDepth, visited)
+				buildCallTree(db, sb, caller, direction, depth+1, maxDepth, visited, nodeCount)
 			}
 		} else {
-			// ref is callee name
 			sb.WriteString(fmt.Sprintf("%s%s  (line:%d)\n", indent, ref, line))
 			if depth+1 < maxDepth {
-				buildCallTree(db, sb, ref, direction, depth+1, maxDepth, visited)
+				buildCallTree(db, sb, ref, direction, depth+1, maxDepth, visited, nodeCount)
 			}
 		}
 	}
