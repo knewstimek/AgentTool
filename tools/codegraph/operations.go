@@ -665,8 +665,14 @@ func isSkippedDir(base string) bool {
 	return false
 }
 
-// gitignoreRules holds parsed .gitignore patterns for a project root.
-type gitignoreRules struct {
+// gitignoreSet holds patterns from multiple .gitignore files (root + nested).
+type gitignoreSet struct {
+	layers []gitignoreLayer // ordered: root first, deeper dirs later
+}
+
+// gitignoreLayer holds patterns from one .gitignore file with its directory prefix.
+type gitignoreLayer struct {
+	prefix   string // relative dir (e.g. "" for root, "src/lib" for nested)
 	patterns []gitignorePattern
 }
 
@@ -674,13 +680,47 @@ type gitignorePattern struct {
 	pattern  string
 	negate   bool
 	dirOnly  bool
-	hasSlash bool // pattern contains '/' (anchored to root)
+	anchored bool // pattern contains '/' -> anchored to its .gitignore location
 }
 
-// loadGitignore reads and parses .gitignore from the project root.
-// Returns nil if no .gitignore exists.
-func loadGitignore(root string) *gitignoreRules {
-	f, err := os.Open(filepath.Join(root, ".gitignore"))
+// loadGitignore reads .gitignore from root and all subdirectories.
+// Returns nil if no .gitignore exists anywhere.
+func loadGitignore(root string) *gitignoreSet {
+	var layers []gitignoreLayer
+
+	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			base := filepath.Base(path)
+			if base == ".git" {
+				return filepath.SkipDir
+			}
+			// Try to load .gitignore in this directory
+			gi := filepath.Join(path, ".gitignore")
+			patterns := parseGitignoreFile(gi)
+			if len(patterns) > 0 {
+				rel, _ := filepath.Rel(root, path)
+				rel = filepath.ToSlash(rel)
+				if rel == "." {
+					rel = ""
+				}
+				layers = append(layers, gitignoreLayer{prefix: rel, patterns: patterns})
+			}
+		}
+		return nil
+	})
+
+	if len(layers) == 0 {
+		return nil
+	}
+	return &gitignoreSet{layers: layers}
+}
+
+// parseGitignoreFile reads and parses a single .gitignore file.
+func parseGitignoreFile(path string) []gitignorePattern {
+	f, err := os.Open(path)
 	if err != nil {
 		return nil
 	}
@@ -699,64 +739,406 @@ func loadGitignore(root string) *gitignoreRules {
 			p.negate = true
 			line = line[1:]
 		}
-		// Trailing slash = directory only
 		if strings.HasSuffix(line, "/") {
 			p.dirOnly = true
 			line = strings.TrimSuffix(line, "/")
 		}
-		p.hasSlash = strings.Contains(line, "/")
-		// Leading slash = anchored to root (strip it, hasSlash already set)
-		line = strings.TrimPrefix(line, "/")
+		// Contains '/' (excluding leading/trailing) -> anchored
+		trimmed := strings.TrimPrefix(line, "/")
+		p.anchored = strings.Contains(trimmed, "/")
+		line = trimmed
 		p.pattern = line
 		if p.pattern != "" {
 			patterns = append(patterns, p)
 		}
 	}
-	if len(patterns) == 0 {
-		return nil
-	}
-	return &gitignoreRules{patterns: patterns}
+	return patterns
 }
 
-// match checks if a relative path matches any gitignore pattern.
-func (g *gitignoreRules) match(rel string, isDir bool) bool {
-	// Normalize to forward slashes for matching
+// match checks if a relative path matches any gitignore pattern across all layers.
+func (g *gitignoreSet) match(rel string, isDir bool) bool {
 	rel = filepath.ToSlash(rel)
 	matched := false
-	for _, p := range g.patterns {
-		if p.dirOnly && !isDir {
-			continue
+	for _, layer := range g.layers {
+		// Compute path relative to this .gitignore's directory
+		var localRel string
+		if layer.prefix == "" {
+			localRel = rel
+		} else {
+			if !strings.HasPrefix(rel, layer.prefix+"/") && rel != layer.prefix {
+				continue // path not under this .gitignore's directory
+			}
+			localRel = strings.TrimPrefix(rel, layer.prefix+"/")
 		}
-		if matchPattern(p, rel) {
-			matched = !p.negate
+		for _, p := range layer.patterns {
+			if p.dirOnly && !isDir {
+				continue
+			}
+			if matchGlob(p, localRel) {
+				matched = !p.negate
+			}
 		}
 	}
 	return matched
 }
 
-// matchPattern tests a single gitignore pattern against a path.
-func matchPattern(p gitignorePattern, rel string) bool {
-	if p.hasSlash {
-		// Anchored pattern: match against full relative path
-		ok, _ := filepath.Match(p.pattern, rel)
-		return ok
+// matchGlob tests a single gitignore pattern against a relative path.
+// Supports ** (match zero or more directories).
+func matchGlob(p gitignorePattern, rel string) bool {
+	pattern := p.pattern
+	if p.anchored {
+		// Anchored: match against full relative path
+		return globMatch(pattern, rel)
 	}
-	// Unanchored: match against the basename, or any path segment
-	base := filepath.Base(rel)
-	ok, _ := filepath.Match(p.pattern, base)
-	if ok {
+	// Unanchored: match against basename first
+	base := rel
+	if idx := strings.LastIndex(rel, "/"); idx >= 0 {
+		base = rel[idx+1:]
+	}
+	if globMatch(pattern, base) {
 		return true
 	}
-	// Also try matching against each path suffix
+	// Also try matching against the full path (e.g. "*.o" should match "src/foo.o")
+	if globMatch(pattern, rel) {
+		return true
+	}
+	// Try matching at each directory level
 	parts := strings.Split(rel, "/")
 	for i := range parts {
 		suffix := strings.Join(parts[i:], "/")
-		ok, _ = filepath.Match(p.pattern, suffix)
-		if ok {
+		if globMatch(pattern, suffix) {
 			return true
 		}
 	}
 	return false
+}
+
+// globMatch matches a pattern against a string, supporting ** for zero or more directories.
+func globMatch(pattern, name string) bool {
+	// Fast path: no ** in pattern, use filepath.Match
+	if !strings.Contains(pattern, "**") {
+		ok, _ := filepath.Match(pattern, name)
+		return ok
+	}
+
+	// Split pattern by ** and match each segment
+	segments := strings.Split(pattern, "**")
+
+	// Handle leading **/ (match any prefix)
+	if strings.HasPrefix(pattern, "**/") {
+		rest := strings.TrimPrefix(pattern, "**/")
+		// Match at any level
+		if globMatch(rest, name) {
+			return true
+		}
+		parts := strings.Split(name, "/")
+		for i := 1; i < len(parts); i++ {
+			if globMatch(rest, strings.Join(parts[i:], "/")) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Handle trailing /**
+	if strings.HasSuffix(pattern, "/**") {
+		prefix := strings.TrimSuffix(pattern, "/**")
+		ok, _ := filepath.Match(prefix, name)
+		if ok {
+			return true
+		}
+		// Match anything under the prefix directory
+		return strings.HasPrefix(name, prefix+"/") || name == prefix
+	}
+
+	// Handle middle /**/
+	if len(segments) == 2 {
+		prefix := strings.TrimSuffix(segments[0], "/")
+		suffix := strings.TrimPrefix(segments[1], "/")
+		// Direct match (zero directories between)
+		combined := prefix + "/" + suffix
+		if globMatch(combined, name) {
+			return true
+		}
+		// Match with any number of directories between
+		parts := strings.Split(name, "/")
+		for i := 0; i < len(parts); i++ {
+			left := strings.Join(parts[:i+1], "/")
+			right := strings.Join(parts[i+1:], "/")
+			leftOK, _ := filepath.Match(prefix, left)
+			if prefix == "" {
+				leftOK = true
+				right = name
+			}
+			if leftOK && globMatch(suffix, right) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Fallback for complex multi-** patterns: try filepath.Match on each segment
+	ok, _ := filepath.Match(pattern, name)
+	return ok
+}
+
+// opStats returns summary statistics for the project index.
+func opStats(input CodeGraphInput) (string, error) {
+	db, err := validateAndOpenDB(input.Path)
+	if err != nil {
+		return "", err
+	}
+	defer db.Close()
+
+	var files, classes, functions, methods, calls, includes, inheritance int
+	db.QueryRow("SELECT COUNT(*) FROM files").Scan(&files)
+	db.QueryRow("SELECT COUNT(*) FROM symbols WHERE kind='class'").Scan(&classes)
+	db.QueryRow("SELECT COUNT(*) FROM symbols WHERE kind='function'").Scan(&functions)
+	db.QueryRow("SELECT COUNT(*) FROM symbols WHERE kind='method'").Scan(&methods)
+	db.QueryRow("SELECT COUNT(*) FROM calls").Scan(&calls)
+	db.QueryRow("SELECT COUNT(*) FROM includes").Scan(&includes)
+	db.QueryRow("SELECT COUNT(*) FROM inheritance").Scan(&inheritance)
+
+	// Language breakdown
+	langRows, err := db.Query("SELECT language, COUNT(*) FROM files GROUP BY language ORDER BY COUNT(*) DESC")
+	if err != nil {
+		return "", err
+	}
+	defer langRows.Close()
+
+	var langBreakdown strings.Builder
+	for langRows.Next() {
+		var lang string
+		var count int
+		if err := langRows.Scan(&lang, &count); err != nil {
+			continue
+		}
+		langBreakdown.WriteString(fmt.Sprintf("  %s: %d files\n", lang, count))
+	}
+
+	return fmt.Sprintf("Project Index Stats:\n  Files: %d\n  Classes/Structs: %d\n  Functions: %d\n  Methods: %d\n  Call sites: %d\n  Imports/Includes: %d\n  Inheritance relations: %d\n\nLanguages:\n%s",
+		files, classes, functions, methods, calls, includes, inheritance, langBreakdown.String()), nil
+}
+
+// opImporters finds files that import/include a given file.
+func opImporters(input CodeGraphInput) (string, error) {
+	if input.Name == "" {
+		return "", fmt.Errorf("name is required (file name or include path to search for, e.g. \"dap_server.h\")")
+	}
+
+	db, err := validateAndOpenDB(input.Path)
+	if err != nil {
+		return "", err
+	}
+	defer db.Close()
+
+	escaped := escapeLike(input.Name)
+	rows, err := db.Query(`
+		SELECT f.path, i.included, i.line
+		FROM includes i JOIN files f ON i.file_id = f.id
+		WHERE i.included LIKE ? ESCAPE '\'
+		ORDER BY f.path, i.line
+		LIMIT 100
+	`, "%"+escaped+"%")
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+
+	var sb strings.Builder
+	count := 0
+	for rows.Next() {
+		var path, included string
+		var line int
+		if err := rows.Scan(&path, &included, &line); err != nil {
+			continue
+		}
+		sb.WriteString(fmt.Sprintf("  %s:%d  imports %s\n", path, line, included))
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("query error: %w", err)
+	}
+
+	if count == 0 {
+		return fmt.Sprintf("No files import/include %q.", input.Name), nil
+	}
+	return fmt.Sprintf("Files importing %q (%d):\n%s", input.Name, count, sb.String()), nil
+}
+
+// opUnused finds symbols (functions/methods) defined but never called.
+func opUnused(input CodeGraphInput) (string, error) {
+	db, err := validateAndOpenDB(input.Path)
+	if err != nil {
+		return "", err
+	}
+	defer db.Close()
+
+	// Find functions/methods that have no matching call site.
+	// Uses LEFT JOIN: symbols with no calls entry are "unused".
+	rows, err := db.Query(`
+		SELECT s.name, s.qualified_name, s.kind, f.path, s.line, s.scope
+		FROM symbols s
+		JOIN files f ON s.file_id = f.id
+		LEFT JOIN calls c ON c.callee_name = s.name
+		WHERE s.kind IN ('function', 'method') AND c.id IS NULL
+		ORDER BY f.path, s.line
+		LIMIT 200
+	`)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+
+	var sb strings.Builder
+	count := 0
+	for rows.Next() {
+		var name, qn, kind, path, scope string
+		var line int
+		if err := rows.Scan(&name, &qn, &kind, &path, &line, &scope); err != nil {
+			continue
+		}
+		sb.WriteString(fmt.Sprintf("  [%s] %s  %s:%d", kind, qn, path, line))
+		if scope != "" {
+			sb.WriteString(fmt.Sprintf("  (scope: %s)", scope))
+		}
+		sb.WriteString("\n")
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("query error: %w", err)
+	}
+
+	if count == 0 {
+		return "No unused functions/methods found. All defined symbols have callers.", nil
+	}
+	note := ""
+	if count >= 200 {
+		note = "\n(truncated at 200 results)"
+	}
+	return fmt.Sprintf("Unused symbols (%d):\n%s%s", count, sb.String(), note), nil
+}
+
+// opCallTree builds a recursive call hierarchy.
+func opCallTree(input CodeGraphInput) (string, error) {
+	if input.Name == "" {
+		return "", fmt.Errorf("name is required for call_tree operation")
+	}
+
+	db, err := validateAndOpenDB(input.Path)
+	if err != nil {
+		return "", err
+	}
+	defer db.Close()
+
+	maxDepth := input.Depth
+	if maxDepth <= 0 {
+		maxDepth = 3
+	}
+	if maxDepth > 10 {
+		maxDepth = 10
+	}
+
+	direction := strings.ToLower(input.Direction)
+	if direction == "" {
+		direction = "up"
+	}
+	if direction != "up" && direction != "down" {
+		return "", fmt.Errorf("direction must be 'up' (callers) or 'down' (callees), got %q", direction)
+	}
+
+	var sb strings.Builder
+	if direction == "up" {
+		sb.WriteString(fmt.Sprintf("Call tree (callers of %q, depth %d):\n", input.Name, maxDepth))
+	} else {
+		sb.WriteString(fmt.Sprintf("Call tree (callees of %q, depth %d):\n", input.Name, maxDepth))
+	}
+
+	visited := make(map[string]bool)
+	buildCallTree(db, &sb, input.Name, direction, 0, maxDepth, visited)
+
+	return sb.String(), nil
+}
+
+// buildCallTree recursively builds a call tree with indentation.
+func buildCallTree(db *sql.DB, sb *strings.Builder, name, direction string, depth, maxDepth int, visited map[string]bool) {
+	if depth >= maxDepth {
+		return
+	}
+	if visited[name] {
+		indent := strings.Repeat("  ", depth+1)
+		sb.WriteString(fmt.Sprintf("%s(recursive: %s)\n", indent, name))
+		return
+	}
+	visited[name] = true
+	defer func() { visited[name] = false }() // allow re-entry from different paths
+
+	var rows *sql.Rows
+	var err error
+
+	if direction == "up" {
+		// Find callers of this function
+		rows, err = db.Query(`
+			SELECT DISTINCT c.scope, f.path, c.caller_line
+			FROM calls c JOIN files f ON c.caller_file_id = f.id
+			WHERE c.callee_name = ?
+			ORDER BY f.path, c.caller_line
+			LIMIT 50
+		`, name)
+	} else {
+		// Find callees: first find this function's file and line range
+		var fileID, startLine, endLine int
+		escaped := escapeLike(name)
+		err = db.QueryRow(`
+			SELECT s.file_id, s.line, COALESCE(
+				(SELECT MIN(s2.line) - 1 FROM symbols s2 WHERE s2.file_id = s.file_id AND s2.line > s.line AND s2.kind IN ('function','method')),
+				s.line + 1000
+			)
+			FROM symbols s
+			WHERE (s.name = ? OR s.qualified_name = ? OR s.qualified_name LIKE ? ESCAPE '\') AND s.kind IN ('function','method')
+			LIMIT 1
+		`, name, name, "%::"+escaped).Scan(&fileID, &startLine, &endLine)
+		if err != nil {
+			return
+		}
+		rows, err = db.Query(`
+			SELECT DISTINCT c.callee_name, f.path, c.caller_line
+			FROM calls c JOIN files f ON c.caller_file_id = f.id
+			WHERE c.caller_file_id = ? AND c.caller_line >= ? AND c.caller_line <= ?
+			ORDER BY c.caller_line
+			LIMIT 50
+		`, fileID, startLine, endLine)
+	}
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	indent := strings.Repeat("  ", depth+1)
+	for rows.Next() {
+		var ref, path string
+		var line int
+		if err := rows.Scan(&ref, &path, &line); err != nil {
+			continue
+		}
+		if direction == "up" {
+			// ref is scope (caller's enclosing function)
+			caller := ref
+			if caller == "" {
+				caller = "(global)"
+			}
+			sb.WriteString(fmt.Sprintf("%s%s  (%s:%d)\n", indent, caller, path, line))
+			if caller != "(global)" && depth+1 < maxDepth {
+				buildCallTree(db, sb, caller, direction, depth+1, maxDepth, visited)
+			}
+		} else {
+			// ref is callee name
+			sb.WriteString(fmt.Sprintf("%s%s  (line:%d)\n", indent, ref, line))
+			if depth+1 < maxDepth {
+				buildCallTree(db, sb, ref, direction, depth+1, maxDepth, visited)
+			}
+		}
+	}
 }
 
 // detectLanguage returns the language identifier from file extension or explicit hint.

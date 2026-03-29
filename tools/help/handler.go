@@ -1416,13 +1416,31 @@ in a local SQLite index. Enables precise symbol lookup without grep noise.
   codegraph(op="methods", name="Monster", path="/project/root")
     List all methods of a class.
 
+  codegraph(op="inherits", name="Dog", path="/project/root")
+    Show inheritance hierarchy (parents and children).
+
+  codegraph(op="stats", path="/project/root")
+    Project statistics: file/class/function/method/call counts by language.
+
+  codegraph(op="importers", name="dap_server.h", path="/project/root")
+    Find all files that import/include a given file.
+
+  codegraph(op="unused", path="/project/root")
+    Find functions/methods defined but never called (dead code detection).
+
+  codegraph(op="call_tree", name="HandleRequest", path="/project/root", depth=3, direction="up")
+    Recursive call hierarchy. direction: up (callers) or down (callees). Default depth 3.
+
 ## Workflow
 
   1. codegraph(op="index", path="/project/root")   -- build index (once)
-  2. codegraph(op="find", name="Player")            -- find definitions
-  3. codegraph(op="methods", name="Player")          -- list methods
-  4. codegraph(op="callers", name="takeDamage")      -- who calls this?
-  5. After editing, re-run index to update changed files
+  2. codegraph(op="stats")                          -- project overview
+  3. codegraph(op="find", name="Player")            -- find definitions
+  4. codegraph(op="methods", name="Player")          -- list methods
+  5. codegraph(op="callers", name="takeDamage")      -- who calls this?
+  6. codegraph(op="call_tree", name="takeDamage", direction="up")  -- full call chain
+  7. codegraph(op="unused")                          -- dead code
+  8. After editing, re-run index to update changed files
 
 ## Supported Languages
 
@@ -1442,5 +1460,7 @@ in a local SQLite index. Enables precise symbol lookup without grep noise.
   - Incremental updates (only changed files re-parsed)
   - symbols operation works without an index (parses file on-the-fly)
   - Pure data lookup, no LLM calls, zero token cost
-  - WASM engines are recycled periodically to limit memory usage`
+  - WASM engines are recycled periodically to limit memory usage
+  - call_tree provides recursive call hierarchy (replaces manual callers chaining)
+  - unused detects dead code (defined but never called)`
 }

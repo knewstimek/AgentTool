@@ -12,11 +12,13 @@ import (
 
 // CodeGraphInput defines parameters for the codegraph tool.
 type CodeGraphInput struct {
-	Operation string `json:"operation" jsonschema:"Operation: index, find, callers, callees, symbols, methods, inherits,required"`
+	Operation string `json:"operation" jsonschema:"Operation: index, find, callers, callees, symbols, methods, inherits, stats, importers, unused, call_tree,required"`
 	Path      string `json:"path,omitempty" jsonschema:"Project directory path (for index) or file path (for symbols)"`
-	Name      string `json:"name,omitempty" jsonschema:"Symbol name to search for (for find, callers, callees, methods, inherits)"`
+	Name      string `json:"name,omitempty" jsonschema:"Symbol name to search for (for find, callers, callees, methods, inherits, call_tree)"`
 	Language  string `json:"language,omitempty" jsonschema:"Language hint: cpp, python, go, csharp, rust, java. Default: auto-detect from file extension"`
 	Workers   int    `json:"workers,omitempty" jsonschema:"Number of parallel parse workers for index operation. Default: 4. Higher = faster but more memory (~7MB per worker)"`
+	Depth     int    `json:"depth,omitempty" jsonschema:"Max recursion depth for call_tree. Default: 3, Max: 10"`
+	Direction string `json:"direction,omitempty" jsonschema:"Direction for call_tree: up (callers) or down (callees). Default: up"`
 }
 
 // CodeGraphOutput holds the tool result.
@@ -25,19 +27,23 @@ type CodeGraphOutput struct {
 }
 
 var validOperations = map[string]bool{
-	"index":    true,
-	"find":     true,
-	"callers":  true,
-	"callees":  true,
-	"symbols":  true,
-	"methods":  true,
-	"inherits": true,
+	"index":     true,
+	"find":      true,
+	"callers":   true,
+	"callees":   true,
+	"symbols":   true,
+	"methods":   true,
+	"inherits":  true,
+	"stats":     true,
+	"importers": true,
+	"unused":    true,
+	"call_tree": true,
 }
 
 // Handle dispatches to the appropriate codegraph operation.
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input CodeGraphInput) (*mcp.CallToolResult, CodeGraphOutput, error) {
 	op := strings.ToLower(strings.TrimSpace(input.Operation))
-	allOps := "index, find, callers, callees, symbols, methods, inherits"
+	allOps := "index, find, callers, callees, symbols, methods, inherits, stats, importers, unused, call_tree"
 	if op == "" {
 		return errorResult("operation is required (" + allOps + ")")
 	}
@@ -63,6 +69,14 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input CodeGraphInput)
 		result, err = opMethods(input)
 	case "inherits":
 		result, err = opInherits(input)
+	case "stats":
+		result, err = opStats(input)
+	case "importers":
+		result, err = opImporters(input)
+	case "unused":
+		result, err = opUnused(input)
+	case "call_tree":
+		result, err = opCallTree(input)
 	}
 
 	if err != nil {
@@ -86,16 +100,19 @@ Operations:
   find(name) - Find symbol definitions by name (function, class, method).
   callers(name) - Find all callers of a function/method.
   callees(name) - Find all functions/methods called by a function.
-  symbols(path) - List all symbols in a file.
+  symbols(path) - List all symbols in a file (no index needed).
   methods(name) - List all methods of a class.
   inherits(name) - Show inheritance hierarchy of a class.
+  stats(path) - Project index statistics (files, classes, functions, calls).
+  importers(path, name) - Find files that import/include a given file.
+  unused(path) - Find symbols defined but never called (dead code).
+  call_tree(name, depth, direction) - Recursive call hierarchy (up=callers, down=callees).
 Supports: C/C++, Python, Go, C#, Rust, Java.
 Index is stored at project root as .codegraph.db (add to .gitignore).
-Respects .gitignore and skips common non-source dirs (venv, vendor, third_party, build, etc.).
+Respects .gitignore (including nested) and skips non-source dirs (venv, vendor, third_party, etc.).
 No LLM calls, no embeddings -- pure data lookup, zero token cost.
-Tip: Run index once at the start of a session, then use find/callers/methods to navigate.
+Tip: Run index once at the start of a session, then use find/callers/call_tree to navigate.
 Re-run index after bulk edits to update changed files (incremental, fast).
-symbols works without an index (parses on-the-fly, good for single files).
 Powered by tree-sitter (MIT) via wazero (pure Go WASM runtime).`,
 	}, Handle)
 }
