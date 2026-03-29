@@ -1,6 +1,7 @@
 package codegraph
 
 import (
+	"bufio"
 	"database/sql"
 	"fmt"
 	"os"
@@ -48,6 +49,9 @@ func opIndex(input CodeGraphInput) (string, error) {
 	var indexedAtomic, skippedAtomic, errorsAtomic int64
 	t0 := time.Now()
 
+	// Load .gitignore patterns for filtering
+	gitIgnore := loadGitignore(root)
+
 	// Phase 1: collect files to index
 	type fileEntry struct {
 		path string
@@ -69,10 +73,15 @@ func opIndex(input CodeGraphInput) (string, error) {
 		}
 		if info.IsDir() {
 			base := filepath.Base(path)
-			if base == ".git" || base == "node_modules" || base == "__pycache__" ||
-				base == ".vs" || base == ".vscode" || base == "build" || base == "bin" ||
-				base == "obj" || base == "Debug" || base == "Release" || base == "x64" {
+			if isSkippedDir(base) {
 				return filepath.SkipDir
+			}
+			// Check .gitignore patterns
+			if gitIgnore != nil {
+				rel, err := filepath.Rel(root, path)
+				if err == nil && gitIgnore.match(rel, true) {
+					return filepath.SkipDir
+				}
 			}
 			return nil
 		}
@@ -82,6 +91,13 @@ func opIndex(input CodeGraphInput) (string, error) {
 		lang := detectLanguage(path, input.Language)
 		if lang == "" {
 			return nil
+		}
+		// Check .gitignore patterns for files
+		if gitIgnore != nil {
+			rel, err := filepath.Rel(root, path)
+			if err == nil && gitIgnore.match(rel, false) {
+				return nil
+			}
 		}
 		changed, _ := isFileChanged(db, path)
 		if !changed {
@@ -625,6 +641,122 @@ func validateAndOpenDB(path string) (*sql.DB, error) {
 		}
 	}
 	return openDB(root)
+}
+
+// isSkippedDir returns true for directories that should never be indexed.
+// These are universally non-source directories across all ecosystems.
+func isSkippedDir(base string) bool {
+	switch base {
+	case ".git", "node_modules", "__pycache__",
+		".vs", ".vscode", ".idea",
+		"build", "bin", "obj",
+		"Debug", "Release", "x64",
+		// Python virtual environments
+		"venv", ".venv", "env",
+		// Vendored / third-party dependencies
+		"vendor", "third_party", "3rdparty", "external",
+		// Build output
+		"dist", "out", "target",
+		// Other common non-source dirs
+		".tox", ".mypy_cache", ".pytest_cache",
+		"coverage", ".gradle", ".cargo":
+		return true
+	}
+	return false
+}
+
+// gitignoreRules holds parsed .gitignore patterns for a project root.
+type gitignoreRules struct {
+	patterns []gitignorePattern
+}
+
+type gitignorePattern struct {
+	pattern  string
+	negate   bool
+	dirOnly  bool
+	hasSlash bool // pattern contains '/' (anchored to root)
+}
+
+// loadGitignore reads and parses .gitignore from the project root.
+// Returns nil if no .gitignore exists.
+func loadGitignore(root string) *gitignoreRules {
+	f, err := os.Open(filepath.Join(root, ".gitignore"))
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
+	var patterns []gitignorePattern
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || line[0] == '#' {
+			continue
+		}
+
+		p := gitignorePattern{}
+		if line[0] == '!' {
+			p.negate = true
+			line = line[1:]
+		}
+		// Trailing slash = directory only
+		if strings.HasSuffix(line, "/") {
+			p.dirOnly = true
+			line = strings.TrimSuffix(line, "/")
+		}
+		p.hasSlash = strings.Contains(line, "/")
+		// Leading slash = anchored to root (strip it, hasSlash already set)
+		line = strings.TrimPrefix(line, "/")
+		p.pattern = line
+		if p.pattern != "" {
+			patterns = append(patterns, p)
+		}
+	}
+	if len(patterns) == 0 {
+		return nil
+	}
+	return &gitignoreRules{patterns: patterns}
+}
+
+// match checks if a relative path matches any gitignore pattern.
+func (g *gitignoreRules) match(rel string, isDir bool) bool {
+	// Normalize to forward slashes for matching
+	rel = filepath.ToSlash(rel)
+	matched := false
+	for _, p := range g.patterns {
+		if p.dirOnly && !isDir {
+			continue
+		}
+		if matchPattern(p, rel) {
+			matched = !p.negate
+		}
+	}
+	return matched
+}
+
+// matchPattern tests a single gitignore pattern against a path.
+func matchPattern(p gitignorePattern, rel string) bool {
+	if p.hasSlash {
+		// Anchored pattern: match against full relative path
+		ok, _ := filepath.Match(p.pattern, rel)
+		return ok
+	}
+	// Unanchored: match against the basename, or any path segment
+	base := filepath.Base(rel)
+	ok, _ := filepath.Match(p.pattern, base)
+	if ok {
+		return true
+	}
+	// Also try matching against each path suffix
+	parts := strings.Split(rel, "/")
+	for i := range parts {
+		suffix := strings.Join(parts[i:], "/")
+		ok, _ = filepath.Match(p.pattern, suffix)
+		if ok {
+			return true
+		}
+	}
+	return false
 }
 
 // detectLanguage returns the language identifier from file extension or explicit hint.

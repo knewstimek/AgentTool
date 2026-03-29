@@ -30,17 +30,23 @@ var rustWasm []byte
 //go:embed wasm/tree-sitter-java.wasm
 var javaWasm []byte
 
+// maxParsesPerEngine is the number of Parse calls before an engine is recycled.
+// WASM linear memory only grows (never shrinks), so recycling periodically
+// prevents unbounded memory growth when indexing large projects.
+const maxParsesPerEngine = 50
+
 // engine holds a wazero runtime and tree-sitter WASM module for one language.
 // Parse is serialized with mu because WASM linear memory is shared.
 type engine struct {
-	runtime   wazero.Runtime
-	mod       api.Module
-	langPtr   uint64
-	lang      string // language identifier
-	queries   langQueries
-	parserPtr uint64 // cached parser (reused across Parse calls)
-	outBufPtr uint32 // cached output buffer
-	outBufSz  uint32
+	runtime    wazero.Runtime
+	mod        api.Module
+	langPtr    uint64
+	lang       string // language identifier
+	queries    langQueries
+	parserPtr  uint64 // cached parser (reused across Parse calls)
+	outBufPtr  uint32 // cached output buffer
+	outBufSz   uint32
+	parseCount int // number of Parse calls; recycled when >= maxParsesPerEngine
 }
 
 // langQueries holds tree-sitter query patterns for a language.
@@ -88,7 +94,15 @@ func getEngine(lang string) (*engine, error) {
 }
 
 // putEngine returns an engine to the pool for reuse.
+// Engines that have exceeded maxParsesPerEngine are discarded to free
+// accumulated WASM linear memory.
 func putEngine(e *engine) {
+	// Recycle engine if it has parsed too many files
+	if e.parseCount >= maxParsesPerEngine {
+		e.runtime.Close(context.Background())
+		return
+	}
+
 	pools.mu.Lock()
 	pool, ok := pools.byLang[e.lang]
 	pools.mu.Unlock()
@@ -400,6 +414,7 @@ func (e *engine) Parse(source string) (*ParseResult, error) {
 	if len(source) > maxSourceSize {
 		return nil, fmt.Errorf("source too large (%d bytes, max %d)", len(source), maxSourceSize)
 	}
+	e.parseCount++
 
 	ctx := context.Background()
 	mem := e.mod.Memory()

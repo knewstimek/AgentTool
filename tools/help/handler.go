@@ -1426,8 +1426,14 @@ in a local SQLite index. Enables precise symbol lookup without grep noise.
 
 ## Supported Languages
 
-  Currently: C/C++ (.cpp, .cc, .cxx, .c, .h, .hpp)
-  Planned: Python, Go, C#, JavaScript, TypeScript, Rust, Java
+  C/C++ (.cpp, .cc, .cxx, .c, .h, .hpp, .hxx, .hh)
+  Python (.py), Go (.go), C# (.cs), Rust (.rs), Java (.java)
+
+## Filtering
+
+  Automatically skips: .git, node_modules, __pycache__, build, bin, obj,
+  venv, .venv, vendor, third_party, dist, target, and other non-source dirs.
+  Respects .gitignore if present at the project root.
 
 ## Key Points
 
@@ -1435,5 +1441,6 @@ in a local SQLite index. Enables precise symbol lookup without grep noise.
   - Index is local per-project (.codegraph.db)
   - Incremental updates (only changed files re-parsed)
   - symbols operation works without an index (parses file on-the-fly)
-  - Pure data lookup, no LLM calls, zero token cost`
+  - Pure data lookup, no LLM calls, zero token cost
+  - WASM engines are recycled periodically to limit memory usage`
 }
