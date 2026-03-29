@@ -697,6 +697,10 @@ func loadGitignore(root string) *gitignoreSet {
 			if base == ".git" {
 				return filepath.SkipDir
 			}
+			// Skip symlink directories to prevent traversal outside project root
+			if lfi, lerr := os.Lstat(path); lerr == nil && lfi.Mode()&os.ModeSymlink != 0 {
+				return filepath.SkipDir
+			}
 			// Try to load .gitignore in this directory
 			gi := filepath.Join(path, ".gitignore")
 			patterns := parseGitignoreFile(gi)
@@ -914,6 +918,9 @@ func opStats(input CodeGraphInput) (string, error) {
 			continue
 		}
 		langBreakdown.WriteString(fmt.Sprintf("  %s: %d files\n", lang, count))
+	}
+	if err := langRows.Err(); err != nil {
+		return "", fmt.Errorf("query error: %w", err)
 	}
 
 	return fmt.Sprintf("Project Index Stats:\n  Files: %d\n  Classes/Structs: %d\n  Functions: %d\n  Methods: %d\n  Call sites: %d\n  Imports/Includes: %d\n  Inheritance relations: %d\n\nLanguages:\n%s",
