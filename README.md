@@ -77,6 +77,7 @@ Claude Code, Codex CLI, Cursor, Windsurf, Cline, Gemini CLI, and any MCP-compati
 | **Memtool** | CheatEngine-style process memory tool — search/filter/read/write memory values, live disassembly (x86/x64/ARM/ARM64), undo, struct pattern search, pointer scan, memory diff. Disk-backed snapshots for large scans. Session management with idle timeout. Windows (ReadProcessMemory) and Linux (/proc/pid/mem) | ✅ |
 | **IPC** | Inter-process communication between AI agent sessions over TCP. 1:1 message passing with blocking receive. Protocol: [2-byte type][4-byte length][payload]. Operations: send, receive (blocking with timeout), ping. Works across machines. Max 1MB message, 300s timeout | ✅ |
 | **Wintool** | Windows GUI automation — find/enumerate windows and child controls, capture screenshots (ImageContent PNG via PrintWindow), read clipboard images, read/set text, click, type, send raw messages, show/hide/minimize/maximize, move/resize, close, focus. screenshot/clipboard return ImageContent by default (save_path option for file output). Enables AI agents to "see" and interact with GUI applications. Windows only | ✅ |
+| **CodeGraph** | AST-based code indexing with tree-sitter (WASM). Index a project once, then query: find definitions, callers, callees, methods, inheritance. Supports C/C++, Python, Go, C#, Rust, Java. Respects .gitignore, skips venv/vendor/third_party. Engine recycling caps memory. No LLM calls, zero token cost | ✅ |
 | **SetConfig** | Change runtime settings (encoding, file size limit, symlinks, workspace, etc.) | ✅ |
 | **Help** | Built-in usage guide for agents (encoding, indentation, troubleshooting) | ✅ |
 
@@ -111,6 +112,13 @@ Any capable AI coding agent (Claude Code, Codex, etc.) can handle the full downl
 ### Recommended: Tell your agent to prefer agent-tool
 
 After installing, agents will have access to agent-tool but may still default to built-in tools (Read, Edit, etc.). To ensure agents **prefer** agent-tool's encoding-aware, indentation-smart tools, add one of the instructions below.
+
+**Code navigation tip**: For large projects, add this to your CLAUDE.md / AGENTS.md to enable AST-based code navigation:
+
+```
+At the start of a session, run codegraph(op="index", path="<project_root>") to build a code index.
+Then use codegraph for structural queries (find, callers, callees, methods, inherits) instead of grep.
+```
 
 Pick **Strict** or **Soft**:
 

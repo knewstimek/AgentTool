@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"agent-tool/common"
 	"agent-tool/install"
@@ -215,7 +216,27 @@ Tool groups: file | system (bash, procexec, proclist, prockill, sysinfo, envvar,
 	codegraph.Register(server)
 	help.Register(server)
 
+	// Monitor parent process -- exit if parent dies to prevent orphan processes.
+	// When the parent (IDE/CLI) is killed, stdin pipe may not close properly
+	// (especially on Windows), leaving this process alive consuming memory.
+	go monitorParent()
+
 	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
 		log.Fatal(err)
+	}
+}
+
+// monitorParent checks if the parent process is still alive every 30 seconds.
+// If the parent is gone, this process exits to avoid becoming an orphan.
+func monitorParent() {
+	ppid := os.Getppid()
+	if ppid == 0 || ppid == 1 {
+		return
+	}
+	for {
+		time.Sleep(30 * time.Second)
+		if !isProcessAlive(ppid) {
+			os.Exit(0)
+		}
 	}
 }
