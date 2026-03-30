@@ -221,6 +221,8 @@ func opIndex(input CodeGraphInput) (string, error) {
 }
 
 // opFind searches for symbol definitions by name.
+// Supports fuzzy matching: if name contains '*' it is treated as a glob pattern
+// (e.g. "Get*" matches GetPlayer, GetName). Otherwise exact match + qualified_name suffix.
 func opFind(input CodeGraphInput) (string, error) {
 	if input.Name == "" {
 		return "", fmt.Errorf("name is required for find operation")
@@ -232,14 +234,28 @@ func opFind(input CodeGraphInput) (string, error) {
 	}
 	defer db.Close()
 
-	escaped := escapeLike(input.Name)
-	rows, err := db.Query(`
-		SELECT s.name, s.qualified_name, s.kind, f.path, s.line, s.scope
-		FROM symbols s JOIN files f ON s.file_id = f.id
-		WHERE s.name = ? OR s.qualified_name = ? OR s.qualified_name LIKE ? ESCAPE '\'
-		ORDER BY s.kind, f.path, s.line
-		LIMIT 50
-	`, input.Name, input.Name, "%::"+escaped)
+	var rows *sql.Rows
+	if strings.Contains(input.Name, "*") {
+		// Fuzzy mode: convert glob '*' to SQL LIKE '%'
+		likePattern := strings.ReplaceAll(escapeLike(strings.ReplaceAll(input.Name, "*", "\x00")), "\x00", "%")
+		rows, err = db.Query(`
+			SELECT s.name, s.qualified_name, s.kind, f.path, s.line, s.scope
+			FROM symbols s JOIN files f ON s.file_id = f.id
+			WHERE s.name LIKE ? ESCAPE '\' OR s.qualified_name LIKE ? ESCAPE '\'
+			ORDER BY s.kind, f.path, s.line
+			LIMIT 50
+		`, likePattern, likePattern)
+	} else {
+		// Exact mode (existing behavior)
+		escaped := escapeLike(input.Name)
+		rows, err = db.Query(`
+			SELECT s.name, s.qualified_name, s.kind, f.path, s.line, s.scope
+			FROM symbols s JOIN files f ON s.file_id = f.id
+			WHERE s.name = ? OR s.qualified_name = ? OR s.qualified_name LIKE ? ESCAPE '\'
+			ORDER BY s.kind, f.path, s.line
+			LIMIT 50
+		`, input.Name, input.Name, "%::"+escaped)
+	}
 	if err != nil {
 		return "", err
 	}
