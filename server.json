@@ -7,12 +7,12 @@
     "url": "https://github.com/knewstimek/agent-tool",
     "source": "github"
   },
-  "version": "0.8.2",
+  "version": "0.8.3",
   "packages": [
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/knewstimek/agent-tool/releases/download/v0.8.2/agent-tool.mcpb",
-      "fileSha256": "2a05e66b20177564a4146705e0843adb4f7192a4eb04e00cdb8f426585a1a612",
+      "identifier": "https://github.com/knewstimek/agent-tool/releases/download/v0.8.3/agent-tool.mcpb",
+      "fileSha256": "0291194a3e818aaf63659be12776e95cd027f7f7048e0962cea8c7d72d0a48e7",
       "transport": {
         "type": "stdio"
       }
