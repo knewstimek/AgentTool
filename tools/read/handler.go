@@ -257,7 +257,8 @@ Encoding-aware: auto-detects file encoding (UTF-8, EUC-KR, Shift-JIS, etc.).
 Image files (PNG, JPG, GIF, BMP, WebP, TIFF, ICO) are returned as ImageContent (base64).
 SVG files are returned as text. Supports offset/limit for reading specific line ranges.
 Negative offset reads from end (e.g. offset=-5 reads last 5 lines).
-Offset accepts integer, string range "100-200", or [start, end] array.`,
+Offset accepts integer, string range "100-200", or [start, end] array.
+Accepts "path" as alias for "file_path". Relative paths are resolved against the server CWD (the directory from which agent-tool was launched).`,
 	}, Handle)
 }
 
