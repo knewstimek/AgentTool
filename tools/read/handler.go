@@ -37,7 +37,8 @@ const maxImageSize = 20 * 1024 * 1024
 const readHashThreshold = 10 * 1024 * 1024 // 10MB
 
 type ReadInput struct {
-	FilePath string `json:"file_path" jsonschema:"Absolute path to the file to read"`
+	FilePath string `json:"file_path,omitempty" jsonschema:"Absolute or relative path to the file to read"`
+	Path     string `json:"path,omitempty" jsonschema:"Alias for file_path"`
 	Offset   any    `json:"offset,omitempty" jsonschema:"Line offset. Integer (1-based, negative=from end), string range 'start-end', or [start,end] array. Default: 0 (all)"`
 	Limit    int    `json:"limit,omitempty" jsonschema:"Maximum number of lines to read. Default: 0 (all)"`
 }
@@ -127,11 +128,20 @@ func asInt(v interface{}) (int, bool) {
 }
 
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input ReadInput) (*mcp.CallToolResult, ReadOutput, error) {
+	// Accept "path" as an alias for "file_path"
+	if input.FilePath == "" {
+		input.FilePath = input.Path
+	}
 	if input.FilePath == "" {
 		return errorResult("file_path is required")
 	}
+	// Resolve relative paths against the process working directory
 	if !filepath.IsAbs(input.FilePath) {
-		return errorResult("file_path must be an absolute path")
+		abs, err := filepath.Abs(input.FilePath)
+		if err != nil {
+			return errorResult(fmt.Sprintf("cannot resolve path: %v", err))
+		}
+		input.FilePath = abs
 	}
 
 	fi, err := os.Stat(input.FilePath)
