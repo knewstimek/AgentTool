@@ -18,8 +18,11 @@ import (
 )
 
 type CopyInput struct {
-	Source      string      `json:"source" jsonschema:"Absolute path to the source file or directory,required"`
-	Destination string      `json:"destination" jsonschema:"Absolute path to the destination,required"`
+	Source      string      `json:"source,omitempty" jsonschema:"Absolute path to the source file or directory,required"`
+	Destination string      `json:"destination,omitempty" jsonschema:"Absolute path to the destination,required"`
+	// Aliases for compatibility with agents that use short names
+	Src         string      `json:"src,omitempty" jsonschema:"Alias for source"`
+	Dst         string      `json:"dst,omitempty" jsonschema:"Alias for destination"`
 	Overwrite   interface{} `json:"overwrite,omitempty" jsonschema:"Overwrite existing destination: true or false. Default: false"`
 	DryRun      interface{} `json:"dry_run,omitempty" jsonschema:"Preview what would be copied without doing it: true or false. Default: false"`
 }
@@ -33,6 +36,14 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input CopyInput) (*mc
 	// Some MCP clients (e.g. Claude Code) pass boolean parameters as strings.
 	overwrite := common.FlexBool(input.Overwrite)
 	dryRun := common.FlexBool(input.DryRun)
+
+	// Merge short-name aliases (src/dst) for agents that use them
+	if input.Source == "" && input.Src != "" {
+		input.Source = input.Src
+	}
+	if input.Destination == "" && input.Dst != "" {
+		input.Destination = input.Dst
+	}
 
 	if input.Source == "" || input.Destination == "" {
 		return errorResult("both source and destination are required")

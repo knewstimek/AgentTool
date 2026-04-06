@@ -15,8 +15,11 @@ import (
 const maxDiffLines = 50000
 
 type DiffInput struct {
-	FileA        string `json:"file_a" jsonschema:"Absolute path to the first file"`
-	FileB        string `json:"file_b" jsonschema:"Absolute path to the second file"`
+	FileA        string      `json:"file_a,omitempty" jsonschema:"Absolute path to the first file"`
+	FileB        string      `json:"file_b,omitempty" jsonschema:"Absolute path to the second file"`
+	// Aliases for compatibility
+	PathA        string      `json:"path_a,omitempty" jsonschema:"Alias for file_a"`
+	PathB        string      `json:"path_b,omitempty" jsonschema:"Alias for file_b"`
 	ContextLines interface{} `json:"context_lines,omitempty" jsonschema:"Number of context lines around changes (default 3)"`
 }
 
@@ -25,6 +28,14 @@ type DiffOutput struct {
 }
 
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input DiffInput) (*mcp.CallToolResult, DiffOutput, error) {
+	// Merge path_a/path_b aliases
+	if input.FileA == "" && input.PathA != "" {
+		input.FileA = input.PathA
+	}
+	if input.FileB == "" && input.PathB != "" {
+		input.FileB = input.PathB
+	}
+
 	if input.FileA == "" || input.FileB == "" {
 		return errorResult("file_a and file_b are required")
 	}

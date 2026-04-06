@@ -13,9 +13,14 @@ import (
 )
 
 type RenameInput struct {
-	OldPath string `json:"old_path" jsonschema:"Absolute path to the file or directory to rename"`
-	NewPath string `json:"new_path" jsonschema:"Absolute path for the new name/location"`
-	DryRun  interface{} `json:"dry_run,omitempty" jsonschema:"Preview rename without actually moving the file: true or false. Default: false"`
+	OldPath string      `json:"old_path,omitempty" jsonschema:"Absolute path to the file or directory to rename"`
+	NewPath string      `json:"new_path,omitempty" jsonschema:"Absolute path for the new name/location"`
+	// Aliases for compatibility with agents that use different conventions
+	Source string      `json:"source,omitempty" jsonschema:"Alias for old_path"`
+	Destination string `json:"destination,omitempty" jsonschema:"Alias for new_path"`
+	From   string      `json:"from,omitempty" jsonschema:"Alias for old_path"`
+	To     string      `json:"to,omitempty" jsonschema:"Alias for new_path"`
+	DryRun interface{} `json:"dry_run,omitempty" jsonschema:"Preview rename without actually moving the file: true or false. Default: false"`
 }
 
 type RenameOutput struct {
@@ -23,6 +28,22 @@ type RenameOutput struct {
 }
 
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input RenameInput) (*mcp.CallToolResult, RenameOutput, error) {
+	// Merge aliases into canonical fields
+	if input.OldPath == "" {
+		if input.Source != "" {
+			input.OldPath = input.Source
+		} else if input.From != "" {
+			input.OldPath = input.From
+		}
+	}
+	if input.NewPath == "" {
+		if input.Destination != "" {
+			input.NewPath = input.Destination
+		} else if input.To != "" {
+			input.NewPath = input.To
+		}
+	}
+
 	if input.OldPath == "" || input.NewPath == "" {
 		return errorResult("both old_path and new_path are required")
 	}
