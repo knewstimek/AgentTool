@@ -17,7 +17,8 @@ import (
 )
 
 type BackupInput struct {
-	Source       string   `json:"source" jsonschema:"Absolute path to the directory to backup"`
+	Source       string   `json:"source,omitempty" jsonschema:"Absolute path to the directory to backup"`
+	Path         string   `json:"path,omitempty" jsonschema:"Alias for source"`
 	OutputDir    string   `json:"output_dir,omitempty" jsonschema:"Absolute path to the backup output directory. Default: ./backups/"`
 	Excludes     []string `json:"excludes,omitempty" jsonschema:"Glob patterns to exclude (e.g. node_modules, *.log, .git)"`
 	ExcludesFile string   `json:"excludes_file,omitempty" jsonschema:"Absolute path to a file containing exclude patterns (one per line). Lines starting with # are comments. Patterns are appended to excludes list"`
@@ -43,6 +44,11 @@ var defaultExcludes = []string{
 }
 
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input BackupInput) (*mcp.CallToolResult, BackupOutput, error) {
+	// Merge "path" alias
+	if input.Source == "" && input.Path != "" {
+		input.Source = input.Path
+	}
+
 	if input.Source == "" {
 		return errorResult("source is required")
 	}

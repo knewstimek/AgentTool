@@ -39,6 +39,9 @@ type SFTPInput struct {
 	// File paths
 	LocalPath  string `json:"local_path,omitempty" jsonschema:"Local file path (for upload/download)"`
 	RemotePath string `json:"remote_path,omitempty" jsonschema:"Remote file/directory path"`
+	// Aliases for compatibility
+	Local  string `json:"local,omitempty" jsonschema:"Alias for local_path"`
+	Remote string `json:"remote,omitempty" jsonschema:"Alias for remote_path"`
 
 	// Operation-specific
 	Recursive  interface{} `json:"recursive,omitempty" jsonschema:"Recursive operation (mkdir: create parents, rm: remove directory tree): true or false. Default: false"`
@@ -59,6 +62,14 @@ var validOperations = map[string]bool{
 }
 
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input SFTPInput) (*mcp.CallToolResult, SFTPOutput, error) {
+	// Merge local/remote aliases
+	if input.LocalPath == "" && input.Local != "" {
+		input.LocalPath = input.Local
+	}
+	if input.RemotePath == "" && input.Remote != "" {
+		input.RemotePath = input.Remote
+	}
+
 	// SSRF policy: cloud metadata always blocked. Private IPs allowed by default
 	// (configurable via set_config allow_ssh_private). Warning shown on every
 	// private IP access to help detect prompt injection attacks.
