@@ -14,11 +14,12 @@ import (
 )
 
 type SlocInput struct {
-	Path       string `json:"path" jsonschema:"Absolute path to a file or directory to count,required"`
+	Path       string `json:"path,omitempty" jsonschema:"Absolute path to a file or directory to count,required"`
+	FilePath   string `json:"file_path,omitempty" jsonschema:"Alias for path"`
 	Glob       string `json:"glob,omitempty" jsonschema:"Glob pattern to filter files when path is a directory (e.g. *.go, *.py). Default: all recognized source files"`
 	MaxDepth   int    `json:"max_depth,omitempty" jsonschema:"Maximum directory depth to traverse (0 = unlimited). Default: 0"`
 	ShowFiles  *bool  `json:"show_files,omitempty" jsonschema:"Show per-file breakdown. Default: true for <=50 files, false otherwise"`
-	SkipBlank  bool   `json:"skip_blank" jsonschema:"Exclude blank lines from count. Default: false"`
+	SkipBlank  interface{} `json:"skip_blank,omitempty" jsonschema:"Exclude blank lines from count: true or false. Default: false"`
 }
 
 type SlocOutput struct {
@@ -129,6 +130,9 @@ type langStat struct {
 
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input SlocInput) (*mcp.CallToolResult, SlocOutput, error) {
 	if input.Path == "" {
+		input.Path = input.FilePath
+	}
+	if input.Path == "" {
 		return errorResult("path is required")
 	}
 	if !filepath.IsAbs(input.Path) {
@@ -144,10 +148,12 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input SlocInput) (*mc
 		return errorResult(fmt.Sprintf("cannot access path: %v", err))
 	}
 
+	skipBlank := common.FlexBool(input.SkipBlank)
+
 	var files []fileStat
 
 	if info.IsDir() {
-		files, err = walkDir(cleaned, input.Glob, input.MaxDepth, input.SkipBlank)
+		files, err = walkDir(cleaned, input.Glob, input.MaxDepth, skipBlank)
 		if err != nil {
 			return errorResult(fmt.Sprintf("walk error: %v", err))
 		}
@@ -220,7 +226,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input SlocInput) (*mc
 					rel = r
 				}
 			}
-			if input.SkipBlank {
+			if skipBlank {
 				sb.WriteString(fmt.Sprintf("  %6d  %s  (%s)\n", f.lines-f.blank, filepath.ToSlash(rel), f.lang))
 			} else {
 				sb.WriteString(fmt.Sprintf("  %6d  %s  (%s)\n", f.lines, filepath.ToSlash(rel), f.lang))
@@ -231,40 +237,40 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input SlocInput) (*mc
 
 	// Language summary table
 	sb.WriteString("Language          Files    Lines")
-	if !input.SkipBlank {
+	if !skipBlank {
 		sb.WriteString("    Blank")
 	}
 	sb.WriteString("\n")
 	sb.WriteString("────────────────  ─────  ───────")
-	if !input.SkipBlank {
+	if !skipBlank {
 		sb.WriteString("  ───────")
 	}
 	sb.WriteString("\n")
 
 	for _, e := range sorted {
 		displayLines := e.stat.lines
-		if input.SkipBlank {
+		if skipBlank {
 			displayLines = e.stat.lines - e.stat.blank
 		}
 		line := fmt.Sprintf("%-16s  %5d  %7d", e.name, e.stat.files, displayLines)
-		if !input.SkipBlank {
+		if !skipBlank {
 			line += fmt.Sprintf("  %7d", e.stat.blank)
 		}
 		sb.WriteString(line + "\n")
 	}
 
 	sb.WriteString("────────────────  ─────  ───────")
-	if !input.SkipBlank {
+	if !skipBlank {
 		sb.WriteString("  ───────")
 	}
 	sb.WriteString("\n")
 
 	displayTotal := totalLines
-	if input.SkipBlank {
+	if skipBlank {
 		displayTotal = totalLines - totalBlank
 	}
 	totalLine := fmt.Sprintf("%-16s  %5d  %7d", "TOTAL", len(files), displayTotal)
-	if !input.SkipBlank {
+	if !skipBlank {
 		totalLine += fmt.Sprintf("  %7d", totalBlank)
 	}
 	sb.WriteString(totalLine + "\n")

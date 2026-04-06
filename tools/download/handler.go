@@ -27,12 +27,12 @@ type DownloadInput struct {
 	URL        string            `json:"url" jsonschema:"URL of the file to download,required"`
 	OutputPath string            `json:"output_path" jsonschema:"Absolute path to save the downloaded file,required"`
 	Headers    map[string]string `json:"headers,omitempty" jsonschema:"Custom HTTP headers (e.g. User-Agent, Referer, Authorization)"`
-	Overwrite  bool              `json:"overwrite,omitempty" jsonschema:"Overwrite existing file. Default: false"`
+	Overwrite  interface{}       `json:"overwrite,omitempty" jsonschema:"Overwrite existing file: true or false. Default: false"`
 	TimeoutSec int              `json:"timeout_sec,omitempty" jsonschema:"Request timeout in seconds. Default: 60, Max: 600"`
 	MaxSizeMB  int               `json:"max_size_mb,omitempty" jsonschema:"Maximum download size in MB. Default: 100, Max: 2048"`
 	ProxyURL   string            `json:"proxy_url,omitempty" jsonschema:"HTTP or SOCKS5 proxy URL (e.g. http://proxy:8080, socks5://proxy:1080)"`
-	NoDoH      bool              `json:"no_doh,omitempty" jsonschema:"Disable DNS over HTTPS. Default: false (DoH enabled)"`
-	NoECH      bool              `json:"no_ech,omitempty" jsonschema:"Disable Encrypted Client Hello. Default: false (ECH enabled)"`
+	NoDoH      interface{}       `json:"no_doh,omitempty" jsonschema:"Disable DNS over HTTPS: true or false. Default: false (DoH enabled)"`
+	NoECH      interface{}       `json:"no_ech,omitempty" jsonschema:"Disable Encrypted Client Hello: true or false. Default: false (ECH enabled)"`
 }
 
 type DownloadOutput struct {
@@ -68,7 +68,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input DownloadInput) 
 	}
 
 	// Check if file exists
-	if !input.Overwrite {
+	if !common.FlexBool(input.Overwrite) {
 		if _, err := os.Stat(input.OutputPath); err == nil {
 			return errorResult(fmt.Sprintf("file already exists: %s (use overwrite=true to replace)", input.OutputPath))
 		}
@@ -89,12 +89,15 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input DownloadInput) 
 	}
 	maxBytes := int64(input.MaxSizeMB) * 1024 * 1024
 
+	noDoH := common.FlexBool(input.NoDoH)
+	noECH := common.FlexBool(input.NoECH)
+
 	// Create HTTP client
 	client, err := common.NewHTTPClient(common.HTTPClientConfig{
 		TimeoutSec: input.TimeoutSec,
 		ProxyURL:   input.ProxyURL,
-		EnableDoH:  !input.NoDoH && common.GetEnableDoH(),
-		EnableECH:  !input.NoECH && common.GetEnableECH(),
+		EnableDoH:  !noDoH && common.GetEnableDoH(),
+		EnableECH:  !noECH && common.GetEnableECH(),
 	})
 	if err != nil {
 		return errorResult(fmt.Sprintf("client setup failed: %v", err))
@@ -120,7 +123,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input DownloadInput) 
 	}
 
 	// Execute with ECH support
-	resp, err := common.DoRequestWithECH(ctx, client, httpReq, !input.NoECH && common.GetEnableECH())
+	resp, err := common.DoRequestWithECH(ctx, client, httpReq, !noECH && common.GetEnableECH())
 	if err != nil {
 		msg := fmt.Sprintf("request failed: %v", err)
 		if ssrfWarning != "" {

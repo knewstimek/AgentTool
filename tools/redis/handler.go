@@ -45,7 +45,7 @@ type RedisInput struct {
 	Command    string   `json:"command" jsonschema:"Redis command (e.g. GET, SET, HGETALL),required"`
 	Args       []string `json:"args,omitempty" jsonschema:"Command arguments"`
 	TimeoutSec int      `json:"timeout_sec,omitempty" jsonschema:"Command timeout in seconds. Default: 30, Max: 120"`
-	TLS        bool     `json:"tls,omitempty" jsonschema:"Use TLS encryption. Default: false"`
+	TLS        interface{} `json:"tls,omitempty" jsonschema:"Use TLS encryption: true or false. Default: false"`
 }
 
 type RedisOutput struct {
@@ -107,7 +107,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input RedisInput) (*m
 		WriteTimeout: timeout,
 	}
 
-	if input.TLS {
+	if common.FlexBool(input.TLS) {
 		opts.TLSConfig = &tls.Config{
 			MinVersion: tls.VersionTLS12,
 		}

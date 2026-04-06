@@ -15,11 +15,12 @@ import (
 
 // EditInput is the input parameter for the Edit tool.
 type EditInput struct {
-	FilePath     string `json:"file_path" jsonschema:"Absolute path to the file to edit"`
+	FilePath     string `json:"file_path,omitempty" jsonschema:"Absolute path to the file to edit"`
+	Path         string `json:"path,omitempty" jsonschema:"Alias for file_path"`
 	OldString    string `json:"old_string" jsonschema:"Exact text to find in the file"`
 	NewString    string `json:"new_string" jsonschema:"Replacement text (must differ from old_string)"`
-	ReplaceAll   bool   `json:"replace_all,omitempty" jsonschema:"Replace all occurrences instead of just the first (default false)"`
-	DryRun       bool   `json:"dry_run,omitempty" jsonschema:"Preview changes without modifying the file (default false)"`
+	ReplaceAll   interface{} `json:"replace_all,omitempty" jsonschema:"Replace all occurrences instead of just the first: true or false. Default: false"`
+	DryRun       interface{} `json:"dry_run,omitempty" jsonschema:"Preview changes without modifying the file: true or false. Default: false"`
 	IndentStyle  string `json:"indent_style,omitempty" jsonschema:"Override indentation style. Values: tabs or spaces-N (e.g. spaces-4). Empty = auto-detect (default)"`
 	ExpectedHash string `json:"expected_hash,omitempty" jsonschema:"Optional SHA-256 hash of the file. If provided and mismatched, edit is rejected (optimistic concurrency)."`
 }
@@ -32,6 +33,9 @@ type EditOutput struct {
 // Handle is the MCP handler for the Edit tool.
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input EditInput) (*mcp.CallToolResult, EditOutput, error) {
 	// Input validation
+	if input.FilePath == "" {
+		input.FilePath = input.Path
+	}
 	if input.FilePath == "" {
 		return errorResult("file_path is required")
 	}
@@ -87,13 +91,13 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input EditInput) (*mc
 
 	// Execute replacement (when indent_style is explicitly specified, new_string is also force-converted to fileStyle)
 	forceStyle := input.IndentStyle != ""
-	result := Replace(content, input.OldString, input.NewString, input.ReplaceAll, fileStyle, forceStyle)
+	result := Replace(content, input.OldString, input.NewString, common.FlexBool(input.ReplaceAll), fileStyle, forceStyle)
 	if !result.Applied {
 		return errorResult(result.Message)
 	}
 
 	// If dry-run, return preview without writing
-	if input.DryRun {
+	if common.FlexBool(input.DryRun) {
 		preview := dryRunPreview(content, result.Content, input.FilePath)
 		msg := fmt.Sprintf("[DRY RUN] would %s (%s, encoding=%s)\n\n%s", result.Message, input.FilePath, encInfo.Charset, preview)
 		return &mcp.CallToolResult{

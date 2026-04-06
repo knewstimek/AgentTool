@@ -21,7 +21,7 @@ type BackupInput struct {
 	OutputDir    string   `json:"output_dir,omitempty" jsonschema:"Absolute path to the backup output directory. Default: ./backups/"`
 	Excludes     []string `json:"excludes,omitempty" jsonschema:"Glob patterns to exclude (e.g. node_modules, *.log, .git)"`
 	ExcludesFile string   `json:"excludes_file,omitempty" jsonschema:"Absolute path to a file containing exclude patterns (one per line). Lines starting with # are comments. Patterns are appended to excludes list"`
-	DryRun       bool     `json:"dry_run,omitempty" jsonschema:"Preview backup without creating archive. Shows summary with directory counts, exclude pattern matches, and largest files (default false)"`
+	DryRun       interface{} `json:"dry_run,omitempty" jsonschema:"Preview backup without creating archive: true or false. Shows summary with directory counts, exclude pattern matches, and largest files. Default: false"`
 }
 
 type BackupOutput struct {
@@ -94,7 +94,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input BackupInput) (*
 	// Normalize backup output directory to prevent infinite loop
 	absOutputDir, _ := filepath.Abs(outputDir)
 
-	if input.DryRun {
+	if common.FlexBool(input.DryRun) {
 		return dryRun(input.Source, excludes, absOutputDir, archivePath)
 	}
 

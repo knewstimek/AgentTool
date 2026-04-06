@@ -18,10 +18,10 @@ import (
 )
 
 type CopyInput struct {
-	Source      string `json:"source" jsonschema:"Absolute path to the source file or directory,required"`
-	Destination string `json:"destination" jsonschema:"Absolute path to the destination,required"`
-	Overwrite   bool   `json:"overwrite,omitempty" jsonschema:"Overwrite existing destination. Default: false"`
-	DryRun      bool   `json:"dry_run,omitempty" jsonschema:"Preview what would be copied without doing it (default false)"`
+	Source      string      `json:"source" jsonschema:"Absolute path to the source file or directory,required"`
+	Destination string      `json:"destination" jsonschema:"Absolute path to the destination,required"`
+	Overwrite   interface{} `json:"overwrite,omitempty" jsonschema:"Overwrite existing destination: true or false. Default: false"`
+	DryRun      interface{} `json:"dry_run,omitempty" jsonschema:"Preview what would be copied without doing it: true or false. Default: false"`
 }
 
 type CopyOutput struct {
@@ -29,6 +29,11 @@ type CopyOutput struct {
 }
 
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input CopyInput) (*mcp.CallToolResult, CopyOutput, error) {
+	// Accept both JSON boolean and string "true"/"false" for overwrite/dry_run.
+	// Some MCP clients (e.g. Claude Code) pass boolean parameters as strings.
+	overwrite := common.FlexBool(input.Overwrite)
+	dryRun := common.FlexBool(input.DryRun)
+
 	if input.Source == "" || input.Destination == "" {
 		return errorResult("both source and destination are required")
 	}
@@ -74,16 +79,16 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input CopyInput) (*mc
 	}
 
 	// Check destination
-	if !input.Overwrite {
+	if !overwrite {
 		if _, err := os.Stat(dstCleaned); err == nil {
 			return errorResult(fmt.Sprintf("destination already exists: %s (use overwrite=true to replace)", dstCleaned))
 		}
 	}
 
 	if srcInfo.IsDir() {
-		return handleDirCopy(srcCleaned, dstCleaned, input.DryRun, input.Overwrite)
+		return handleDirCopy(srcCleaned, dstCleaned, dryRun, overwrite)
 	}
-	return handleFileCopy(srcCleaned, dstCleaned, srcInfo, input.DryRun)
+	return handleFileCopy(srcCleaned, dstCleaned, srcInfo, dryRun)
 }
 
 // handleDirCopy copies a directory recursively.
@@ -333,6 +338,7 @@ Use dry_run=true to preview what would be copied without doing it.
 On Windows, handles locked files (running executables, loaded DLLs) by renaming the locked file aside before replacing it. Use overwrite=true when updating a running binary.`,
 	}, Handle)
 }
+
 
 func errorResult(msg string) (*mcp.CallToolResult, CopyOutput, error) {
 	return &mcp.CallToolResult{

@@ -141,6 +141,16 @@ ALWAYS use agent-tool MCP tools (mcp__agent-tool__*) instead of built-in file to
 ```
 ALWAYS use agent-tool MCP tools (mcp__agent-tool__*) instead of built-in file tools.
 ```
+
+**Hard enforcement** — deny built-in file tools at the permission level via `~/.claude/settings.json`:
+```json
+{
+  "permissions": {
+    "deny": ["Read", "Edit", "MultiEdit", "Write", "Glob", "Grep"]
+  }
+}
+```
+This makes Claude Code's built-in file tools unavailable, so the agent is forced to use agent-tool. Recommended when you want strict enforcement without relying on prompt instructions.
 </details>
 
 <details>

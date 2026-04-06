@@ -25,6 +25,7 @@ import (
 	"agent-tool/tools/diff"
 	"agent-tool/tools/dnslookup"
 	edit "agent-tool/tools/edit"
+	"agent-tool/tools/multiedit"
 	"agent-tool/tools/envvar"
 	"agent-tool/tools/externalip"
 	"agent-tool/tools/fileinfo"
@@ -164,6 +165,7 @@ Tool groups: file | system (bash, procexec, proclist, prockill, sysinfo, envvar,
 	)
 
 	edit.Register(server)
+	multiedit.Register(server)
 	read.Register(server)
 	write.Register(server)
 	grep.Register(server)

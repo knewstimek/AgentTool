@@ -141,6 +141,16 @@ ALWAYS use agent-tool MCP tools (mcp__agent-tool__*) instead of built-in file to
 ```
 ALWAYS use agent-tool MCP tools (mcp__agent-tool__*) instead of built-in file tools.
 ```
+
+**강제 적용** — `~/.claude/settings.json`으로 내장 도구를 권한 레벨에서 차단:
+```json
+{
+  "permissions": {
+    "deny": ["Read", "Edit", "MultiEdit", "Write", "Glob", "Grep"]
+  }
+}
+```
+Claude Code의 내장 파일 도구를 아예 사용 불가 상태로 만들어 에이전트가 agent-tool을 쓰도록 강제합니다. 프롬프트 지시에 의존하지 않고 확실히 적용하고 싶을 때 권장.
 </details>
 
 <details>

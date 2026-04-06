@@ -16,7 +16,8 @@ import (
 )
 
 type TOMLQueryInput struct {
-	FilePath string `json:"file_path" jsonschema:"Absolute path to the TOML file"`
+	FilePath string `json:"file_path,omitempty" jsonschema:"Absolute path to the TOML file"`
+	Path     string `json:"path,omitempty" jsonschema:"Alias for file_path"`
 	Query    string `json:"query" jsonschema:"Dot-notation query path (e.g. dependencies.react, tool.poetry.name, servers[0].host)"`
 }
 
@@ -25,6 +26,9 @@ type TOMLQueryOutput struct {
 }
 
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input TOMLQueryInput) (*mcp.CallToolResult, TOMLQueryOutput, error) {
+	if input.FilePath == "" {
+		input.FilePath = input.Path
+	}
 	if input.FilePath == "" {
 		return errorResult("file_path is required")
 	}

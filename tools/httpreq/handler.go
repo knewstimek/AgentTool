@@ -36,8 +36,8 @@ type HTTPReqInput struct {
 	ContentType    string            `json:"content_type,omitempty" jsonschema:"Content-Type header. Default: application/json"`
 	TimeoutSec     int               `json:"timeout_sec,omitempty" jsonschema:"Request timeout in seconds. Default: 30, Max: 120"`
 	ProxyURL       string            `json:"proxy_url,omitempty" jsonschema:"HTTP or SOCKS5 proxy URL (e.g. http://proxy:8080, socks5://proxy:1080)"`
-	NoDoH          bool              `json:"no_doh,omitempty" jsonschema:"Disable DNS over HTTPS. Default: false (DoH enabled)"`
-	NoECH          bool              `json:"no_ech,omitempty" jsonschema:"Disable Encrypted Client Hello. Default: false (ECH enabled)"`
+	NoDoH          interface{}       `json:"no_doh,omitempty" jsonschema:"Disable DNS over HTTPS: true or false. Default: false (DoH enabled)"`
+	NoECH          interface{}       `json:"no_ech,omitempty" jsonschema:"Disable Encrypted Client Hello: true or false. Default: false (ECH enabled)"`
 	MaxResponseKB  int               `json:"max_response_kb,omitempty" jsonschema:"Maximum response body size in KB. Default: 512, Max: 2048"`
 }
 
@@ -102,12 +102,15 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input HTTPReqInput) (
 	}
 	maxRespBytes := int64(input.MaxResponseKB) * 1024
 
+	noDoH := common.FlexBool(input.NoDoH)
+	noECH := common.FlexBool(input.NoECH)
+
 	// Create HTTP client
 	client, err := common.NewHTTPClient(common.HTTPClientConfig{
 		TimeoutSec: input.TimeoutSec,
 		ProxyURL:   input.ProxyURL,
-		EnableDoH:  !input.NoDoH && common.GetEnableDoH(),
-		EnableECH:  !input.NoECH && common.GetEnableECH(),
+		EnableDoH:  !noDoH && common.GetEnableDoH(),
+		EnableECH:  !noECH && common.GetEnableECH(),
 	})
 	if err != nil {
 		return errorResult(fmt.Sprintf("client setup failed: %v", err))
@@ -141,7 +144,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input HTTPReqInput) (
 	}
 
 	// Execute
-	resp, err := common.DoRequestWithECH(ctx, client, httpReq, !input.NoECH && common.GetEnableECH())
+	resp, err := common.DoRequestWithECH(ctx, client, httpReq, !noECH && common.GetEnableECH())
 	if err != nil {
 		msg := fmt.Sprintf("request failed: %v", err)
 		if ssrfWarning != "" {

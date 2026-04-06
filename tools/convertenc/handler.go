@@ -14,7 +14,8 @@ import (
 )
 
 type ConvertInput struct {
-	FilePath   string `json:"file_path" jsonschema:"Absolute path to the file to convert"`
+	FilePath   string `json:"file_path,omitempty" jsonschema:"Absolute path to the file to convert"`
+	Path       string `json:"path,omitempty" jsonschema:"Alias for file_path"`
 	ToEncoding string `json:"to_encoding" jsonschema:"Target encoding. Examples: UTF-8, UTF-8-BOM, EUC-KR, Shift_JIS, ISO-8859-1"`
 }
 
@@ -24,6 +25,9 @@ type ConvertOutput struct {
 
 // Handle converts a file's encoding.
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input ConvertInput) (*mcp.CallToolResult, ConvertOutput, error) {
+	if input.FilePath == "" {
+		input.FilePath = input.Path
+	}
 	if input.FilePath == "" {
 		return errorResult("file_path is required")
 	}

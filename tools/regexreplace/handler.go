@@ -23,10 +23,11 @@ var errMaxFiles = errors.New("max files reached")
 type RegexReplaceInput struct {
 	Pattern     string `json:"pattern" jsonschema:"Regular expression pattern to search for"`
 	Replacement string `json:"replacement" jsonschema:"Replacement string. Supports $1, $2 capture groups"`
-	Path        string `json:"path" jsonschema:"File or directory to process (absolute path)"`
+	Path        string `json:"path,omitempty" jsonschema:"File or directory to process (absolute path)"`
+	FilePath    string `json:"file_path,omitempty" jsonschema:"Alias for path"`
 	Glob        string `json:"glob,omitempty" jsonschema:"Glob pattern to filter files when path is a directory (e.g. *.go). Only used when path is a directory"`
-	IgnoreCase  bool   `json:"ignore_case,omitempty" jsonschema:"Case insensitive search (default false)"`
-	DryRun      bool   `json:"dry_run,omitempty" jsonschema:"Preview changes without modifying files (default false)"`
+	IgnoreCase  interface{} `json:"ignore_case,omitempty" jsonschema:"Case insensitive search: true or false. Default: false"`
+	DryRun      interface{} `json:"dry_run,omitempty" jsonschema:"Preview changes without modifying files: true or false. Default: false"`
 	MaxFiles    int    `json:"max_files,omitempty" jsonschema:"Maximum number of files to process in directory mode. Default: 100"`
 }
 
@@ -36,6 +37,12 @@ type RegexReplaceOutput struct {
 }
 
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input RegexReplaceInput) (*mcp.CallToolResult, RegexReplaceOutput, error) {
+	dryRun := common.FlexBool(input.DryRun)
+	ignoreCase := common.FlexBool(input.IgnoreCase)
+
+	if input.Path == "" {
+		input.Path = input.FilePath
+	}
 	if input.Pattern == "" {
 		return errorResult("pattern is required")
 	}
@@ -47,7 +54,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input RegexReplaceInp
 	}
 
 	flags := ""
-	if input.IgnoreCase {
+	if ignoreCase {
 		flags = "(?i)"
 	}
 	re, err := regexp.Compile(flags + input.Pattern)
@@ -71,9 +78,9 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input RegexReplaceInp
 	var results []fileResult
 
 	if fi.IsDir() {
-		results, err = processDir(input.Path, input.Glob, re, input.Replacement, input.DryRun, maxFiles)
+		results, err = processDir(input.Path, input.Glob, re, input.Replacement, dryRun, maxFiles)
 	} else {
-		result, singleErr := processFile(input.Path, re, input.Replacement, input.DryRun)
+		result, singleErr := processFile(input.Path, re, input.Replacement, dryRun)
 		if singleErr != nil {
 			return errorResult(fmt.Sprintf("failed to process file: %v", singleErr))
 		}
@@ -94,7 +101,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input RegexReplaceInp
 	for _, r := range results {
 		filesChanged++
 		totalReplacements += r.count
-		if input.DryRun {
+		if dryRun {
 			sb.WriteString(fmt.Sprintf("[DRY RUN] %s: %d replacement(s)\n", r.path, r.count))
 			// Show up to 3 preview lines
 			for i, preview := range r.previews {
@@ -113,7 +120,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input RegexReplaceInp
 		sb.WriteString("No matches found")
 	} else {
 		action := "Changed"
-		if input.DryRun {
+		if dryRun {
 			action = "Would change"
 		}
 		sb.WriteString(fmt.Sprintf("\n%s %d file(s), %d total replacement(s)", action, filesChanged, totalReplacements))

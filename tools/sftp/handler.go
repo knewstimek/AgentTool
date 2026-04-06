@@ -22,7 +22,7 @@ type SFTPInput struct {
 	Password     string `json:"password,omitempty" jsonschema:"Password for authentication"`
 	KeyFile      string `json:"key_file,omitempty" jsonschema:"Path to SSH private key file (e.g. ~/.ssh/id_rsa)"`
 	Passphrase   string `json:"passphrase,omitempty" jsonschema:"Passphrase for encrypted private key"`
-	UseAgent     bool   `json:"use_agent,omitempty" jsonschema:"Use SSH agent for authentication. Default: true if no other auth method specified"`
+	UseAgent     interface{} `json:"use_agent,omitempty" jsonschema:"Use SSH agent for authentication: true or false. Default: true if no other auth method specified"`
 	HostKeyCheck string `json:"host_key_check,omitempty" jsonschema:"Host key verification: strict, tofu (default), none"`
 
 	// Proxy Jump
@@ -41,10 +41,10 @@ type SFTPInput struct {
 	RemotePath string `json:"remote_path,omitempty" jsonschema:"Remote file/directory path"`
 
 	// Operation-specific
-	Recursive  bool   `json:"recursive,omitempty" jsonschema:"Recursive operation (mkdir: create parents, rm: remove directory tree)"`
+	Recursive  interface{} `json:"recursive,omitempty" jsonschema:"Recursive operation (mkdir: create parents, rm: remove directory tree): true or false. Default: false"`
 	Mode       string `json:"mode,omitempty" jsonschema:"File permission mode in octal (e.g. 0755). Used by chmod"`
 	NewPath    string `json:"new_path,omitempty" jsonschema:"New remote path (for rename operation)"`
-	Overwrite  bool   `json:"overwrite,omitempty" jsonschema:"Overwrite existing file on upload/download. Default: false"`
+	Overwrite  interface{} `json:"overwrite,omitempty" jsonschema:"Overwrite existing file on upload/download: true or false. Default: false"`
 	TransferID string `json:"transfer_id,omitempty" jsonschema:"Transfer ID for status/cancel operations (returned by upload_async/download_async)"`
 }
 

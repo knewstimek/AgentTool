@@ -18,9 +18,10 @@ import (
 const maxPatchSize = 10 * 1024 * 1024 // 10MB
 
 type PatchInput struct {
-	FilePath string `json:"file_path" jsonschema:"Absolute path to the file to patch"`
+	FilePath string `json:"file_path,omitempty" jsonschema:"Absolute path to the file to patch"`
+	Path     string `json:"path,omitempty" jsonschema:"Alias for file_path"`
 	Patch    string `json:"patch" jsonschema:"Unified diff text (output of the diff tool)"`
-	DryRun   bool   `json:"dry_run,omitempty" jsonschema:"Preview patch result without modifying the file (default false)"`
+	DryRun   interface{} `json:"dry_run,omitempty" jsonschema:"Preview patch result without modifying the file: true or false. Default: false"`
 }
 
 type PatchOutput struct {
@@ -43,6 +44,9 @@ type hunkLine struct {
 }
 
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input PatchInput) (*mcp.CallToolResult, PatchOutput, error) {
+	if input.FilePath == "" {
+		input.FilePath = input.Path
+	}
 	if input.FilePath == "" {
 		return errorResult("file_path is required")
 	}
@@ -157,7 +161,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input PatchInput) (*m
 		output = strings.ReplaceAll(output, "\n", "\r\n")
 	}
 
-	if input.DryRun {
+	if common.FlexBool(input.DryRun) {
 		// Calculate line count change
 		origLineCount := len(strings.Split(content, "\n"))
 		newLineCount := len(lines)

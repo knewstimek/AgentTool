@@ -13,7 +13,8 @@ import (
 )
 
 type WriteInput struct {
-	FilePath string `json:"file_path" jsonschema:"Absolute path to the file to write"`
+	FilePath string `json:"file_path,omitempty" jsonschema:"Absolute path to the file to write"`
+	Path     string `json:"path,omitempty" jsonschema:"Alias for file_path"`
 	Content  string `json:"content" jsonschema:"Content to write to the file"`
 }
 
@@ -22,6 +23,9 @@ type WriteOutput struct {
 }
 
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input WriteInput) (*mcp.CallToolResult, WriteOutput, error) {
+	if input.FilePath == "" {
+		input.FilePath = input.Path
+	}
 	if input.FilePath == "" {
 		return errorResult("file_path is required")
 	}

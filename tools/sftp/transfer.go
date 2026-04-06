@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"agent-tool/common"
 	"agent-tool/tools/ssh"
 
 	gosftp "github.com/pkg/sftp"
@@ -282,7 +283,7 @@ func runAsyncUpload(ctx context.Context, entry *transferEntry, input SFTPInput) 
 	defer sftpClient.Close()
 
 	// Check overwrite
-	if !input.Overwrite {
+	if !common.FlexBool(input.Overwrite) {
 		if _, err := sftpClient.Stat(input.RemotePath); err == nil {
 			entry.mu.Lock()
 			entry.Status = "failed"
@@ -369,7 +370,7 @@ func runAsyncDownload(ctx context.Context, entry *transferEntry, input SFTPInput
 	defer sftpClient.Close()
 
 	// Check overwrite
-	if !input.Overwrite {
+	if !common.FlexBool(input.Overwrite) {
 		if _, err := os.Stat(input.LocalPath); err == nil {
 			entry.mu.Lock()
 			entry.Status = "failed"

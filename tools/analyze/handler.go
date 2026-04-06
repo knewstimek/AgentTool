@@ -15,13 +15,14 @@ import (
 // AnalyzeInput defines parameters for the static binary analysis tool.
 type AnalyzeInput struct {
 	Operation string `json:"operation" jsonschema:"Operation: disassemble, pe_info, elf_info, macho_info, strings, hexdump, pattern_search, entropy, bin_diff, resource_info, imphash, rich_header, overlay_detect, dwarf_info, xref, function_at, call_graph, follow_ptr, rtti_dump, struct_layout, vtable_scan,required"`
-	FilePath  string `json:"file_path" jsonschema:"Absolute path to the binary file,required"`
+	FilePath  string `json:"file_path,omitempty" jsonschema:"Absolute path to the binary file,required"`
+	Path      string `json:"path,omitempty" jsonschema:"Alias for file_path"`
 
 	// disassemble / function_at / follow_ptr parameters
 	Offset    int    `json:"offset,omitempty" jsonschema:"Byte offset to start from. Default: 0"`
 	VA        string `json:"va,omitempty" jsonschema:"Virtual address for PE files (hex, e.g. '0x140001000'). Auto-converts to file offset. For disassemble, function_at, follow_ptr, rtti_dump, struct_layout. Preferred over offset+base_addr for PE analysis."`
 	Count     int    `json:"count,omitempty" jsonschema:"Number of instructions (disassemble) or depth (follow_ptr). Default: 50/4, Max: 600/10."`
-	StopAtRet bool   `json:"stop_at_ret,omitempty" jsonschema:"Stop disassembly at function return (RET/RETF). Confirms boundary via INT3/NOP padding or new prologue. For disassemble only."`
+	StopAtRet interface{} `json:"stop_at_ret,omitempty" jsonschema:"Stop disassembly at function return (RET/RETF). Confirms boundary via INT3/NOP padding or new prologue. For disassemble only: true or false. Default: false"`
 	Mode     int    `json:"mode,omitempty" jsonschema:"CPU mode: 32 or 64. Default: 64"`
 	BaseAddr string `json:"base_addr,omitempty" jsonschema:"Base address for display (hex string, e.g. '0x140001000'). Default: 0x0. This maps to file offset 0, so displayed address = base_addr + offset + instruction_position. For PE files, prefer 'va' parameter instead -- it auto-calculates the correct base_addr."`
 	Arch     string `json:"arch,omitempty" jsonschema:"CPU architecture: x86 (default) or arm. For disassemble"`
@@ -92,6 +93,9 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input AnalyzeInput) (
 		return errorResult(fmt.Sprintf("unknown operation: %s (available: %s)", op, allOps))
 	}
 
+	if input.FilePath == "" {
+		input.FilePath = input.Path
+	}
 	if input.FilePath == "" {
 		return errorResult("file_path is required")
 	}

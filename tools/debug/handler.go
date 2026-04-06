@@ -59,7 +59,7 @@ type DebugInput struct {
 	MemoryReference   string `json:"memory_reference,omitempty" jsonschema:"Memory reference address (for disassemble, read_memory, write_memory)"`
 	Count             int    `json:"count,omitempty" jsonschema:"Byte count (read_memory) or instruction count (disassemble)"`
 	InstructionOffset int    `json:"instruction_offset,omitempty" jsonschema:"Instruction offset relative to memory_reference (disassemble)"`
-	ResolveSymbols    bool   `json:"resolve_symbols,omitempty" jsonschema:"Resolve symbols in disassembly output"`
+	ResolveSymbols    interface{} `json:"resolve_symbols,omitempty" jsonschema:"Resolve symbols in disassembly output: true or false. Default: false"`
 	Data              string `json:"data,omitempty" jsonschema:"Base64-encoded data (write_memory)"`
 
 	// source

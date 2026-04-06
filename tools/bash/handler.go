@@ -17,7 +17,7 @@ type BashInput struct {
 	Cwd        string `json:"cwd,omitempty" jsonschema:"Initial working directory (only used when creating a new session)"`
 	SessionID  string `json:"session_id,omitempty" jsonschema:"Session identifier for persistent shell. Default: default"`
 	TimeoutSec int    `json:"timeout_sec,omitempty" jsonschema:"Command timeout in seconds (default 120, max 600)"`
-	Disconnect bool   `json:"disconnect,omitempty" jsonschema:"Close the shell session"`
+	Disconnect interface{} `json:"disconnect,omitempty" jsonschema:"Close the shell session: true or false. Default: false"`
 }
 
 type BashOutput struct {
@@ -34,7 +34,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input BashInput) (*mc
 	}
 
 	// Handle disconnect
-	if input.Disconnect {
+	if common.FlexBool(input.Disconnect) {
 		removed := pool.remove(input.SessionID)
 		msg := fmt.Sprintf("Session %q closed.", input.SessionID)
 		if !removed {

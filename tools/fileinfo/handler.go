@@ -14,7 +14,8 @@ import (
 )
 
 type FileInfoInput struct {
-	FilePath string `json:"file_path" jsonschema:"Absolute path to the file"`
+	FilePath string `json:"file_path,omitempty" jsonschema:"Absolute path to the file"`
+	Path     string `json:"path,omitempty" jsonschema:"Alias for file_path"`
 }
 
 type FileInfoOutput struct {
@@ -22,6 +23,9 @@ type FileInfoOutput struct {
 }
 
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input FileInfoInput) (*mcp.CallToolResult, FileInfoOutput, error) {
+	if input.FilePath == "" {
+		input.FilePath = input.Path
+	}
 	if input.FilePath == "" {
 		return errorResult("file_path is required")
 	}

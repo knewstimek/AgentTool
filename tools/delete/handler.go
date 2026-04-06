@@ -13,8 +13,9 @@ import (
 )
 
 type DeleteInput struct {
-	FilePath string `json:"file_path" jsonschema:"Absolute path to the file to delete"`
-	DryRun   bool   `json:"dry_run" jsonschema:"Preview deletion without actually removing the file (default false)"`
+	FilePath string `json:"file_path,omitempty" jsonschema:"Absolute path to the file to delete"`
+	Path     string `json:"path,omitempty" jsonschema:"Alias for file_path"`
+	DryRun   interface{} `json:"dry_run,omitempty" jsonschema:"Preview deletion without actually removing the file: true or false. Default: false"`
 }
 
 type DeleteOutput struct {
@@ -22,6 +23,9 @@ type DeleteOutput struct {
 }
 
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input DeleteInput) (*mcp.CallToolResult, DeleteOutput, error) {
+	if input.FilePath == "" {
+		input.FilePath = input.Path
+	}
 	if input.FilePath == "" {
 		return errorResult("file_path is required")
 	}
@@ -71,7 +75,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input DeleteInput) (*
 	}
 
 	// dry_run mode
-	if input.DryRun {
+	if common.FlexBool(input.DryRun) {
 		msg := fmt.Sprintf("[DRY RUN] would delete: %s (%d bytes)", cleaned, info.Size())
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: msg}},

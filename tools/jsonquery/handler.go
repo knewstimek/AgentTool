@@ -14,7 +14,8 @@ import (
 )
 
 type JSONQueryInput struct {
-	FilePath string `json:"file_path" jsonschema:"Absolute path to the JSON file"`
+	FilePath string `json:"file_path,omitempty" jsonschema:"Absolute path to the JSON file"`
+	Path     string `json:"path,omitempty" jsonschema:"Alias for file_path"`
 	Query    string `json:"query" jsonschema:"Dot-notation query path (e.g. dependencies.react, items[0].name, items[*].id)"`
 }
 
@@ -23,6 +24,9 @@ type JSONQueryOutput struct {
 }
 
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input JSONQueryInput) (*mcp.CallToolResult, JSONQueryOutput, error) {
+	if input.FilePath == "" {
+		input.FilePath = input.Path
+	}
 	if input.FilePath == "" {
 		return errorResult("file_path is required")
 	}

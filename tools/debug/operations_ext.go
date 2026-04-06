@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"agent-tool/common"
+
 	"github.com/google/go-dap"
 )
 
@@ -808,7 +810,7 @@ func opDisassemble(session *debugSession, input DebugInput) (string, error) {
 		MemoryReference:   input.MemoryReference,
 		InstructionOffset: input.InstructionOffset,
 		InstructionCount:  count,
-		ResolveSymbols:    input.ResolveSymbols,
+		ResolveSymbols:    common.FlexBool(input.ResolveSymbols),
 	}
 
 	resp, err := session.client.sendRequest(req, timeout)

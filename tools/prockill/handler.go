@@ -16,9 +16,9 @@ type ProcKillInput struct {
 	PID            int    `json:"pid,omitempty" jsonschema:"Process ID to kill"`
 	Port           int    `json:"port,omitempty" jsonschema:"Kill process(es) using this port number"`
 	Signal         string `json:"signal,omitempty" jsonschema:"Signal to send: kill (default), term, hup, int, stop (suspend), cont (resume). Windows uses NtSuspendProcess/NtResumeProcess for stop/cont"`
-	Tree           bool   `json:"tree,omitempty" jsonschema:"Kill the process and all its child processes (tree kill). Default: false"`
-	IncludeZombies bool   `json:"include_zombies,omitempty" jsonschema:"Linux only: send SIGCHLD to parent of zombie processes to trigger reaping. Default: false"`
-	DryRun         bool   `json:"dry_run,omitempty" jsonschema:"Preview which processes would be killed without actually killing them. Default: false"`
+	Tree           interface{} `json:"tree,omitempty" jsonschema:"Kill the process and all its child processes (tree kill): true or false. Default: false"`
+	IncludeZombies interface{} `json:"include_zombies,omitempty" jsonschema:"Linux only: send SIGCHLD to parent of zombie processes to trigger reaping: true or false. Default: false"`
+	DryRun         interface{} `json:"dry_run,omitempty" jsonschema:"Preview which processes would be killed without actually killing them: true or false. Default: false"`
 }
 
 type ProcKillOutput struct {
@@ -26,6 +26,10 @@ type ProcKillOutput struct {
 }
 
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input ProcKillInput) (*mcp.CallToolResult, ProcKillOutput, error) {
+	dryRun := common.FlexBool(input.DryRun)
+	tree := common.FlexBool(input.Tree)
+	includeZombies := common.FlexBool(input.IncludeZombies)
+
 	// 1. Validate input
 	if input.PID == 0 && input.Port == 0 {
 		return errorResult("pid or port is required")
@@ -88,7 +92,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ProcKillInput) 
 	var sb strings.Builder
 	sb.WriteString("=== Process Kill ===\n")
 
-	if input.DryRun {
+	if dryRun {
 		switch input.Signal {
 		case "stop":
 			sb.WriteString("[dry_run] Would suspend the following processes:\n\n")
@@ -109,7 +113,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ProcKillInput) 
 
 	for _, pid := range targetPIDs {
 		targets = append(targets, killTarget{pid: pid})
-		if input.Tree {
+		if tree {
 			for _, child := range getDescendants(pid) {
 				if child != pid {
 					targets = append(targets, killTarget{pid: child, isChild: true, parentID: pid})
@@ -143,7 +147,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ProcKillInput) 
 		sb.WriteString(fmt.Sprintf("  %-8d %-24s %-12s %s\n", t.pid, truncate(name, 24), mem, info))
 	}
 
-	if input.DryRun {
+	if dryRun {
 		dryVerb := "killed"
 		if input.Signal == "stop" {
 			dryVerb = "suspended"
@@ -172,7 +176,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ProcKillInput) 
 
 	isSuspendResume := input.Signal == "stop" || input.Signal == "cont"
 
-	if input.Tree && !isSuspendResume {
+	if tree && !isSuspendResume {
 		for _, pid := range targetPIDs {
 			killed, failed := killTreePlatform(pid, input.Signal)
 			for _, kpid := range killed {
@@ -184,7 +188,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ProcKillInput) 
 				failedCount++
 			}
 		}
-	} else if input.Tree && isSuspendResume {
+	} else if tree && isSuspendResume {
 		// Suspend/resume tree: apply to all descendants
 		for _, pid := range targetPIDs {
 			descendants := getDescendants(pid)
@@ -236,7 +240,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ProcKillInput) 
 	}
 
 	// 6. Zombie handling (Linux only)
-	if input.IncludeZombies {
+	if includeZombies {
 		for _, pid := range targetPIDs {
 			report := handleZombies(pid)
 			if report != "" {

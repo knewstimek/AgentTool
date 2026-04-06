@@ -17,7 +17,7 @@ import (
 type GlobInput struct {
 	Pattern       string `json:"pattern" jsonschema:"Glob pattern to match files (e.g. **/*.go or src/**/*.ts)"`
 	Path          string `json:"path,omitempty" jsonschema:"Directory to search in (absolute path). Defaults to current directory if empty"`
-	RelativePaths bool   `json:"relative_paths,omitempty" jsonschema:"Return paths relative to the search directory instead of absolute paths. Saves tokens in output. Default: false"`
+	RelativePaths interface{} `json:"relative_paths,omitempty" jsonschema:"Return paths relative to the search directory instead of absolute paths. Saves tokens in output: true or false. Default: false"`
 }
 
 type GlobOutput struct {
@@ -98,7 +98,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input GlobInput) (*mc
 
 	// Build display paths (relative or absolute)
 	displayPaths := matches
-	if input.RelativePaths && len(matches) > 0 {
+	if common.FlexBool(input.RelativePaths) && len(matches) > 0 {
 		displayPaths = make([]string, len(matches))
 		for i, m := range matches {
 			if rel, err := filepath.Rel(searchDir, m); err == nil {

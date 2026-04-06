@@ -23,8 +23,9 @@ var errMaxResults = errors.New("max results reached")
 type GrepInput struct {
 	Pattern    string `json:"pattern" jsonschema:"Regular expression pattern to search for"`
 	Path       string `json:"path,omitempty" jsonschema:"File or directory to search in (absolute path). Defaults to current directory"`
+	FilePath   string `json:"file_path,omitempty" jsonschema:"Alias for path"`
 	Glob       string `json:"glob,omitempty" jsonschema:"Glob pattern to filter files (e.g. *.go). Only used when path is a directory"`
-	IgnoreCase bool   `json:"ignore_case,omitempty" jsonschema:"Case insensitive search (default false)"`
+	IgnoreCase interface{} `json:"ignore_case,omitempty" jsonschema:"Case insensitive search: true or false. Default: false"`
 	MaxResults int    `json:"max_results,omitempty" jsonschema:"Maximum number of matching lines/files to return. Default: 100"`
 	OutputMode string `json:"output_mode,omitempty" jsonschema:"Output mode: 'content' (matching lines with path:line:text, default), 'files_with_matches' (file paths only), 'count' (match count per file)"`
 	Context    int    `json:"context,omitempty" jsonschema:"Lines of context before and after each match (like grep -C). Default: 0"`
@@ -46,6 +47,9 @@ type searchOpts struct {
 }
 
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input GrepInput) (*mcp.CallToolResult, GrepOutput, error) {
+	if input.Path == "" {
+		input.Path = input.FilePath
+	}
 	if input.Pattern == "" {
 		return errorResult("pattern is required")
 	}
@@ -57,7 +61,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input GrepInput) (*mc
 	}
 
 	flags := ""
-	if input.IgnoreCase {
+	if common.FlexBool(input.IgnoreCase) {
 		flags = "(?i)"
 	}
 	re, err := regexp.Compile(flags + input.Pattern)

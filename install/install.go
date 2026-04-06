@@ -413,6 +413,7 @@ var safePermissionEntries = []string{
 	"mcp__agent-tool__read",
 	"mcp__agent-tool__write",
 	"mcp__agent-tool__edit",
+	"mcp__agent-tool__multiedit",
 	"mcp__agent-tool__grep",
 	"mcp__agent-tool__glob",
 	"mcp__agent-tool__multiread",

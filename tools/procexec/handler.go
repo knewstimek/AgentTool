@@ -40,8 +40,8 @@ type ProcExecInput struct {
 	Cwd        string   `json:"cwd,omitempty" jsonschema:"Working directory (default: current directory)"`
 	Env        []string `json:"env,omitempty" jsonschema:"Environment variables in KEY=VALUE format. Inherits parent environment by default"`
 	TimeoutSec int      `json:"timeout_sec,omitempty" jsonschema:"Timeout in seconds (default 30, max 300). Ignored for background/suspended execution"`
-	Background bool     `json:"background,omitempty" jsonschema:"Start process in background and return PID immediately (default false)"`
-	Suspended  bool     `json:"suspended,omitempty" jsonschema:"Start process in suspended state. Windows: CREATE_SUSPENDED, Linux: SIGSTOP. Implies background=true (default false)"`
+	Background interface{} `json:"background,omitempty" jsonschema:"Start process in background and return PID immediately: true or false. Default: false"`
+	Suspended  interface{} `json:"suspended,omitempty" jsonschema:"Start process in suspended state. Windows: CREATE_SUSPENDED, Linux: SIGSTOP. Implies background=true: true or false. Default: false"`
 }
 
 type ProcExecOutput struct {
@@ -99,15 +99,14 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ProcExecInput) 
 	}
 
 	// 5. Suspended implies background
-	if input.Suspended {
-		input.Background = true
-	}
+	suspended := common.FlexBool(input.Suspended)
+	background := common.FlexBool(input.Background) || suspended
 
 	// 6. Execute
-	if input.Suspended {
+	if suspended {
 		return execSuspended(input)
 	}
-	if input.Background {
+	if background {
 		return execBackground(input)
 	}
 	return execForeground(ctx, input)

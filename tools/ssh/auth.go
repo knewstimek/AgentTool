@@ -5,6 +5,8 @@ import (
 	"net"
 	"os"
 
+	"agent-tool/common"
+
 	"github.com/kayrus/putty"
 	gossh "golang.org/x/crypto/ssh"
 )
@@ -41,7 +43,7 @@ func buildAuthMethods(input SSHInput) (*authResult, error) {
 	}
 
 	// 3. SSH Agent (explicit request or fallback when no other auth)
-	if input.UseAgent || len(result.methods) == 0 {
+	if common.FlexBool(input.UseAgent) || len(result.methods) == 0 {
 		agentAuth, agentConn, err := getAgentAuth()
 		if err == nil && agentAuth != nil {
 			result.methods = append(result.methods, agentAuth)

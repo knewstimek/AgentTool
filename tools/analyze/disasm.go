@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 
+	"agent-tool/common"
+
 	"golang.org/x/arch/arm/armasm"
 	"golang.org/x/arch/arm64/arm64asm"
 	"golang.org/x/arch/x86/x86asm"
@@ -142,7 +144,7 @@ func opDisassemble(input AnalyzeInput) (string, error) {
 		}
 		return disasmARM32(data, baseAddr, offset, count)
 	default:
-		if input.StopAtRet {
+		if common.FlexBool(input.StopAtRet) {
 			return disasmX86Opts(data, baseAddr, offset, count, mode, symbolMap, true)
 		}
 		return disasmX86(data, baseAddr, offset, count, mode, symbolMap)

@@ -10,6 +10,8 @@ import (
 	"unicode/utf16"
 	"unsafe"
 
+	"agent-tool/common"
+
 	"golang.org/x/sys/windows"
 )
 
@@ -326,7 +328,7 @@ func opSend(input WintoolInput) (*CallResult, WintoolOutput, error) {
 		return errorResult("%s (0x%X) is blocked for safety", name, input.Msg)
 	}
 
-	if input.Post {
+	if common.FlexBool(input.Post) {
 		err := postMessage(hwnd, input.Msg, uintptr(input.WParam), uintptr(input.LParam))
 		if err != nil {
 			return errorResult("PostMessage(0x%X, 0x%X): %v", hwnd, input.Msg, err)

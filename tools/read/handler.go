@@ -207,7 +207,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ReadInput) (*mc
 		endIdx = startIdx + limit
 	}
 
-	// Process only the needed range with Scanner (saves memory vs full Split)
+	// Process only the needed range with Scanner (saves memory vs full Split).
 	var sb strings.Builder
 	scanner := bufio.NewScanner(strings.NewReader(content))
 	lineNum := 0
@@ -219,6 +219,23 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ReadInput) (*mc
 			fmt.Fprintf(&sb, "%6d\t%s\n", lineNum+1, scanner.Text())
 		}
 		lineNum++
+	}
+	if err := scanner.Err(); err != nil {
+		// bufio.Scanner default token limit is 64KB per line.
+		// Binary files, minified JS, or data files often have no newlines and
+		// exceed this limit. Return an actionable error instead of empty output.
+		msg := fmt.Sprintf(
+			"cannot read %s as text: a line exceeds 64KB (likely binary, minified, or single-line data file).\n"+
+				"- Binary files: use the analyze tool to inspect structure\n"+
+				"- Minified/concatenated code: use download to get the raw file\n"+
+				"- Large single-line data: use grep to search for specific content\n"+
+				"(scanner error: %v)",
+			filepath.Base(input.FilePath), err,
+		)
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: msg}},
+			IsError: true,
+		}, ReadOutput{}, nil
 	}
 
 	result := sb.String()

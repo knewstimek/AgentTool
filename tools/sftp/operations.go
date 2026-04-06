@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 
+	"agent-tool/common"
+
 	"github.com/pkg/sftp"
 )
 
@@ -34,7 +36,7 @@ func opUpload(client *sftp.Client, input SFTPInput) (string, error) {
 	}
 
 	// Check overwrite
-	if !input.Overwrite {
+	if !common.FlexBool(input.Overwrite) {
 		if _, err := client.Stat(input.RemotePath); err == nil {
 			return "", fmt.Errorf("remote file already exists: %s (use overwrite=true to replace)", input.RemotePath)
 		}
@@ -90,7 +92,7 @@ func opDownload(client *sftp.Client, input SFTPInput) (string, error) {
 	}
 
 	// Check overwrite
-	if !input.Overwrite {
+	if !common.FlexBool(input.Overwrite) {
 		if _, err := os.Stat(input.LocalPath); err == nil {
 			return "", fmt.Errorf("local file already exists: %s (use overwrite=true to replace)", input.LocalPath)
 		}
@@ -219,7 +221,7 @@ func opMkdir(client *sftp.Client, input SFTPInput) (string, error) {
 		return "", err
 	}
 
-	if input.Recursive {
+	if common.FlexBool(input.Recursive) {
 		if err := client.MkdirAll(input.RemotePath); err != nil {
 			return "", fmt.Errorf("mkdir -p: %w", err)
 		}
@@ -238,7 +240,7 @@ func opRm(client *sftp.Client, input SFTPInput) (string, error) {
 		return "", err
 	}
 
-	if !input.Recursive {
+	if !common.FlexBool(input.Recursive) {
 		// Simple remove (file or empty directory)
 		if err := client.Remove(input.RemotePath); err != nil {
 			return "", fmt.Errorf("remove: %w", err)
@@ -383,7 +385,7 @@ func opRename(client *sftp.Client, input SFTPInput) (string, error) {
 	}
 
 	// Check if destination already exists
-	if !input.Overwrite {
+	if !common.FlexBool(input.Overwrite) {
 		if _, err := client.Stat(input.NewPath); err == nil {
 			return "", fmt.Errorf("destination already exists: %s (use overwrite=true to replace)", input.NewPath)
 		}

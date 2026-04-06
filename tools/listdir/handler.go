@@ -12,9 +12,10 @@ import (
 )
 
 type ListDirInput struct {
-	Path          string `json:"path" jsonschema:"Absolute path to the directory to list"`
+	Path          string `json:"path,omitempty" jsonschema:"Absolute path to the directory to list"`
+	FilePath      string `json:"file_path,omitempty" jsonschema:"Alias for path"`
 	MaxDepth      int    `json:"max_depth,omitempty" jsonschema:"Maximum depth for tree traversal. Default: 3"`
-	RelativePaths bool   `json:"relative_paths,omitempty" jsonschema:"Show the root as '.' instead of the full absolute path. Saves tokens in output. Default: false"`
+	RelativePaths interface{} `json:"relative_paths,omitempty" jsonschema:"Show the root as '.' instead of the full absolute path. Saves tokens in output: true or false. Default: false"`
 	Flat          *bool  `json:"flat,omitempty" jsonschema:"Flat listing without tree connectors (one path per line). Default: true"`
 }
 
@@ -40,6 +41,9 @@ var skipDirs = map[string]bool{
 }
 
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input ListDirInput) (*mcp.CallToolResult, ListDirOutput, error) {
+	if input.Path == "" {
+		input.Path = input.FilePath
+	}
 	if input.Path == "" {
 		return errorResult("path is required")
 	}
@@ -79,14 +83,16 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ListDirInput) (
 		flat = *input.Flat
 	}
 
+	relativePaths := common.FlexBool(input.RelativePaths)
+
 	var sb strings.Builder
 	totalFiles := 0
 	totalDirs := 0
 
 	if flat {
-		buildFlat(&sb, input.Path, input.Path, 0, maxDepth, input.RelativePaths, &totalFiles, &totalDirs)
+		buildFlat(&sb, input.Path, input.Path, 0, maxDepth, relativePaths, &totalFiles, &totalDirs)
 	} else {
-		if input.RelativePaths {
+		if relativePaths {
 			sb.WriteString(".\n")
 		} else {
 			sb.WriteString(input.Path)

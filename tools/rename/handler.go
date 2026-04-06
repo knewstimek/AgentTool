@@ -15,7 +15,7 @@ import (
 type RenameInput struct {
 	OldPath string `json:"old_path" jsonschema:"Absolute path to the file or directory to rename"`
 	NewPath string `json:"new_path" jsonschema:"Absolute path for the new name/location"`
-	DryRun  bool   `json:"dry_run" jsonschema:"Preview rename without actually moving the file (default false)"`
+	DryRun  interface{} `json:"dry_run,omitempty" jsonschema:"Preview rename without actually moving the file: true or false. Default: false"`
 }
 
 type RenameOutput struct {
@@ -88,7 +88,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input RenameInput) (*
 	}
 
 	// dry_run
-	if input.DryRun {
+	if common.FlexBool(input.DryRun) {
 		msg := fmt.Sprintf("[DRY RUN] would rename %s: %s → %s", kind, oldCleaned, newCleaned)
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: msg}},

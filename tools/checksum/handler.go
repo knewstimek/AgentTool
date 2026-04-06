@@ -18,7 +18,8 @@ import (
 )
 
 type ChecksumInput struct {
-	FilePath  string `json:"file_path" jsonschema:"Absolute path to the file"`
+	FilePath  string `json:"file_path,omitempty" jsonschema:"Absolute path to the file"`
+	Path      string `json:"path,omitempty" jsonschema:"Alias for file_path"`
 	Algorithm string `json:"algorithm,omitempty" jsonschema:"Hash algorithm: md5, sha1, sha256 (default sha256)"`
 }
 
@@ -27,6 +28,9 @@ type ChecksumOutput struct {
 }
 
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input ChecksumInput) (*mcp.CallToolResult, ChecksumOutput, error) {
+	if input.FilePath == "" {
+		input.FilePath = input.Path
+	}
 	if input.FilePath == "" {
 		return errorResult("file_path is required")
 	}

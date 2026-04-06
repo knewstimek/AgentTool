@@ -27,9 +27,9 @@ type WebFetchInput struct {
 	MaxLength  int               `json:"max_length,omitempty" jsonschema:"Maximum response length in characters. Default: 100000"`
 	TimeoutSec int              `json:"timeout_sec,omitempty" jsonschema:"Request timeout in seconds. Default: 30, Max: 120"`
 	ProxyURL   string            `json:"proxy_url,omitempty" jsonschema:"HTTP or SOCKS5 proxy URL (e.g. http://proxy:8080, socks5://proxy:1080)"`
-	NoDoH      bool              `json:"no_doh,omitempty" jsonschema:"Disable DNS over HTTPS. Default: false (DoH enabled)"`
-	NoECH      bool              `json:"no_ech,omitempty" jsonschema:"Disable Encrypted Client Hello. Default: false (ECH enabled)"`
-	Raw        bool              `json:"raw,omitempty" jsonschema:"Return raw HTML without Markdown conversion. Default: false"`
+	NoDoH      interface{}       `json:"no_doh,omitempty" jsonschema:"Disable DNS over HTTPS: true or false. Default: false (DoH enabled)"`
+	NoECH      interface{}       `json:"no_ech,omitempty" jsonschema:"Disable Encrypted Client Hello: true or false. Default: false (ECH enabled)"`
+	Raw        interface{}       `json:"raw,omitempty" jsonschema:"Return raw HTML without Markdown conversion: true or false. Default: false"`
 }
 
 type WebFetchOutput struct {
@@ -68,12 +68,15 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input WebFetchInput) 
 		return errorResult(fmt.Sprintf("timeout_sec exceeds maximum (%d)", maxTimeoutSec))
 	}
 
+	noDoH := common.FlexBool(input.NoDoH)
+	noECH := common.FlexBool(input.NoECH)
+
 	// Create HTTP client
 	client, err := common.NewHTTPClient(common.HTTPClientConfig{
 		TimeoutSec: input.TimeoutSec,
 		ProxyURL:   input.ProxyURL,
-		EnableDoH:  !input.NoDoH && common.GetEnableDoH(),
-		EnableECH:  !input.NoECH && common.GetEnableECH(),
+		EnableDoH:  !noDoH && common.GetEnableDoH(),
+		EnableECH:  !noECH && common.GetEnableECH(),
 	})
 	if err != nil {
 		return errorResult(fmt.Sprintf("client setup failed: %v", err))
@@ -104,7 +107,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input WebFetchInput) 
 	}
 
 	// Execute with ECH support
-	resp, err := common.DoRequestWithECH(ctx, client, httpReq, !input.NoECH && common.GetEnableECH())
+	resp, err := common.DoRequestWithECH(ctx, client, httpReq, !noECH && common.GetEnableECH())
 	if err != nil {
 		msg := fmt.Sprintf("request failed: %v", err)
 		if ssrfWarning != "" {
@@ -132,7 +135,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input WebFetchInput) 
 	content := string(body)
 
 	// Convert HTML to Markdown if applicable
-	if !input.Raw && strings.Contains(ct, "text/html") {
+	if !common.FlexBool(input.Raw) && strings.Contains(ct, "text/html") {
 		content = convertHTMLToMarkdown(content)
 	}
 

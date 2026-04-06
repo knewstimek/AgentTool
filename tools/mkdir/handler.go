@@ -14,10 +14,11 @@ import (
 )
 
 type MkdirInput struct {
-	Path      string `json:"path" jsonschema:"Absolute path of the directory to create,required"`
+	Path      string `json:"path,omitempty" jsonschema:"Absolute path of the directory to create,required"`
+	FilePath  string `json:"file_path,omitempty" jsonschema:"Alias for path"`
 	Recursive *bool  `json:"recursive,omitempty" jsonschema:"Create parent directories as needed (like mkdir -p). Default: true"`
 	Mode      string `json:"mode,omitempty" jsonschema:"Directory permission mode in octal (e.g. 0755, 0700). Default: 0755. Applied on Unix/Linux only"`
-	DryRun    bool   `json:"dry_run" jsonschema:"Preview what would be created without actually creating (default false)"`
+	DryRun    interface{} `json:"dry_run,omitempty" jsonschema:"Preview what would be created without actually creating: true or false. Default: false"`
 }
 
 type MkdirOutput struct {
@@ -25,6 +26,9 @@ type MkdirOutput struct {
 }
 
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input MkdirInput) (*mcp.CallToolResult, MkdirOutput, error) {
+	if input.Path == "" {
+		input.Path = input.FilePath
+	}
 	if input.Path == "" {
 		return errorResult("path is required")
 	}
@@ -77,7 +81,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input MkdirInput) (*m
 	// Default recursive to true (more intuitive for agents)
 	recursive := input.Recursive == nil || *input.Recursive
 
-	if input.DryRun {
+	if common.FlexBool(input.DryRun) {
 		mode := "recursive"
 		if !recursive {
 			mode = "single"

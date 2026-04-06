@@ -36,7 +36,7 @@ type WintoolInput struct {
 	Msg    uint32 `json:"msg,omitempty" jsonschema:"Window message ID (e.g. 16 for WM_CLOSE, 274 for WM_SYSCOMMAND). For send"`
 	WParam uint64 `json:"wparam,omitempty" jsonschema:"WPARAM value for send operation"`
 	LParam int64  `json:"lparam,omitempty" jsonschema:"LPARAM value for send operation"`
-	Post   bool   `json:"post,omitempty" jsonschema:"Use PostMessage instead of SendMessage (async). Default: false"`
+	Post   interface{} `json:"post,omitempty" jsonschema:"Use PostMessage instead of SendMessage (async): true or false. Default: false"`
 
 	// show
 	ShowCmd string `json:"show_cmd,omitempty" jsonschema:"Show command: show, hide, minimize, maximize, restore. For show"`

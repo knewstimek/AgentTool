@@ -31,9 +31,9 @@ type SSHInput struct {
 	Password     string `json:"password,omitempty" jsonschema:"Password for authentication"`
 	KeyFile      string `json:"key_file,omitempty" jsonschema:"Path to SSH private key file (e.g. ~/.ssh/id_rsa)"`
 	Passphrase   string `json:"passphrase,omitempty" jsonschema:"Passphrase for encrypted private key"`
-	UseAgent     bool   `json:"use_agent,omitempty" jsonschema:"Use SSH agent for authentication. Default: true if no other auth method specified"`
-	Command      string `json:"command,omitempty" jsonschema:"Command to execute on the remote server"`
-	Disconnect   bool   `json:"disconnect,omitempty" jsonschema:"Close the SSH session for this host (no command needed)"`
+	UseAgent     interface{} `json:"use_agent,omitempty" jsonschema:"Use SSH agent for authentication: true or false. Default: true if no other auth method specified"`
+	Command      string      `json:"command,omitempty" jsonschema:"Command to execute on the remote server"`
+	Disconnect   interface{} `json:"disconnect,omitempty" jsonschema:"Close the SSH session for this host (no command needed): true or false. Default: false"`
 	HostKeyCheck string `json:"host_key_check,omitempty" jsonschema:"Host key verification: strict (requires known_hosts), tofu (trust on first use, default), none (insecure)"`
 	TimeoutSec   int    `json:"timeout_sec,omitempty" jsonschema:"Command execution timeout in seconds. Default: 30, Max: 300"`
 
@@ -82,7 +82,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input SSHInput) (*mcp
 	key := sessionKey(input.Host, input.Port, input.User)
 
 	// 2. Handle disconnect
-	if input.Disconnect {
+	if common.FlexBool(input.Disconnect) {
 		removed := pool.remove(key)
 		var msg string
 		if removed {
