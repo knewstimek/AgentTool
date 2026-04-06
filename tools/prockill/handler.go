@@ -13,8 +13,8 @@ import (
 )
 
 type ProcKillInput struct {
-	PID            int    `json:"pid,omitempty" jsonschema:"Process ID to kill"`
-	Port           int    `json:"port,omitempty" jsonschema:"Kill process(es) using this port number"`
+	PID            interface{} `json:"pid,omitempty" jsonschema:"Process ID to kill"`
+	Port           interface{} `json:"port,omitempty" jsonschema:"Kill process(es) using this port number"`
 	Signal         string `json:"signal,omitempty" jsonschema:"Signal to send: kill (default), term, hup, int, stop (suspend), cont (resume). Windows uses NtSuspendProcess/NtResumeProcess for stop/cont"`
 	Tree           interface{} `json:"tree,omitempty" jsonschema:"Kill the process and all its child processes (tree kill): true or false. Default: false"`
 	IncludeZombies interface{} `json:"include_zombies,omitempty" jsonschema:"Linux only: send SIGCHLD to parent of zombie processes to trigger reaping: true or false. Default: false"`
@@ -30,17 +30,26 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ProcKillInput) 
 	tree := common.FlexBool(input.Tree)
 	includeZombies := common.FlexBool(input.IncludeZombies)
 
+	pid, pidOK := common.FlexInt(input.PID)
+	port, portOK := common.FlexInt(input.Port)
+	if !pidOK {
+		return errorResult("pid must be an integer")
+	}
+	if !portOK {
+		return errorResult("port must be an integer")
+	}
+
 	// 1. Validate input
-	if input.PID == 0 && input.Port == 0 {
+	if pid == 0 && port == 0 {
 		return errorResult("pid or port is required")
 	}
-	if input.PID < 0 {
+	if pid < 0 {
 		return errorResult("invalid pid: must be a positive integer")
 	}
-	if input.PID != 0 && input.Port != 0 {
+	if pid != 0 && port != 0 {
 		return errorResult("specify either pid or port, not both")
 	}
-	if input.Port < 0 || input.Port > 65535 {
+	if port < 0 || port > 65535 {
 		return errorResult("invalid port: must be 1-65535")
 	}
 
@@ -58,23 +67,23 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ProcKillInput) 
 
 	// 2. Resolve port → PIDs
 	var targetPIDs []int
-	if input.Port > 0 {
+	if port > 0 {
 		entries, err := proclist.ListPortPIDs()
 		if err != nil {
 			return errorResult(fmt.Sprintf("failed to query port mappings: %v", err))
 		}
 		seen := map[int]bool{}
 		for _, e := range entries {
-			if e.Port == input.Port && !seen[e.PID] && e.PID > 0 {
+			if e.Port == port && !seen[e.PID] && e.PID > 0 {
 				seen[e.PID] = true
 				targetPIDs = append(targetPIDs, e.PID)
 			}
 		}
 		if len(targetPIDs) == 0 {
-			return errorResult(fmt.Sprintf("no process found using port %d", input.Port))
+			return errorResult(fmt.Sprintf("no process found using port %d", port))
 		}
 	} else {
-		targetPIDs = []int{input.PID}
+		targetPIDs = []int{pid}
 	}
 
 	// 3. Safety checks

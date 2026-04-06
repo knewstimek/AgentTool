@@ -14,7 +14,7 @@ import (
 type ListDirInput struct {
 	Path          string `json:"path,omitempty" jsonschema:"Absolute path to the directory to list"`
 	FilePath      string `json:"file_path,omitempty" jsonschema:"Alias for path"`
-	MaxDepth      int    `json:"max_depth,omitempty" jsonschema:"Maximum depth for tree traversal. Default: 3"`
+	MaxDepth      interface{} `json:"max_depth,omitempty" jsonschema:"Maximum depth for tree traversal. Default: 3"`
 	RelativePaths interface{} `json:"relative_paths,omitempty" jsonschema:"Show the root as '.' instead of the full absolute path. Saves tokens in output: true or false. Default: false"`
 	Flat          *bool  `json:"flat,omitempty" jsonschema:"Flat listing without tree connectors (one path per line). Default: true"`
 }
@@ -72,7 +72,10 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ListDirInput) (
 		return errorResult(fmt.Sprintf("path is not a directory: %s", input.Path))
 	}
 
-	maxDepth := input.MaxDepth
+	maxDepth, ok := common.FlexInt(input.MaxDepth)
+	if !ok {
+		return errorResult("max_depth must be an integer")
+	}
 	if maxDepth <= 0 {
 		maxDepth = 3
 	}

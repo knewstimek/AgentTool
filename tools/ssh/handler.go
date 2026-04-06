@@ -25,8 +25,14 @@ const (
 )
 
 type SSHInput struct {
+	// Resolved int values set by validateInput after FlexInt conversion.
+	// Not exported in JSON; used internally after validation.
+	PortInt        int `json:"-"`
+	TimeoutSecInt  int `json:"-"`
+	JumpPortInt    int `json:"-"`
+
 	Host         string `json:"host" jsonschema:"SSH server hostname or IP address (IPv4 or IPv6),required"`
-	Port         int    `json:"port,omitempty" jsonschema:"SSH port number. Default: 22"`
+	Port         interface{} `json:"port,omitempty" jsonschema:"SSH port number. Default: 22"`
 	User         string `json:"user" jsonschema:"SSH username,required"`
 	Password     string `json:"password,omitempty" jsonschema:"Password for authentication"`
 	KeyFile      string `json:"key_file,omitempty" jsonschema:"Path to SSH private key file (e.g. ~/.ssh/id_rsa)"`
@@ -35,13 +41,13 @@ type SSHInput struct {
 	Command      string      `json:"command,omitempty" jsonschema:"Command to execute on the remote server"`
 	Disconnect   interface{} `json:"disconnect,omitempty" jsonschema:"Close the SSH session for this host (no command needed): true or false. Default: false"`
 	HostKeyCheck string `json:"host_key_check,omitempty" jsonschema:"Host key verification: strict (requires known_hosts), tofu (trust on first use, default), none (insecure)"`
-	TimeoutSec   int    `json:"timeout_sec,omitempty" jsonschema:"Command execution timeout in seconds. Default: 30, Max: 300"`
+	TimeoutSec   interface{} `json:"timeout_sec,omitempty" jsonschema:"Command execution timeout in seconds. Default: 30, Max: 300"`
 
 	// Proxy Jump — connect through a bastion/jump host (like ssh -J).
 	// Useful for reaching IPv6-only servers via an IPv4 bastion, or accessing
 	// hosts in private networks.
 	JumpHost       string `json:"jump_host,omitempty" jsonschema:"Jump/bastion host for ProxyJump (hostname or IP). When set, connects through this host to reach the target"`
-	JumpPort       int    `json:"jump_port,omitempty" jsonschema:"Jump host SSH port. Default: 22"`
+	JumpPort       interface{} `json:"jump_port,omitempty" jsonschema:"Jump host SSH port. Default: 22"`
 	JumpUser       string `json:"jump_user,omitempty" jsonschema:"Jump host username. Default: same as user"`
 	JumpPassword   string `json:"jump_password,omitempty" jsonschema:"Jump host password. Default: same as password"`
 	JumpKeyFile    string `json:"jump_key_file,omitempty" jsonschema:"Jump host SSH private key file. Default: same as key_file"`
@@ -79,16 +85,16 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input SSHInput) (*mcp
 		}
 	}
 
-	key := sessionKey(input.Host, input.Port, input.User)
+	key := sessionKey(input.Host, input.PortInt, input.User)
 
 	// 2. Handle disconnect
 	if common.FlexBool(input.Disconnect) {
 		removed := pool.remove(key)
 		var msg string
 		if removed {
-			msg = fmt.Sprintf("SSH session closed: %s@%s:%d", input.User, input.Host, input.Port)
+			msg = fmt.Sprintf("SSH session closed: %s@%s:%d", input.User, input.Host, input.PortInt)
 		} else {
-			msg = fmt.Sprintf("No active session for %s@%s:%d", input.User, input.Host, input.Port)
+			msg = fmt.Sprintf("No active session for %s@%s:%d", input.User, input.Host, input.PortInt)
 		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: msg}},
@@ -111,7 +117,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input SSHInput) (*mcp
 	}
 
 	// 5. Execute command with timeout
-	timeout := time.Duration(input.TimeoutSec) * time.Second
+	timeout := time.Duration(input.TimeoutSecInt) * time.Second
 	execCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -126,9 +132,9 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input SSHInput) (*mcp
 
 	// 6. Format output
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("=== SSH: %s@%s:%d ===\n", input.User, input.Host, input.Port))
+	sb.WriteString(fmt.Sprintf("=== SSH: %s@%s:%d ===\n", input.User, input.Host, input.PortInt))
 	if input.JumpHost != "" {
-		sb.WriteString(fmt.Sprintf("[via jump host: %s@%s:%d]\n", input.JumpUser, input.JumpHost, input.JumpPort))
+		sb.WriteString(fmt.Sprintf("[via jump host: %s@%s:%d]\n", input.JumpUser, input.JumpHost, input.JumpPortInt))
 	}
 	if isNew {
 		sb.WriteString("[New session established]\n")
@@ -206,7 +212,7 @@ func dial(input SSHInput, resolvedIP, jumpResolvedIP string) (*dialResult, error
 	if resolvedIP != "" {
 		dialHost = resolvedIP
 	}
-	targetAddr := formatAddr(dialHost, input.Port)
+	targetAddr := formatAddr(dialHost, input.PortInt)
 
 	// Direct connection (no jump host)
 	if input.JumpHost == "" {
@@ -278,7 +284,7 @@ func dial(input SSHInput, resolvedIP, jumpResolvedIP string) (*dialResult, error
 func dialJumpHost(input SSHInput, jumpResolvedIP string) (*gossh.Client, net.Conn, error) {
 	jumpInput := SSHInput{
 		Host:       input.JumpHost,
-		Port:       input.JumpPort,
+		PortInt:    input.JumpPortInt,
 		User:       input.JumpUser,
 		Password:   input.JumpPassword,
 		KeyFile:    input.JumpKeyFile,
@@ -311,7 +317,7 @@ func dialJumpHost(input SSHInput, jumpResolvedIP string) (*gossh.Client, net.Con
 	if jumpResolvedIP != "" {
 		jumpDialHost = jumpResolvedIP
 	}
-	jumpAddr := formatAddr(jumpDialHost, input.JumpPort)
+	jumpAddr := formatAddr(jumpDialHost, input.JumpPortInt)
 	client, err := gossh.Dial("tcp", jumpAddr, jumpConfig)
 	if err != nil {
 		if jumpAuth.agentConn != nil {
@@ -353,20 +359,30 @@ func validateInput(input *SSHInput) error {
 	}
 
 	// Port
-	if input.Port == 0 {
-		input.Port = defaultPort
+	port, ok := common.FlexInt(input.Port)
+	if !ok {
+		return fmt.Errorf("port must be an integer")
 	}
-	if input.Port < 1 || input.Port > 65535 {
+	if port == 0 {
+		port = defaultPort
+	}
+	if port < 1 || port > 65535 {
 		return fmt.Errorf("invalid port: must be 1-65535")
 	}
+	input.PortInt = port
 
 	// Timeout
-	if input.TimeoutSec <= 0 {
-		input.TimeoutSec = defaultTimeoutSec
+	timeoutSec, ok := common.FlexInt(input.TimeoutSec)
+	if !ok {
+		return fmt.Errorf("timeout_sec must be an integer")
 	}
-	if input.TimeoutSec > maxTimeoutSec {
-		input.TimeoutSec = maxTimeoutSec
+	if timeoutSec <= 0 {
+		timeoutSec = defaultTimeoutSec
 	}
+	if timeoutSec > maxTimeoutSec {
+		timeoutSec = maxTimeoutSec
+	}
+	input.TimeoutSecInt = timeoutSec
 
 	// Host key check
 	input.HostKeyCheck = strings.ToLower(strings.TrimSpace(input.HostKeyCheck))
@@ -389,12 +405,17 @@ func validateInput(input *SSHInput) error {
 		if containsUnsafe(input.JumpHost) {
 			return fmt.Errorf("invalid characters in jump_host")
 		}
-		if input.JumpPort == 0 {
-			input.JumpPort = defaultPort
+		jumpPort, ok := common.FlexInt(input.JumpPort)
+		if !ok {
+			return fmt.Errorf("jump_port must be an integer")
 		}
-		if input.JumpPort < 1 || input.JumpPort > 65535 {
+		if jumpPort == 0 {
+			jumpPort = defaultPort
+		}
+		if jumpPort < 1 || jumpPort > 65535 {
 			return fmt.Errorf("invalid jump_port: must be 1-65535")
 		}
+		input.JumpPortInt = jumpPort
 		if input.JumpUser == "" {
 			input.JumpUser = input.User
 		}

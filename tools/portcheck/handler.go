@@ -18,9 +18,9 @@ const (
 )
 
 type PortCheckInput struct {
-	Host       string `json:"host" jsonschema:"Hostname or IP address to check,required"`
-	Port       int    `json:"port" jsonschema:"Port number to check (1-65535),required"`
-	TimeoutSec int    `json:"timeout_sec,omitempty" jsonschema:"Connection timeout in seconds. Default: 5, Max: 30"`
+	Host       string      `json:"host" jsonschema:"Hostname or IP address to check,required"`
+	Port       interface{} `json:"port" jsonschema:"Port number to check (1-65535),required"`
+	TimeoutSec interface{} `json:"timeout_sec,omitempty" jsonschema:"Connection timeout in seconds. Default: 5, Max: 30"`
 }
 
 type PortCheckOutput struct {
@@ -32,22 +32,30 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input PortCheckInput)
 	if strings.TrimSpace(input.Host) == "" {
 		return errorResult("host is required")
 	}
-	if input.Port < 1 || input.Port > 65535 {
-		return errorResult(fmt.Sprintf("invalid port: %d (must be 1-65535)", input.Port))
+	port, ok := common.FlexInt(input.Port)
+	if !ok {
+		return errorResult("port must be an integer")
+	}
+	if port < 1 || port > 65535 {
+		return errorResult(fmt.Sprintf("invalid port: %d (must be 1-65535)", port))
 	}
 
-	if input.TimeoutSec <= 0 {
-		input.TimeoutSec = defaultTimeoutSec
+	timeoutSec, ok := common.FlexInt(input.TimeoutSec)
+	if !ok {
+		return errorResult("timeout_sec must be an integer")
 	}
-	if input.TimeoutSec > maxTimeoutSec {
+	if timeoutSec <= 0 {
+		timeoutSec = defaultTimeoutSec
+	}
+	if timeoutSec > maxTimeoutSec {
 		return errorResult(fmt.Sprintf("timeout_sec exceeds maximum (%d)", maxTimeoutSec))
 	}
 
 	// No SSRF protection — port check is a diagnostic tool where users explicitly
 	// specify the host. Checking local/internal services is a legitimate use case.
 	// Use JoinHostPort for correct IPv6 bracket handling
-	addr := net.JoinHostPort(input.Host, strconv.Itoa(input.Port))
-	timeout := time.Duration(input.TimeoutSec) * time.Second
+	addr := net.JoinHostPort(input.Host, strconv.Itoa(port))
+	timeout := time.Duration(timeoutSec) * time.Second
 
 	start := time.Now()
 	conn, err := net.DialTimeout("tcp", addr, timeout)

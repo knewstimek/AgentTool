@@ -17,7 +17,7 @@ import (
 type SFTPInput struct {
 	// SSH connection parameters (same as ssh tool, minus Command/Disconnect/TimeoutSec)
 	Host         string `json:"host" jsonschema:"SSH server hostname or IP address (IPv4 or IPv6),required"`
-	Port         int    `json:"port,omitempty" jsonschema:"SSH port number. Default: 22"`
+	Port         interface{} `json:"port,omitempty" jsonschema:"SSH port number. Default: 22"`
 	User         string `json:"user" jsonschema:"SSH username,required"`
 	Password     string `json:"password,omitempty" jsonschema:"Password for authentication"`
 	KeyFile      string `json:"key_file,omitempty" jsonschema:"Path to SSH private key file (e.g. ~/.ssh/id_rsa)"`
@@ -27,7 +27,7 @@ type SFTPInput struct {
 
 	// Proxy Jump
 	JumpHost       string `json:"jump_host,omitempty" jsonschema:"Jump/bastion host for ProxyJump (hostname or IP)"`
-	JumpPort       int    `json:"jump_port,omitempty" jsonschema:"Jump host SSH port. Default: 22"`
+	JumpPort       interface{} `json:"jump_port,omitempty" jsonschema:"Jump host SSH port. Default: 22"`
 	JumpUser       string `json:"jump_user,omitempty" jsonschema:"Jump host username. Default: same as user"`
 	JumpPassword   string `json:"jump_password,omitempty" jsonschema:"Jump host password. Default: same as password"`
 	JumpKeyFile    string `json:"jump_key_file,omitempty" jsonschema:"Jump host SSH private key file. Default: same as key_file"`
@@ -75,6 +75,15 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input SFTPInput) (*mc
 				return errorResult(fmt.Sprintf("jump_host: %s", jumpErr.Error()))
 			}
 		}
+	}
+
+	// Resolve port early for use in RemoveClient/TouchClient (which require int)
+	portInt, ok := common.FlexInt(input.Port)
+	if !ok {
+		return errorResult("port must be an integer")
+	}
+	if portInt == 0 {
+		portInt = 22
 	}
 
 	// Validate operation
@@ -136,7 +145,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input SFTPInput) (*mc
 	sftpClient, err := gosftp.NewClient(sshClient)
 	if err != nil {
 		if isConnectionBroken(err) {
-			ssh.RemoveClient(input.Host, input.Port, input.User)
+			ssh.RemoveClient(input.Host, portInt, input.User)
 		}
 		return errorResult(fmt.Sprintf("SFTP subsystem failed: %v", err))
 	}
@@ -165,17 +174,17 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input SFTPInput) (*mc
 
 	if err != nil {
 		if isConnectionBroken(err) {
-			ssh.RemoveClient(input.Host, input.Port, input.User)
+			ssh.RemoveClient(input.Host, portInt, input.User)
 		}
 		return errorResult(fmt.Sprintf("%s failed: %v", op, err))
 	}
 
 	// Update session lastUsed
-	ssh.TouchClient(input.Host, input.Port, input.User)
+	ssh.TouchClient(input.Host, portInt, input.User)
 
 	// Format output
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("=== SFTP: %s@%s:%d [%s] ===\n", input.User, input.Host, input.Port, op))
+	sb.WriteString(fmt.Sprintf("=== SFTP: %s@%s:%d [%s] ===\n", input.User, input.Host, portInt, op))
 	if isNew {
 		sb.WriteString("[New session established]\n")
 	} else {

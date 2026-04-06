@@ -28,8 +28,8 @@ type DownloadInput struct {
 	OutputPath string            `json:"output_path" jsonschema:"Absolute path to save the downloaded file,required"`
 	Headers    map[string]string `json:"headers,omitempty" jsonschema:"Custom HTTP headers (e.g. User-Agent, Referer, Authorization)"`
 	Overwrite  interface{}       `json:"overwrite,omitempty" jsonschema:"Overwrite existing file: true or false. Default: false"`
-	TimeoutSec int              `json:"timeout_sec,omitempty" jsonschema:"Request timeout in seconds. Default: 60, Max: 600"`
-	MaxSizeMB  int               `json:"max_size_mb,omitempty" jsonschema:"Maximum download size in MB. Default: 100, Max: 2048"`
+	TimeoutSec interface{}       `json:"timeout_sec,omitempty" jsonschema:"Request timeout in seconds. Default: 60, Max: 600"`
+	MaxSizeMB  interface{}       `json:"max_size_mb,omitempty" jsonschema:"Maximum download size in MB. Default: 100, Max: 2048"`
 	ProxyURL   string            `json:"proxy_url,omitempty" jsonschema:"HTTP or SOCKS5 proxy URL (e.g. http://proxy:8080, socks5://proxy:1080)"`
 	NoDoH      interface{}       `json:"no_doh,omitempty" jsonschema:"Disable DNS over HTTPS: true or false. Default: false (DoH enabled)"`
 	NoECH      interface{}       `json:"no_ech,omitempty" jsonschema:"Disable Encrypted Client Hello: true or false. Default: false (ECH enabled)"`
@@ -75,26 +75,34 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input DownloadInput) 
 	}
 
 	// Defaults
-	if input.TimeoutSec <= 0 {
-		input.TimeoutSec = defaultTimeoutSec
+	timeoutSec, ok := common.FlexInt(input.TimeoutSec)
+	if !ok {
+		return errorResult("timeout_sec must be an integer")
 	}
-	if input.TimeoutSec > maxTimeoutSec {
+	maxSizeMB, ok := common.FlexInt(input.MaxSizeMB)
+	if !ok {
+		return errorResult("max_size_mb must be an integer")
+	}
+	if timeoutSec <= 0 {
+		timeoutSec = defaultTimeoutSec
+	}
+	if timeoutSec > maxTimeoutSec {
 		return errorResult(fmt.Sprintf("timeout_sec exceeds maximum (%d)", maxTimeoutSec))
 	}
-	if input.MaxSizeMB <= 0 {
-		input.MaxSizeMB = defaultMaxSizeMB
+	if maxSizeMB <= 0 {
+		maxSizeMB = defaultMaxSizeMB
 	}
-	if input.MaxSizeMB > maxMaxSizeMB {
+	if maxSizeMB > maxMaxSizeMB {
 		return errorResult(fmt.Sprintf("max_size_mb exceeds maximum (%d)", maxMaxSizeMB))
 	}
-	maxBytes := int64(input.MaxSizeMB) * 1024 * 1024
+	maxBytes := int64(maxSizeMB) * 1024 * 1024
 
 	noDoH := common.FlexBool(input.NoDoH)
 	noECH := common.FlexBool(input.NoECH)
 
 	// Create HTTP client
 	client, err := common.NewHTTPClient(common.HTTPClientConfig{
-		TimeoutSec: input.TimeoutSec,
+		TimeoutSec: timeoutSec,
 		ProxyURL:   input.ProxyURL,
 		EnableDoH:  !noDoH && common.GetEnableDoH(),
 		EnableECH:  !noECH && common.GetEnableECH(),

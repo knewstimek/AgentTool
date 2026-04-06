@@ -9,12 +9,16 @@ import (
 )
 
 type IPCInput struct {
-	Operation string `json:"operation" jsonschema:"Operation: send, receive, ping,required"`
-	Host      string `json:"host,omitempty" jsonschema:"Remote host:port (e.g. '192.168.1.5:19900'). For send/ping"`
-	Port      int    `json:"port,omitempty" jsonschema:"Port to listen on. For receive. Default: 19900"`
-	Message   string `json:"message,omitempty" jsonschema:"Message text to send. For send"`
-	Timeout   int    `json:"timeout,omitempty" jsonschema:"Timeout in seconds. receive default: 60 (max 300), send/ping default: 10"`
-	Bind      string `json:"bind,omitempty" jsonschema:"Bind address for receive. Default: 0.0.0.0 (all interfaces). Use 127.0.0.1 for local only"`
+	// Resolved int values set by Handle after FlexInt conversion.
+	PortInt    int `json:"-"`
+	TimeoutInt int `json:"-"`
+
+	Operation string      `json:"operation" jsonschema:"Operation: send, receive, ping,required"`
+	Host      string      `json:"host,omitempty" jsonschema:"Remote host:port (e.g. '192.168.1.5:19900'). For send/ping"`
+	Port      interface{} `json:"port,omitempty" jsonschema:"Port to listen on. For receive. Default: 19900"`
+	Message   string      `json:"message,omitempty" jsonschema:"Message text to send. For send"`
+	Timeout   interface{} `json:"timeout,omitempty" jsonschema:"Timeout in seconds. receive default: 60 (max 300), send/ping default: 10"`
+	Bind      string      `json:"bind,omitempty" jsonschema:"Bind address for receive. Default: 0.0.0.0 (all interfaces). Use 127.0.0.1 for local only"`
 }
 
 type IPCOutput struct {
@@ -25,12 +29,23 @@ type IPCOutput struct {
 type Result = mcp.CallToolResult
 
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input IPCInput) (*Result, IPCOutput, error) {
+	port, ok := common.FlexInt(input.Port)
+	if !ok {
+		return errorResult("port must be an integer")
+	}
+	timeout, ok := common.FlexInt(input.Timeout)
+	if !ok {
+		return errorResult("timeout must be an integer")
+	}
+	input.PortInt = port
+	input.TimeoutInt = timeout
+
 	switch input.Operation {
 	case "send":
 		return opSend(ctx, input)
 	case "receive":
-		if input.Port <= 0 {
-			input.Port = 19900
+		if input.PortInt <= 0 {
+			input.PortInt = 19900
 		}
 		return opReceive(ctx, input)
 	case "ping":

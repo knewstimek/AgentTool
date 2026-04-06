@@ -17,7 +17,7 @@ const maxDiffLines = 50000
 type DiffInput struct {
 	FileA        string `json:"file_a" jsonschema:"Absolute path to the first file"`
 	FileB        string `json:"file_b" jsonschema:"Absolute path to the second file"`
-	ContextLines int    `json:"context_lines,omitempty" jsonschema:"Number of context lines around changes (default 3)"`
+	ContextLines interface{} `json:"context_lines,omitempty" jsonschema:"Number of context lines around changes (default 3)"`
 }
 
 type DiffOutput struct {
@@ -31,7 +31,10 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input DiffInput) (*mc
 	if !filepath.IsAbs(input.FileA) || !filepath.IsAbs(input.FileB) {
 		return errorResult("file_a and file_b must be absolute paths")
 	}
-	ctxLines := input.ContextLines
+	ctxLines, ok := common.FlexInt(input.ContextLines)
+	if !ok {
+		return errorResult("context_lines must be an integer")
+	}
 	if ctxLines <= 0 {
 		ctxLines = 3
 	}

@@ -13,12 +13,12 @@ import (
 // Reuses existing connections from the pool (checkout pattern).
 // Responds to PING with PONG automatically.
 func opReceive(ctx context.Context, input IPCInput) (*Result, IPCOutput, error) {
-	port := input.Port
+	port := input.PortInt
 	if port <= 0 || port > 65535 {
 		return errorResult("port must be between 1 and 65535")
 	}
 
-	timeout := input.Timeout
+	timeout := input.TimeoutInt
 	if timeout <= 0 {
 		timeout = 60
 	}

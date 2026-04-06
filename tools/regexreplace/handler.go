@@ -28,7 +28,7 @@ type RegexReplaceInput struct {
 	Glob        string `json:"glob,omitempty" jsonschema:"Glob pattern to filter files when path is a directory (e.g. *.go). Only used when path is a directory"`
 	IgnoreCase  interface{} `json:"ignore_case,omitempty" jsonschema:"Case insensitive search: true or false. Default: false"`
 	DryRun      interface{} `json:"dry_run,omitempty" jsonschema:"Preview changes without modifying files: true or false. Default: false"`
-	MaxFiles    int    `json:"max_files,omitempty" jsonschema:"Maximum number of files to process in directory mode. Default: 100"`
+	MaxFiles    interface{} `json:"max_files,omitempty" jsonschema:"Maximum number of files to process in directory mode. Default: 100"`
 }
 
 type RegexReplaceOutput struct {
@@ -62,7 +62,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input RegexReplaceInp
 		return errorResult(fmt.Sprintf("invalid regex pattern: %v", err))
 	}
 
-	maxFiles := input.MaxFiles
+	maxFiles, _ := common.FlexInt(input.MaxFiles)
 	if maxFiles <= 0 {
 		maxFiles = 100
 	}

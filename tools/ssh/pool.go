@@ -193,7 +193,7 @@ func GetClient(input SSHInput) (*gossh.Client, bool, error) {
 	if err := validateInput(&input); err != nil {
 		return nil, false, err
 	}
-	key := sessionKey(input.Host, input.Port, input.User)
+	key := sessionKey(input.Host, input.PortInt, input.User)
 	return pool.getOrCreate(key, func() (*dialResult, error) {
 		// No resolved IP available — dial by hostname.
 		// This is acceptable because callers must perform SSRF checks before

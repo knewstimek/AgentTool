@@ -24,12 +24,12 @@ const (
 
 type MySQLInput struct {
 	Host       string `json:"host" jsonschema:"MySQL server hostname or IP address,required"`
-	Port       int    `json:"port,omitempty" jsonschema:"MySQL port number. Default: 3306"`
+	Port       interface{} `json:"port,omitempty" jsonschema:"MySQL port number. Default: 3306"`
 	User       string `json:"user" jsonschema:"MySQL username,required"`
 	Password   string `json:"password,omitempty" jsonschema:"Password for authentication"`
 	Database   string `json:"database,omitempty" jsonschema:"Database name to connect to"`
 	Query      string `json:"query" jsonschema:"SQL query to execute,required"`
-	TimeoutSec int    `json:"timeout_sec,omitempty" jsonschema:"Query timeout in seconds. Default: 30, Max: 120"`
+	TimeoutSec interface{} `json:"timeout_sec,omitempty" jsonschema:"Query timeout in seconds. Default: 30, Max: 120"`
 }
 
 type MySQLOutput struct {
@@ -52,16 +52,24 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input MySQLInput) (*m
 	}
 
 	// Defaults
-	if input.Port == 0 {
-		input.Port = defaultPort
+	port, ok := common.FlexInt(input.Port)
+	if !ok {
+		return errorResult("port must be an integer")
 	}
-	if input.Port < 1 || input.Port > 65535 {
-		return errorResult(fmt.Sprintf("invalid port: %d (must be 1-65535)", input.Port))
+	timeoutSec, ok := common.FlexInt(input.TimeoutSec)
+	if !ok {
+		return errorResult("timeout_sec must be an integer")
 	}
-	if input.TimeoutSec <= 0 {
-		input.TimeoutSec = defaultTimeoutSec
+	if port == 0 {
+		port = defaultPort
 	}
-	if input.TimeoutSec > maxTimeoutSec {
+	if port < 1 || port > 65535 {
+		return errorResult(fmt.Sprintf("invalid port: %d (must be 1-65535)", port))
+	}
+	if timeoutSec <= 0 {
+		timeoutSec = defaultTimeoutSec
+	}
+	if timeoutSec > maxTimeoutSec {
 		return errorResult(fmt.Sprintf("timeout_sec exceeds maximum (%d)", maxTimeoutSec))
 	}
 
@@ -79,7 +87,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input MySQLInput) (*m
 		connectAddr = resolvedIP
 	}
 
-	timeout := time.Duration(input.TimeoutSec) * time.Second
+	timeout := time.Duration(timeoutSec) * time.Second
 
 	// Use mysql.Config struct to safely build DSN — prevents parameter injection
 	// via database/user fields containing '?', '&', '@', or ':' characters.
@@ -87,7 +95,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input MySQLInput) (*m
 		User:                 input.User,
 		Passwd:               input.Password,
 		Net:                  "tcp",
-		Addr:                 fmt.Sprintf("%s:%d", connectAddr, input.Port),
+		Addr:                 fmt.Sprintf("%s:%d", connectAddr, port),
 		DBName:               input.Database,
 		Timeout:              timeout,
 		ReadTimeout:          timeout,

@@ -19,7 +19,7 @@ func opSend(ctx context.Context, input IPCInput) (*Result, IPCOutput, error) {
 		return errorResult("message is required")
 	}
 
-	timeout := input.Timeout
+	timeout := input.TimeoutInt
 	if timeout <= 0 {
 		timeout = 10
 	}
@@ -73,7 +73,7 @@ func opPing(ctx context.Context, input IPCInput) (*Result, IPCOutput, error) {
 		return errorResult("host is required (e.g. \"192.168.1.5:19900\" or \"localhost:19900\")")
 	}
 
-	timeout := input.Timeout
+	timeout := input.TimeoutInt
 	if timeout <= 0 {
 		timeout = 5
 	}

@@ -24,8 +24,8 @@ const (
 type WebFetchInput struct {
 	URL        string            `json:"url" jsonschema:"URL to fetch content from (http/https),required"`
 	Headers    map[string]string `json:"headers,omitempty" jsonschema:"Custom HTTP headers (e.g. User-Agent, Accept, Authorization, Referer)"`
-	MaxLength  int               `json:"max_length,omitempty" jsonschema:"Maximum response length in characters. Default: 100000"`
-	TimeoutSec int              `json:"timeout_sec,omitempty" jsonschema:"Request timeout in seconds. Default: 30, Max: 120"`
+	MaxLength  interface{}       `json:"max_length,omitempty" jsonschema:"Maximum response length in characters. Default: 100000"`
+	TimeoutSec interface{}       `json:"timeout_sec,omitempty" jsonschema:"Request timeout in seconds. Default: 30, Max: 120"`
 	ProxyURL   string            `json:"proxy_url,omitempty" jsonschema:"HTTP or SOCKS5 proxy URL (e.g. http://proxy:8080, socks5://proxy:1080)"`
 	NoDoH      interface{}       `json:"no_doh,omitempty" jsonschema:"Disable DNS over HTTPS: true or false. Default: false (DoH enabled)"`
 	NoECH      interface{}       `json:"no_ech,omitempty" jsonschema:"Disable Encrypted Client Hello: true or false. Default: false (ECH enabled)"`
@@ -58,13 +58,21 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input WebFetchInput) 
 	}
 
 	// Defaults
-	if input.MaxLength <= 0 {
-		input.MaxLength = defaultMaxLength
+	maxLength, ok := common.FlexInt(input.MaxLength)
+	if !ok {
+		return errorResult("max_length must be an integer")
 	}
-	if input.TimeoutSec <= 0 {
-		input.TimeoutSec = defaultTimeoutSec
+	timeoutSec, ok := common.FlexInt(input.TimeoutSec)
+	if !ok {
+		return errorResult("timeout_sec must be an integer")
 	}
-	if input.TimeoutSec > maxTimeoutSec {
+	if maxLength <= 0 {
+		maxLength = defaultMaxLength
+	}
+	if timeoutSec <= 0 {
+		timeoutSec = defaultTimeoutSec
+	}
+	if timeoutSec > maxTimeoutSec {
 		return errorResult(fmt.Sprintf("timeout_sec exceeds maximum (%d)", maxTimeoutSec))
 	}
 
@@ -73,7 +81,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input WebFetchInput) 
 
 	// Create HTTP client
 	client, err := common.NewHTTPClient(common.HTTPClientConfig{
-		TimeoutSec: input.TimeoutSec,
+		TimeoutSec: timeoutSec,
 		ProxyURL:   input.ProxyURL,
 		EnableDoH:  !noDoH && common.GetEnableDoH(),
 		EnableECH:  !noECH && common.GetEnableECH(),
@@ -142,8 +150,8 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input WebFetchInput) 
 	// Truncate if needed (rune-safe to avoid breaking multi-byte characters)
 	truncated := false
 	runes := []rune(content)
-	if len(runes) > input.MaxLength {
-		content = string(runes[:input.MaxLength])
+	if len(runes) > maxLength {
+		content = string(runes[:maxLength])
 		truncated = true
 	}
 
@@ -160,7 +168,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input WebFetchInput) 
 	sb.WriteString(fmt.Sprintf("Content-Type: %s\n\n", ct))
 	sb.WriteString(content)
 	if truncated {
-		sb.WriteString(fmt.Sprintf("\n\n[Truncated: output exceeded %d characters]", input.MaxLength))
+		sb.WriteString(fmt.Sprintf("\n\n[Truncated: output exceeded %d characters]", maxLength))
 	}
 
 	out := WebFetchOutput{

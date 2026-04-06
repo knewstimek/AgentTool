@@ -32,37 +32,55 @@ type fileEntry struct {
 
 // FileRange specifies per-file read range. Used in the "files" parameter.
 type FileRange struct {
-	Path   string `json:"path" jsonschema:"Absolute file path"`
-	Offset int    `json:"offset,omitempty" jsonschema:"Line offset (1-based, negative = from end). Default: 1"`
-	Limit  int    `json:"limit,omitempty" jsonschema:"Max lines to read. Default: 0 (all)"`
+	Path   string      `json:"path" jsonschema:"Absolute file path"`
+	Offset interface{} `json:"offset,omitempty" jsonschema:"Line offset (1-based, negative = from end). Default: 1"`
+	Limit  interface{} `json:"limit,omitempty" jsonschema:"Max lines to read. Default: 0 (all)"`
 }
 
 type MultiReadInput struct {
 	// Simple mode: list of paths, all using the same offset/limit
-	FilePaths []string `json:"file_paths,omitempty" jsonschema:"List of absolute file paths to read. All files use the global offset/limit. Use 'files' instead for per-file ranges"`
-	Offset    int      `json:"offset,omitempty" jsonschema:"Line number to start reading from (1-based). Negative = from end (e.g. -5 = last 5 lines). Default: 1"`
-	Limit     int      `json:"limit,omitempty" jsonschema:"Maximum number of lines to read per file. Default: 0 (all)"`
+	FilePaths []string    `json:"file_paths,omitempty" jsonschema:"List of absolute file paths to read. All files use the global offset/limit. Use 'files' instead for per-file ranges"`
+	Offset    interface{} `json:"offset,omitempty" jsonschema:"Line number to start reading from (1-based). Negative = from end (e.g. -5 = last 5 lines). Default: 1"`
+	Limit     interface{} `json:"limit,omitempty" jsonschema:"Maximum number of lines to read per file. Default: 0 (all)"`
 
 	// Advanced mode: per-file offset/limit. Takes priority over file_paths if both are provided
 	Files []FileRange `json:"files,omitempty" jsonschema:"Per-file read ranges. Each entry has path, offset, limit. Takes priority over file_paths"`
 }
 
 // resolveEntries converts input to a unified list of fileEntry.
-func resolveEntries(input MultiReadInput) []fileEntry {
+// Returns entries and a validation error string (non-empty means invalid input).
+func resolveEntries(input MultiReadInput) ([]fileEntry, string) {
+	globalOffset, ok := common.FlexInt(input.Offset)
+	if !ok {
+		return nil, "offset must be an integer"
+	}
+	globalLimit, ok := common.FlexInt(input.Limit)
+	if !ok {
+		return nil, "limit must be an integer"
+	}
+
 	// "files" takes priority
 	if len(input.Files) > 0 {
 		entries := make([]fileEntry, len(input.Files))
 		for i, f := range input.Files {
-			entries[i] = fileEntry{Path: f.Path, Offset: f.Offset, Limit: f.Limit}
+			off, ok := common.FlexInt(f.Offset)
+			if !ok {
+				return nil, fmt.Sprintf("files[%d].offset must be an integer", i)
+			}
+			lim, ok := common.FlexInt(f.Limit)
+			if !ok {
+				return nil, fmt.Sprintf("files[%d].limit must be an integer", i)
+			}
+			entries[i] = fileEntry{Path: f.Path, Offset: off, Limit: lim}
 		}
-		return entries
+		return entries, ""
 	}
 	// Fallback to file_paths with global offset/limit
 	entries := make([]fileEntry, len(input.FilePaths))
 	for i, p := range input.FilePaths {
-		entries[i] = fileEntry{Path: p, Offset: input.Offset, Limit: input.Limit}
+		entries[i] = fileEntry{Path: p, Offset: globalOffset, Limit: globalLimit}
 	}
-	return entries
+	return entries, ""
 }
 
 type MultiReadOutput struct {
@@ -72,7 +90,10 @@ type MultiReadOutput struct {
 }
 
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input MultiReadInput) (*mcp.CallToolResult, MultiReadOutput, error) {
-	entries := resolveEntries(input)
+	entries, validErr := resolveEntries(input)
+	if validErr != "" {
+		return errorResult(validErr)
+	}
 	if len(entries) == 0 {
 		return errorResult("file_paths is required and must not be empty")
 	}

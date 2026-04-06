@@ -39,7 +39,7 @@ type ProcExecInput struct {
 	Args       []string `json:"args,omitempty" jsonschema:"Command arguments"`
 	Cwd        string   `json:"cwd,omitempty" jsonschema:"Working directory (default: current directory)"`
 	Env        []string `json:"env,omitempty" jsonschema:"Environment variables in KEY=VALUE format. Inherits parent environment by default"`
-	TimeoutSec int      `json:"timeout_sec,omitempty" jsonschema:"Timeout in seconds (default 30, max 300). Ignored for background/suspended execution"`
+	TimeoutSec interface{} `json:"timeout_sec,omitempty" jsonschema:"Timeout in seconds (default 30, max 300). Ignored for background/suspended execution"`
 	Background interface{} `json:"background,omitempty" jsonschema:"Start process in background and return PID immediately: true or false. Default: false"`
 	Suspended  interface{} `json:"suspended,omitempty" jsonschema:"Start process in suspended state. Windows: CREATE_SUSPENDED, Linux: SIGSTOP. Implies background=true: true or false. Default: false"`
 }
@@ -59,13 +59,17 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ProcExecInput) 
 	}
 
 	// 2. Validate timeout
-	if input.TimeoutSec < 0 {
+	timeoutSec, ok := common.FlexInt(input.TimeoutSec)
+	if !ok {
+		return errorResult("timeout_sec must be an integer")
+	}
+	if timeoutSec < 0 {
 		return errorResult("timeout_sec must be non-negative")
 	}
-	if input.TimeoutSec == 0 {
-		input.TimeoutSec = 30
+	if timeoutSec == 0 {
+		timeoutSec = 30
 	}
-	if input.TimeoutSec > maxTimeoutSec {
+	if timeoutSec > maxTimeoutSec {
 		return errorResult(fmt.Sprintf("timeout_sec exceeds maximum (%d)", maxTimeoutSec))
 	}
 
@@ -109,11 +113,11 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ProcExecInput) 
 	if background {
 		return execBackground(input)
 	}
-	return execForeground(ctx, input)
+	return execForeground(ctx, input, timeoutSec)
 }
 
-func execForeground(ctx context.Context, input ProcExecInput) (*mcp.CallToolResult, ProcExecOutput, error) {
-	execCtx, cancel := context.WithTimeout(ctx, time.Duration(input.TimeoutSec)*time.Second)
+func execForeground(ctx context.Context, input ProcExecInput, timeoutSec int) (*mcp.CallToolResult, ProcExecOutput, error) {
+	execCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(execCtx, input.Command, input.Args...)
@@ -135,7 +139,7 @@ func execForeground(ctx context.Context, input ProcExecInput) (*mcp.CallToolResu
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			exitCode = exitErr.ExitCode()
 		} else if execCtx.Err() == context.DeadlineExceeded {
-			return errorResult(fmt.Sprintf("process timed out after %d seconds", input.TimeoutSec))
+			return errorResult(fmt.Sprintf("process timed out after %d seconds", timeoutSec))
 		} else {
 			return errorResult(fmt.Sprintf("failed to execute: %v", err))
 		}

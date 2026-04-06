@@ -39,12 +39,12 @@ var dangerousCommands = map[string]bool{
 
 type RedisInput struct {
 	Host       string   `json:"host" jsonschema:"Redis server hostname or IP address,required"`
-	Port       int      `json:"port,omitempty" jsonschema:"Redis port number. Default: 6379"`
+	Port       interface{} `json:"port,omitempty" jsonschema:"Redis port number. Default: 6379"`
 	Password   string   `json:"password,omitempty" jsonschema:"Password for authentication"`
-	DB         int      `json:"db,omitempty" jsonschema:"Redis database number. Default: 0"`
+	DB         interface{} `json:"db,omitempty" jsonschema:"Redis database number. Default: 0"`
 	Command    string   `json:"command" jsonschema:"Redis command (e.g. GET, SET, HGETALL),required"`
 	Args       []string `json:"args,omitempty" jsonschema:"Command arguments"`
-	TimeoutSec int      `json:"timeout_sec,omitempty" jsonschema:"Command timeout in seconds. Default: 30, Max: 120"`
+	TimeoutSec interface{} `json:"timeout_sec,omitempty" jsonschema:"Command timeout in seconds. Default: 30, Max: 120"`
 	TLS        interface{} `json:"tls,omitempty" jsonschema:"Use TLS encryption: true or false. Default: false"`
 }
 
@@ -70,16 +70,28 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input RedisInput) (*m
 	}
 
 	// Defaults
-	if input.Port == 0 {
-		input.Port = defaultPort
+	port, ok := common.FlexInt(input.Port)
+	if !ok {
+		return errorResult("port must be an integer")
 	}
-	if input.Port < 1 || input.Port > 65535 {
-		return errorResult(fmt.Sprintf("invalid port: %d (must be 1-65535)", input.Port))
+	db, ok := common.FlexInt(input.DB)
+	if !ok {
+		return errorResult("db must be an integer")
 	}
-	if input.TimeoutSec <= 0 {
-		input.TimeoutSec = defaultTimeoutSec
+	timeoutSec, ok := common.FlexInt(input.TimeoutSec)
+	if !ok {
+		return errorResult("timeout_sec must be an integer")
 	}
-	if input.TimeoutSec > maxTimeoutSec {
+	if port == 0 {
+		port = defaultPort
+	}
+	if port < 1 || port > 65535 {
+		return errorResult(fmt.Sprintf("invalid port: %d (must be 1-65535)", port))
+	}
+	if timeoutSec <= 0 {
+		timeoutSec = defaultTimeoutSec
+	}
+	if timeoutSec > maxTimeoutSec {
 		return errorResult(fmt.Sprintf("timeout_sec exceeds maximum (%d)", maxTimeoutSec))
 	}
 
@@ -96,12 +108,12 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input RedisInput) (*m
 		connectAddr = resolvedIP
 	}
 
-	timeout := time.Duration(input.TimeoutSec) * time.Second
+	timeout := time.Duration(timeoutSec) * time.Second
 
 	opts := &goredis.Options{
-		Addr:         fmt.Sprintf("%s:%d", connectAddr, input.Port),
+		Addr:         fmt.Sprintf("%s:%d", connectAddr, port),
 		Password:     input.Password,
-		DB:           input.DB,
+		DB:           db,
 		DialTimeout:  timeout,
 		ReadTimeout:  timeout,
 		WriteTimeout: timeout,

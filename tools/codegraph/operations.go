@@ -120,8 +120,8 @@ func opIndex(input CodeGraphInput) (string, error) {
 
 	// Worker goroutines for parsing
 	numWorkers := poolSize
-	if input.Workers > 0 {
-		numWorkers = input.Workers
+	if w, _ := common.FlexInt(input.Workers); w > 0 {
+		numWorkers = w
 		if numWorkers > 32 {
 			numWorkers = 32 // cap to prevent excessive memory usage
 		}
@@ -1054,7 +1054,7 @@ func opCallTree(input CodeGraphInput) (string, error) {
 	}
 	defer db.Close()
 
-	maxDepth := input.Depth
+	maxDepth, _ := common.FlexInt(input.Depth)
 	if maxDepth <= 0 {
 		maxDepth = 3
 	}

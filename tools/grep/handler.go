@@ -26,11 +26,11 @@ type GrepInput struct {
 	FilePath   string `json:"file_path,omitempty" jsonschema:"Alias for path"`
 	Glob       string `json:"glob,omitempty" jsonschema:"Glob pattern to filter files (e.g. *.go). Only used when path is a directory"`
 	IgnoreCase interface{} `json:"ignore_case,omitempty" jsonschema:"Case insensitive search: true or false. Default: false"`
-	MaxResults int    `json:"max_results,omitempty" jsonschema:"Maximum number of matching lines/files to return. Default: 100"`
-	OutputMode string `json:"output_mode,omitempty" jsonschema:"Output mode: 'content' (matching lines with path:line:text, default), 'files_with_matches' (file paths only), 'count' (match count per file)"`
-	Context    int    `json:"context,omitempty" jsonschema:"Lines of context before and after each match (like grep -C). Default: 0"`
-	Before     int    `json:"before,omitempty" jsonschema:"Lines of context before each match (like grep -B). Overrides context. Default: 0"`
-	After      int    `json:"after,omitempty" jsonschema:"Lines of context after each match (like grep -A). Overrides context. Default: 0"`
+	MaxResults interface{} `json:"max_results,omitempty" jsonschema:"Maximum number of matching lines/files to return. Default: 100"`
+	OutputMode string      `json:"output_mode,omitempty" jsonschema:"Output mode: 'content' (matching lines with path:line:text, default), 'files_with_matches' (file paths only), 'count' (match count per file)"`
+	Context    interface{} `json:"context,omitempty" jsonschema:"Lines of context before and after each match (like grep -C). Default: 0"`
+	Before     interface{} `json:"before,omitempty" jsonschema:"Lines of context before each match (like grep -B). Overrides context. Default: 0"`
+	After      interface{} `json:"after,omitempty" jsonschema:"Lines of context after each match (like grep -A). Overrides context. Default: 0"`
 }
 
 type GrepOutput struct {
@@ -69,9 +69,21 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input GrepInput) (*mc
 		return errorResult(fmt.Sprintf("invalid regex pattern: %v", err))
 	}
 
-	maxResults := input.MaxResults
+	maxResults, _ := common.FlexInt(input.MaxResults)
 	if maxResults <= 0 {
 		maxResults = 100
+	}
+	ctxLines, ok := common.FlexInt(input.Context)
+	if !ok {
+		return errorResult("context must be an integer")
+	}
+	beforeLines, ok := common.FlexInt(input.Before)
+	if !ok {
+		return errorResult("before must be an integer")
+	}
+	afterLines, ok := common.FlexInt(input.After)
+	if !ok {
+		return errorResult("after must be an integer")
 	}
 
 	// Compute search options
@@ -82,15 +94,15 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input GrepInput) (*mc
 	default:
 		return errorResult(fmt.Sprintf("invalid output_mode %q -- use 'content', 'files_with_matches', or 'count'", input.OutputMode))
 	}
-	if input.Context > 0 {
-		opts.before = input.Context
-		opts.after = input.Context
+	if ctxLines > 0 {
+		opts.before = ctxLines
+		opts.after = ctxLines
 	}
-	if input.Before > 0 {
-		opts.before = input.Before
+	if beforeLines > 0 {
+		opts.before = beforeLines
 	}
-	if input.After > 0 {
-		opts.after = input.After
+	if afterLines > 0 {
+		opts.after = afterLines
 	}
 
 	fi, err := os.Stat(input.Path)

@@ -17,7 +17,7 @@ type SlocInput struct {
 	Path       string `json:"path,omitempty" jsonschema:"Absolute path to a file or directory to count,required"`
 	FilePath   string `json:"file_path,omitempty" jsonschema:"Alias for path"`
 	Glob       string `json:"glob,omitempty" jsonschema:"Glob pattern to filter files when path is a directory (e.g. *.go, *.py). Default: all recognized source files"`
-	MaxDepth   int    `json:"max_depth,omitempty" jsonschema:"Maximum directory depth to traverse (0 = unlimited). Default: 0"`
+	MaxDepth   interface{} `json:"max_depth,omitempty" jsonschema:"Maximum directory depth to traverse (0 = unlimited). Default: 0"`
 	ShowFiles  *bool  `json:"show_files,omitempty" jsonschema:"Show per-file breakdown. Default: true for <=50 files, false otherwise"`
 	SkipBlank  interface{} `json:"skip_blank,omitempty" jsonschema:"Exclude blank lines from count: true or false. Default: false"`
 }
@@ -150,10 +150,15 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input SlocInput) (*mc
 
 	skipBlank := common.FlexBool(input.SkipBlank)
 
+	maxDepth, ok := common.FlexInt(input.MaxDepth)
+	if !ok {
+		return errorResult("max_depth must be an integer")
+	}
+
 	var files []fileStat
 
 	if info.IsDir() {
-		files, err = walkDir(cleaned, input.Glob, input.MaxDepth, skipBlank)
+		files, err = walkDir(cleaned, input.Glob, maxDepth, skipBlank)
 		if err != nil {
 			return errorResult(fmt.Sprintf("walk error: %v", err))
 		}

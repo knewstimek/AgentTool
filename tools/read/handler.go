@@ -40,7 +40,7 @@ type ReadInput struct {
 	FilePath string `json:"file_path,omitempty" jsonschema:"Absolute or relative path to the file to read"`
 	Path     string `json:"path,omitempty" jsonschema:"Alias for file_path"`
 	Offset   any    `json:"offset,omitempty" jsonschema:"Line offset. Integer (1-based, negative=from end), string range 'start-end', or [start,end] array. Default: 0 (all)"`
-	Limit    int    `json:"limit,omitempty" jsonschema:"Maximum number of lines to read. Default: 0 (all)"`
+	Limit    interface{} `json:"limit,omitempty" jsonschema:"Maximum number of lines to read. Default: 0 (all)"`
 }
 
 type ReadOutput struct {
@@ -178,8 +178,11 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ReadInput) (*mc
 		return errorResult(err.Error())
 	}
 
+	limit, ok := common.FlexInt(input.Limit)
+	if !ok {
+		return errorResult("limit must be an integer")
+	}
 	// Range (e.g. "100-200") sets limit when explicit limit is not provided
-	limit := input.Limit
 	if rangeLimit > 0 && limit == 0 {
 		limit = rangeLimit
 	}

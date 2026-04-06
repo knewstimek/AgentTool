@@ -10,8 +10,8 @@ import (
 )
 
 type ProcListInput struct {
-	Filter string `json:"filter,omitempty" jsonschema:"Filter by process name (case-insensitive partial match)"`
-	Port   int    `json:"port,omitempty" jsonschema:"Show only processes using this port number"`
+	Filter string      `json:"filter,omitempty" jsonschema:"Filter by process name (case-insensitive partial match)"`
+	Port   interface{} `json:"port,omitempty" jsonschema:"Show only processes using this port number"`
 }
 
 type ProcListOutput struct {
@@ -19,24 +19,29 @@ type ProcListOutput struct {
 }
 
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input ProcListInput) (*mcp.CallToolResult, ProcListOutput, error) {
+	port, ok := common.FlexInt(input.Port)
+	if !ok {
+		return errorResult("port must be an integer")
+	}
+
 	procs, err := listProcesses()
 	if err != nil {
 		return errorResult(fmt.Sprintf("failed to list processes: %v", err))
 	}
 
 	// Validate port range
-	if input.Port > 65535 {
+	if port > 65535 {
 		return errorResult("invalid port number: must be between 1 and 65535")
 	}
 
 	// Port filtering
 	var portEntries []PortEntry
 	portPIDSet := map[int]PortEntry{}
-	if input.Port > 0 {
+	if port > 0 {
 		entries, err := ListPortPIDs()
 		if err == nil {
 			for _, e := range entries {
-				if e.Port == input.Port {
+				if e.Port == port {
 					portPIDSet[e.PID] = e
 					portEntries = append(portEntries, e)
 				}
@@ -57,7 +62,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ProcListInput) 
 	for i := range procs {
 		p := &procs[i]
 		// Port filter
-		if input.Port > 0 {
+		if port > 0 {
 			if _, ok := portPIDSet[p.PID]; !ok {
 				continue
 			}
@@ -80,8 +85,8 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ProcListInput) 
 	// Output formatting
 	var sb strings.Builder
 
-	if input.Port > 0 {
-		sb.WriteString(fmt.Sprintf("=== Processes on port %d ===\n\n", input.Port))
+	if port > 0 {
+		sb.WriteString(fmt.Sprintf("=== Processes on port %d ===\n\n", port))
 	} else {
 		sb.WriteString("=== Process List ===\n\n")
 	}
@@ -103,7 +108,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ProcListInput) 
 	}
 
 	// Append port information
-	if input.Port > 0 && len(portEntries) > 0 {
+	if port > 0 && len(portEntries) > 0 {
 		sb.WriteString(fmt.Sprintf("\nProtocol: %s", portEntries[0].Protocol))
 		if portEntries[0].State != "" {
 			sb.WriteString(fmt.Sprintf(", State: %s", portEntries[0].State))
@@ -112,7 +117,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ProcListInput) 
 	}
 
 	sb.WriteString(fmt.Sprintf("\nTotal: %d processes shown", len(filtered)))
-	if filter != "" || input.Port > 0 {
+	if filter != "" || port > 0 {
 		sb.WriteString(fmt.Sprintf(" (filtered from %d)", totalCount))
 	}
 	sb.WriteString("\n")

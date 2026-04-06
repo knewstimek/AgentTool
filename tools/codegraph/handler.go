@@ -16,8 +16,8 @@ type CodeGraphInput struct {
 	Path      string `json:"path,omitempty" jsonschema:"Project directory path (for index) or file path (for symbols)"`
 	Name      string `json:"name,omitempty" jsonschema:"Symbol name to search for (for find, callers, callees, methods, inherits, call_tree)"`
 	Language  string `json:"language,omitempty" jsonschema:"Language hint: cpp, python, go, csharp, rust, java. Default: auto-detect from file extension"`
-	Workers   int    `json:"workers,omitempty" jsonschema:"Number of parallel parse workers for index operation. Default: 4. Higher = faster but more memory (~7MB per worker)"`
-	Depth     int    `json:"depth,omitempty" jsonschema:"Max recursion depth for call_tree. Default: 3, Max: 10"`
+	Workers   interface{} `json:"workers,omitempty" jsonschema:"Number of parallel parse workers for index operation. Default: 4. Higher = faster but more memory (~7MB per worker)"`
+	Depth     interface{} `json:"depth,omitempty" jsonschema:"Max recursion depth for call_tree. Default: 3, Max: 10"`
 	Direction string `json:"direction,omitempty" jsonschema:"Direction for call_tree: up (callers) or down (callees). Default: up"`
 }
 

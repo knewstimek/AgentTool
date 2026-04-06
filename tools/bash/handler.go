@@ -16,7 +16,7 @@ type BashInput struct {
 	Command    string `json:"command" jsonschema:"Shell command to execute"`
 	Cwd        string `json:"cwd,omitempty" jsonschema:"Initial working directory (only used when creating a new session)"`
 	SessionID  string `json:"session_id,omitempty" jsonschema:"Session identifier for persistent shell. Default: default"`
-	TimeoutSec int    `json:"timeout_sec,omitempty" jsonschema:"Command timeout in seconds (default 120, max 600)"`
+	TimeoutSec interface{} `json:"timeout_sec,omitempty" jsonschema:"Command timeout in seconds (default 120, max 600)"`
 	Disconnect interface{} `json:"disconnect,omitempty" jsonschema:"Close the shell session: true or false. Default: false"`
 }
 
@@ -51,10 +51,14 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input BashInput) (*mc
 	}
 
 	// Validate timeout
-	if input.TimeoutSec <= 0 {
-		input.TimeoutSec = 120
+	timeoutSec, ok := common.FlexInt(input.TimeoutSec)
+	if !ok {
+		return errorResult("timeout_sec must be an integer")
 	}
-	if input.TimeoutSec > maxTimeoutSec {
+	if timeoutSec <= 0 {
+		timeoutSec = 120
+	}
+	if timeoutSec > maxTimeoutSec {
 		return errorResult(fmt.Sprintf("timeout_sec exceeds maximum (%d)", maxTimeoutSec))
 	}
 
@@ -77,7 +81,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input BashInput) (*mc
 	// cwd only applies to new sessions; existing sessions ignore it
 
 	// Execute command
-	result, err := executeCommand(ctx, sess, input.Command, input.TimeoutSec)
+	result, err := executeCommand(ctx, sess, input.Command, timeoutSec)
 	if err != nil {
 		// If session died, remove it from pool
 		pool.remove(input.SessionID)
