@@ -38,8 +38,10 @@ type FileRange struct {
 }
 
 type MultiReadInput struct {
-	// Simple mode: list of paths, all using the same offset/limit
+	// Simple mode: list of paths, all using the same offset/limit.
+	// Both "file_paths" and "paths" are accepted (alias for compatibility).
 	FilePaths []string    `json:"file_paths,omitempty" jsonschema:"List of absolute file paths to read. All files use the global offset/limit. Use 'files' instead for per-file ranges"`
+	Paths     []string    `json:"paths,omitempty" jsonschema:"Alias for file_paths"`
 	Offset    interface{} `json:"offset,omitempty" jsonschema:"Line number to start reading from (1-based). Negative = from end (e.g. -5 = last 5 lines). Default: 1"`
 	Limit     interface{} `json:"limit,omitempty" jsonschema:"Maximum number of lines to read per file. Default: 0 (all)"`
 
@@ -57,6 +59,11 @@ func resolveEntries(input MultiReadInput) ([]fileEntry, string) {
 	globalLimit, ok := common.FlexInt(input.Limit)
 	if !ok {
 		return nil, "limit must be an integer"
+	}
+
+	// Merge "paths" alias into file_paths
+	if len(input.Paths) > 0 && len(input.FilePaths) == 0 {
+		input.FilePaths = input.Paths
 	}
 
 	// "files" takes priority
@@ -242,7 +249,7 @@ func Register(server *mcp.Server) {
 		Description: `Reads multiple files in a single call to reduce API round-trips.
 Encoding-aware: auto-detects file encoding for each file.
 Supports offset/limit for reading specific line ranges.
-Use file_paths (string array) with global offset/limit, or files (object array) for per-file offset/limit.
+Use file_paths or paths (string array) with global offset/limit, or files (object array) for per-file offset/limit.
 If a file fails, the error is included in output and remaining files continue.
 Maximum 50 files per request.`,
 	}, Handle)
