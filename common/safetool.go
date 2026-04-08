@@ -52,6 +52,12 @@ func SafeAddTool[In, Out any](s *mcp.Server, t *mcp.Tool, h mcp.ToolHandlerFor[I
 	// oneOf: [{type: "integer"}, {type: "null"}] (Go *int fields).
 	intProps := collectIntProperties(schema)
 
+	// Collect which properties are string-array-typed for coercion.
+	// Agents sometimes pass arrays as JSON-encoded strings (double-encoding),
+	// e.g. paths: "[\"a\",\"b\"]" instead of paths: ["a","b"].
+	// We fix this before validation so agents don't waste tokens on retries.
+	strArrProps := collectStringArrayProperties(schema)
+
 	rawHandler := func(ctx context.Context, req *mcp.CallToolRequest) (result *mcp.CallToolResult, err error) {
 		defer func() {
 			if r := recover(); r != nil {
@@ -65,6 +71,11 @@ func SafeAddTool[In, Out any](s *mcp.Server, t *mcp.Tool, h mcp.ToolHandlerFor[I
 		args := req.Params.Arguments
 		if len(args) > 0 && len(intProps) > 0 {
 			args = coerceIntProperties(args, intProps)
+		}
+
+		// Coerce JSON-encoded string values to actual arrays for string-array-typed properties.
+		if len(args) > 0 && len(strArrProps) > 0 {
+			args = coerceStringArrayProperties(args, strArrProps)
 		}
 
 		// Apply defaults and validate against schema.
@@ -145,6 +156,79 @@ func isIntegerSchema(s *jsonschema.Schema) bool {
 		}
 	}
 	return false
+}
+
+// collectStringArrayProperties returns a set of top-level property names that are
+// string-array-typed, including nullable slice variants (Types: ["null","array"]).
+func collectStringArrayProperties(s *jsonschema.Schema) map[string]bool {
+	result := make(map[string]bool)
+	if s == nil || s.Properties == nil {
+		return result
+	}
+	for name, prop := range s.Properties {
+		if prop != nil && isStringArraySchema(prop) {
+			result[name] = true
+		}
+	}
+	return result
+}
+
+// isStringArraySchema reports whether s represents a string-array type,
+// handling both direct array schemas and nullable variants (Types: ["null","array"]).
+func isStringArraySchema(s *jsonschema.Schema) bool {
+	hasArrayType := s.Type == "array"
+	if !hasArrayType {
+		for _, t := range s.Types {
+			if t == "array" {
+				hasArrayType = true
+				break
+			}
+		}
+	}
+	return hasArrayType && s.Items != nil && s.Items.Type == "string"
+}
+
+// coerceStringArrayProperties converts JSON-encoded string values to actual arrays
+// for properties known to be string-array-typed. Handles the common agent mistake
+// of passing e.g. paths: "[\"a\",\"b\"]" (string) instead of paths: ["a","b"] (array).
+func coerceStringArrayProperties(data json.RawMessage, strArrProps map[string]bool) json.RawMessage {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(data, &m); err != nil {
+		return data
+	}
+
+	changed := false
+	for key, raw := range m {
+		if !strArrProps[key] {
+			continue
+		}
+		// Only coerce string values (starts with '"')
+		if len(raw) < 2 || raw[0] != '"' {
+			continue
+		}
+		var s string
+		if err := json.Unmarshal(raw, &s); err != nil {
+			continue
+		}
+		// Try to parse the string content as a JSON array of strings
+		var arr []string
+		if err := json.Unmarshal([]byte(s), &arr); err != nil {
+			continue
+		}
+		if b, err := json.Marshal(arr); err == nil {
+			m[key] = b
+			changed = true
+		}
+	}
+
+	if !changed {
+		return data
+	}
+	result, err := json.Marshal(m)
+	if err != nil {
+		return data
+	}
+	return result
 }
 
 // coerceIntProperties takes raw JSON arguments and converts string values
