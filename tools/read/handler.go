@@ -37,10 +37,12 @@ const maxImageSize = 20 * 1024 * 1024
 const readHashThreshold = 10 * 1024 * 1024 // 10MB
 
 type ReadInput struct {
-	FilePath string `json:"file_path,omitempty" jsonschema:"Absolute or relative path to the file to read"`
-	Path     string `json:"path,omitempty" jsonschema:"Alias for file_path"`
-	Offset   any    `json:"offset,omitempty" jsonschema:"Line offset. Integer (1-based, negative=from end), string range 'start-end', or [start,end] array. Default: 0 (all)"`
-	Limit    interface{} `json:"limit,omitempty" jsonschema:"Maximum number of lines to read. Default: 0 (all)"`
+	FilePath  string      `json:"file_path,omitempty" jsonschema:"Absolute or relative path to the file to read"`
+	Path      string      `json:"path,omitempty" jsonschema:"Alias for file_path"`
+	Offset    any         `json:"offset,omitempty" jsonschema:"Line offset. Integer (1-based, negative=from end), string range 'start-end', or [start,end] array. Default: 0 (all)"`
+	Limit     interface{} `json:"limit,omitempty" jsonschema:"Maximum number of lines to read. Default: 0 (all)"`
+	StartLine interface{} `json:"start_line,omitempty" jsonschema:"Alias for offset (1-based line number to start reading from)"`
+	EndLine   interface{} `json:"end_line,omitempty" jsonschema:"End line number (1-based, inclusive). Sets limit = end_line - start_line + 1 when used with start_line"`
 }
 
 type ReadOutput struct {
@@ -131,6 +133,21 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ReadInput) (*mc
 	// Accept "path" as an alias for "file_path"
 	if input.FilePath == "" {
 		input.FilePath = input.Path
+	}
+
+	// Accept start_line/end_line as aliases for offset/limit
+	if input.StartLine != nil && input.Offset == nil {
+		input.Offset = input.StartLine
+	}
+	if input.EndLine != nil {
+		startLine, ok := common.FlexInt(input.StartLine)
+		if !ok {
+			startLine = 1
+		}
+		endLine, ok := common.FlexInt(input.EndLine)
+		if ok && endLine >= startLine {
+			input.Limit = endLine - startLine + 1
+		}
 	}
 	if input.FilePath == "" {
 		return errorResult("file_path is required")

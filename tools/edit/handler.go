@@ -15,14 +15,16 @@ import (
 
 // EditInput is the input parameter for the Edit tool.
 type EditInput struct {
-	FilePath     string `json:"file_path,omitempty" jsonschema:"Absolute path to the file to edit"`
-	Path         string `json:"path,omitempty" jsonschema:"Alias for file_path"`
-	OldString    string `json:"old_string" jsonschema:"Exact text to find in the file"`
-	NewString    string `json:"new_string" jsonschema:"Replacement text (must differ from old_string)"`
+	FilePath     string      `json:"file_path,omitempty" jsonschema:"Absolute path to the file to edit"`
+	Path         string      `json:"path,omitempty" jsonschema:"Alias for file_path"`
+	OldString    string      `json:"old_string,omitempty" jsonschema:"Exact text to find in the file"`
+	NewString    string      `json:"new_string,omitempty" jsonschema:"Replacement text (must differ from old_string)"`
+	OldContent   string      `json:"old_content,omitempty" jsonschema:"Alias for old_string"`
+	NewContent   string      `json:"new_content,omitempty" jsonschema:"Alias for new_string"`
 	ReplaceAll   interface{} `json:"replace_all,omitempty" jsonschema:"Replace all occurrences instead of just the first: true or false. Default: false"`
 	DryRun       interface{} `json:"dry_run,omitempty" jsonschema:"Preview changes without modifying the file: true or false. Default: false"`
-	IndentStyle  string `json:"indent_style,omitempty" jsonschema:"Override indentation style. Values: tabs or spaces-N (e.g. spaces-4). Empty = auto-detect (default)"`
-	ExpectedHash string `json:"expected_hash,omitempty" jsonschema:"Optional SHA-256 hash of the file. If provided and mismatched, edit is rejected (optimistic concurrency)."`
+	IndentStyle  string      `json:"indent_style,omitempty" jsonschema:"Override indentation style. Values: tabs or spaces-N (e.g. spaces-4). Empty = auto-detect (default)"`
+	ExpectedHash string      `json:"expected_hash,omitempty" jsonschema:"Optional SHA-256 hash of the file. If provided and mismatched, edit is rejected (optimistic concurrency)."`
 }
 
 // EditOutput is the output of the Edit tool.
@@ -41,6 +43,13 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input EditInput) (*mc
 	}
 	if !filepath.IsAbs(input.FilePath) {
 		return errorResult("file_path must be an absolute path")
+	}
+	// Accept old_content/new_content as aliases for old_string/new_string
+	if input.OldString == "" && input.OldContent != "" {
+		input.OldString = input.OldContent
+	}
+	if input.NewString == "" && input.NewContent != "" {
+		input.NewString = input.NewContent
 	}
 	if input.OldString == "" {
 		return errorResult("old_string is required")

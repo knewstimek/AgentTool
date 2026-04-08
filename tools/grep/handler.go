@@ -26,6 +26,7 @@ type GrepInput struct {
 	FilePath   string `json:"file_path,omitempty" jsonschema:"Alias for path"`
 	Glob       string `json:"glob,omitempty" jsonschema:"Glob pattern to filter files (e.g. *.go). Only used when path is a directory"`
 	IgnoreCase interface{} `json:"ignore_case,omitempty" jsonschema:"Case insensitive search: true or false. Default: false"`
+	Recursive  interface{} `json:"recursive,omitempty" jsonschema:"Recurse into subdirectories: true or false. Default: true"`
 	MaxResults interface{} `json:"max_results,omitempty" jsonschema:"Maximum number of matching lines/files to return. Default: 100"`
 	OutputMode string      `json:"output_mode,omitempty" jsonschema:"Output mode: 'content' (matching lines with path:line:text, default), 'files_with_matches' (file paths only), 'count' (match count per file)"`
 	Context    interface{} `json:"context,omitempty" jsonschema:"Lines of context before and after each match (like grep -C). Default: 0"`
@@ -113,6 +114,12 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input GrepInput) (*mc
 		return errorResult(fmt.Sprintf("cannot access path: %v", err))
 	}
 
+	// recursive defaults to true; only disable when explicitly false.
+	recursive := true
+	if input.Recursive != nil && !common.FlexBool(input.Recursive) {
+		recursive = false
+	}
+
 	// Directory search includes file path on each line; single-file search
 	// omits it to save tokens (agent already knows which file it passed).
 	opts.showPath = fi.IsDir()
@@ -123,7 +130,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input GrepInput) (*mc
 
 	if fi.IsDir() {
 		var dirResult searchDirResult
-		dirResult, err = searchDir(input.Path, input.Glob, re, maxResults, opts)
+		dirResult, err = searchDir(input.Path, input.Glob, re, maxResults, opts, recursive)
 		matches = dirResult.matches
 		matchCount = dirResult.matchCount
 		hasLowConfidence = dirResult.lowConfidenceCount > 0
@@ -301,7 +308,7 @@ type searchDirResult struct {
 	lowConfidenceCount int // number of files with low encoding detection confidence
 }
 
-func searchDir(dir, globPattern string, re *regexp.Regexp, maxResults int, opts searchOpts) (searchDirResult, error) {
+func searchDir(dir, globPattern string, re *regexp.Regexp, maxResults int, opts searchOpts, recursive bool) (searchDirResult, error) {
 	result := searchDirResult{}
 
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
@@ -309,8 +316,12 @@ func searchDir(dir, globPattern string, re *regexp.Regexp, maxResults int, opts 
 			return nil // skip inaccessible files
 		}
 		if info.IsDir() {
-			// skip hidden directories (.git, etc.)
+			// Skip hidden directories (.git, etc.)
 			if strings.HasPrefix(info.Name(), ".") && info.Name() != "." {
+				return filepath.SkipDir
+			}
+			// When non-recursive, skip subdirectories (but not the root dir itself)
+			if !recursive && path != dir {
 				return filepath.SkipDir
 			}
 			return nil
