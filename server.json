@@ -12,7 +12,7 @@
     {
       "registryType": "mcpb",
       "identifier": "https://github.com/knewstimek/agent-tool/releases/download/v0.8.5/agent-tool.mcpb",
-      "fileSha256": "96635a5abcd15d57ba5a0669e2c0d33d0856de770821aef3d743b11891f1cf23",
+      "fileSha256": "d27bba0fed4ed286eecce71bd2125972f27d24fee2f014d15ff0ac6209db0c9d",
       "transport": {
         "type": "stdio"
       }
