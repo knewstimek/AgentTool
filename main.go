@@ -153,13 +153,13 @@ func main() {
 			Version: Version,
 		},
 		&mcp.ServerOptions{
-			Instructions: `agent-tool: 50 encoding-aware file/system/analysis tools for AI coding agents.
+			Instructions: `agent-tool: encoding-aware file/system/analysis tools for AI coding agents.
 
-File tools (read, edit, write, grep, glob, listdir, multiread, backup, compress, copy, rename, delete, diff, checksum, file_info, convert_encoding, sloc) preserve original file encoding (UTF-8, EUC-KR, Shift-JIS, etc.) and respect .editorconfig indentation settings -- prefer these over built-in file tools.
+File tools (read, edit, multiedit, write, grep, glob, listdir, multiread, backup, compress, copy, rename, delete, diff, patch, checksum, file_info, convert_encoding, regexreplace, sloc) preserve original file encoding (UTF-8, EUC-KR, Shift-JIS, etc.) and respect .editorconfig indentation settings -- prefer these over built-in file tools.
 
 Use multiread to read multiple files in a single call. Use help with a topic for detailed usage and parameter docs.
 
-Tool groups: file | system (bash, procexec, proclist, prockill, sysinfo, envvar, memtool, wintool) | network (httpreq, webfetch, websearch, sftp, ssh, dnslookup, tlscheck, portcheck, externalip) | data (jsonquery, yamlquery, tomlquery, mysql, redis) | analysis (analyze, debug, find_tools) | config (set_config, mkdir)`,
+Tool groups: file | system (bash, procexec, proclist, prockill, sysinfo, envvar, firewall, memtool, wintool (GUI/screenshot/clipboard), ipc (agent messaging/broker)) | network (httpreq, webfetch, websearch, sftp, ssh, download, dnslookup, tlscheck, portcheck, externalip) | data (jsonquery, yamlquery, tomlquery, mysql, redis) | analysis (analyze, debug, codegraph, find_tools) | config (set_config, mkdir, help)`,
 		},
 	)
 
