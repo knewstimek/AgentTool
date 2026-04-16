@@ -159,7 +159,7 @@ File tools (read, edit, multiedit, write, grep, glob, listdir, multiread, backup
 
 Use multiread to read multiple files in a single call. Use help with a topic for detailed usage and parameter docs.
 
-Tool groups: file | system (bash, procexec, proclist, prockill, sysinfo, envvar, firewall, memtool, wintool (GUI/screenshot/clipboard), ipc (agent messaging/broker)) | network (httpreq, webfetch, websearch, sftp, ssh, download, dnslookup, tlscheck, portcheck, externalip) | data (jsonquery, yamlquery, tomlquery, mysql, redis) | analysis (analyze, debug, codegraph, find_tools) | config (set_config, mkdir, help)`,
+Tool groups: file | system (bash, procexec, proclist, prockill, sysinfo, envvar, firewall, memtool, wintool (GUI/screenshot/clipboard/sendmessage), ipc (agent messaging/broker)) | network (httpreq, webfetch, websearch, sftp, ssh, download, dnslookup, tlscheck, portcheck, externalip) | data (jsonquery, yamlquery, tomlquery, mysql, redis) | analysis (analyze, debug, codegraph, find_tools) | config (set_config, mkdir, help)`,
 		},
 	)
 
