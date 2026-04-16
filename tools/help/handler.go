@@ -1349,44 +1349,60 @@ func helpIPC() string {
 	return `# ipc -- Inter-Process Communication
 
 TCP-based message passing between AI agent sessions (same or different machines).
-Protocol: [2-byte type BE][4-byte length BE][payload].
 
-## Operations
+## Two modes
 
-  - send: Connect to a remote host and send a text message
-    Required: host (e.g. "192.168.1.5:19900"), message
-  - receive: Listen on a port and block until a message arrives
-    Optional: port (default 19900), timeout (default 60s, max 300s), bind (default 0.0.0.0)
-    Auto-responds to PING with PONG
-  - ping: Send PING to remote, wait for PONG, measure RTT
-    Required: host
+### Point-to-point (no broker needed)
+Direct TCP connection. One sender, one receiver. Simple but fragile -- if sender
+arrives before receiver is listening, the message is lost.
 
-## Protocol Types
-  0x0000 PING (heartbeat, no payload)
-  0x0001 PONG (heartbeat response, no payload)
-  0x0002 MESSAGE (text payload, max 1MB)
+  send:    Connect to host and send a text message.
+           Required: host (e.g. "192.168.1.5:19900"), message
+  receive: Listen on port, block until a message arrives (or timeout).
+           Optional: port (default 19900), timeout (default 60s, max 300s),
+           bind (default 0.0.0.0). Auto-responds to PING with PONG.
+  ping:    Send PING to host, wait for PONG, measure RTT.
+           Required: host
 
-## Workflow Example
+### Broker-based (reliable, no missed messages)
+A shared broker process queues messages per named mailbox. Agents post/fetch by
+name -- timing doesn't matter. First caller starts the broker; others attach.
 
-### Two sessions on different machines:
-  Session A (machine 192.168.1.5):
-    ipc(operation="receive", port=19900, timeout=120)  -- blocks waiting
+  broker_start:  Start (or attach to) broker on this machine.
+                 Optional: port (default 19901), bind (default 127.0.0.1)
+  broker_stop:   Stop the broker (only if this process owns it).
+  post:          Send message to a named mailbox. Non-blocking.
+                 Required: to (target mailbox), from (sender name), message
+                 Optional: port (broker port, default 19901)
+  fetch:         Read all pending messages from your mailbox. Non-blocking.
+                 Required: mailbox
+                 Optional: port
+  wait:          Block until a message arrives in your mailbox.
+                 Required: mailbox
+                 Optional: timeout (default 60s, max 300s), port
+                 No tokens consumed while waiting.
+  broker_status: Show queued message counts per mailbox.
+                 Optional: port
 
-  Session B (another machine):
-    ipc(operation="send", host="192.168.1.5:19900", message="packet struct info...")
+## Workflow examples
 
-  Session A receives the message instantly and can process it.
+### Broker (recommended for agent-to-agent):
+  Both sessions:  ipc(operation="broker_start")
+  Session A:      ipc(operation="wait", mailbox="A")   -- blocks
+  Session B:      ipc(operation="post", to="A", from="B", message="hello")
+  Session A gets "hello", replies:
+                  ipc(operation="post", to="B", from="A", message="done")
+  Session B:      ipc(operation="fetch", mailbox="B")
 
-### Connection check:
-  Session A: ipc(operation="receive", port=19900, timeout=30)
-  Session B: ipc(operation="ping", host="192.168.1.5:19900")
-  -> "PONG from 192.168.1.5:19900 (rtt=1.234ms)"
+### Point-to-point:
+  Session A: ipc(operation="receive", port=19900, timeout=120)  -- blocks
+  Session B: ipc(operation="send", host="localhost:19900", message="hi")
 
 ## Notes
-  - receive blocks the MCP tool call (no token consumption during wait)
-  - For local-only use, set bind="127.0.0.1" on receive
-  - Max message size: 1MB, max timeout: 300 seconds
-  - One message per connection (request-response pattern, not streaming)`
+  - Max message size: 1MB. Max timeout: 300s.
+  - broker_start: first caller wins; subsequent callers auto-connect as clients.
+  - wait/receive block the MCP call (no token consumption during wait).
+  - For cross-machine broker: use bind="0.0.0.0" on broker_start, specify port on post/fetch/wait.`
 }
 
 func helpCodegraph() string {
