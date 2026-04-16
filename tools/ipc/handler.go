@@ -111,7 +111,11 @@ Point-to-point flow:
   Session A gets the message, then: send(host="<B's address>:19900", message="response...")
   Session B: receive(port=19900, timeout=120)
 
-Same machine: host="localhost:19900". Max message size: 1MB. Max timeout: 300s.`,
+Same machine: host="localhost:19900". Max message size: 1MB. Max timeout: 300s.
+
+Persistent worker pattern (loop until shutdown):
+  broker_start -> loop { wait(mailbox="me") -> [process task] -> post(to="orchestrator", ...) }
+  To stop: orchestrator posts message="shutdown", worker checks and exits loop.`,
 	}, Handle)
 }
 
