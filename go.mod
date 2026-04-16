@@ -9,7 +9,7 @@ require (
 	github.com/google/jsonschema-go v0.4.2
 	github.com/kayrus/putty v1.0.5
 	github.com/miekg/dns v1.1.72
-	github.com/modelcontextprotocol/go-sdk v1.4.1
+	github.com/modelcontextprotocol/go-sdk v1.5.0
 	github.com/pkg/sftp v1.13.10
 	github.com/redis/go-redis/v9 v9.18.0
 	github.com/saintfish/chardet v0.0.0-20230101081208-5e3ef4b5456d
@@ -38,7 +38,7 @@ require (
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
 	golang.org/x/mod v0.34.0 // indirect
-	golang.org/x/oauth2 v0.34.0 // indirect
+	golang.org/x/oauth2 v0.35.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/tools v0.43.0 // indirect
 	modernc.org/libc v1.70.0 // indirect
