@@ -14,7 +14,7 @@ require (
 	github.com/redis/go-redis/v9 v9.18.0
 	github.com/saintfish/chardet v0.0.0-20230101081208-5e3ef4b5456d
 	github.com/tetratelabs/wazero v1.11.0
-	golang.org/x/arch v0.25.0
+	golang.org/x/arch v0.26.0
 	golang.org/x/crypto v0.50.0
 	golang.org/x/net v0.53.0
 	golang.org/x/sys v0.43.0
