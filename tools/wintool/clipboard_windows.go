@@ -42,12 +42,22 @@ func opClipboard(input WintoolInput) (*CallResult, WintoolOutput, error) {
 		return errorResult("no image in clipboard. Copy an image or take a screenshot (Win+Shift+S) first")
 	}
 
-	// OpenClipboard(NULL) - associate with current task
+	// OpenClipboard(NULL) - associate with current task.
+	// CRITICAL: keep the clipboard locked for the shortest possible window.
+	// Holding it through PNG encoding/file write blocks every other process
+	// that wants OpenClipboard, and can desync clipboard listeners
+	// (Win+V history, third-party managers) so the user has to clear the
+	// clipboard manually to recover. We unlock+close right after pixel copy.
 	ret, _, err := procOpenClipboard.Call(0)
 	if ret == 0 {
 		return errorResult("OpenClipboard failed: %v", err)
 	}
-	defer procCloseClipboard.Call()
+	clipboardOpen := true
+	defer func() {
+		if clipboardOpen {
+			procCloseClipboard.Call()
+		}
+	}()
 
 	// GetClipboardData(CF_DIB) returns HGLOBAL to a packed DIB
 	hGlobal, _, err := procGetClipboardData.Call(cfDIB)
@@ -59,7 +69,12 @@ func opClipboard(input WintoolInput) (*CallResult, WintoolOutput, error) {
 	if ptr == 0 {
 		return errorResult("GlobalLock failed: %v", err)
 	}
-	defer procGlobalUnlock.Call(hGlobal)
+	locked := true
+	defer func() {
+		if locked {
+			procGlobalUnlock.Call(hGlobal)
+		}
+	}()
 
 	globalSize, _, _ := procGlobalSize.Call(hGlobal)
 	if globalSize < unsafe.Sizeof(bitmapInfoHeader{}) {
@@ -147,6 +162,15 @@ func opClipboard(input WintoolInput) (*CallResult, WintoolOutput, error) {
 			}
 		}
 	}
+
+	// Release clipboard ASAP -- everything below (PNG encode, file write)
+	// no longer needs the source DIB. Holding the clipboard through these
+	// steps blocked other apps from reading/writing it and desynced
+	// clipboard managers (Win+V history, etc.) until manually cleared.
+	procGlobalUnlock.Call(hGlobal)
+	locked = false
+	procCloseClipboard.Call()
+	clipboardOpen = false
 
 	// Encode PNG to buffer
 	var buf bytes.Buffer
