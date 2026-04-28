@@ -8,6 +8,8 @@ import (
 	"image"
 	"image/png"
 	"os"
+	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -19,6 +21,7 @@ var (
 	procCloseClipboard             = modUser32.NewProc("CloseClipboard")
 	procGetClipboardData           = modUser32.NewProc("GetClipboardData")
 	procIsClipboardFormatAvailable = modUser32.NewProc("IsClipboardFormatAvailable")
+	procCreateWindowExW            = modUser32.NewProc("CreateWindowExW")
 
 	modKernel32      = windows.NewLazySystemDLL("kernel32.dll")
 	procGlobalLock   = modKernel32.NewProc("GlobalLock")
@@ -29,7 +32,96 @@ var (
 const (
 	cfDIB       = 8 // CF_DIB clipboard format
 	biBitfields = 3 // BI_BITFIELDS compression (channel masks in header)
+
+	openClipboardRetries    = 10
+	openClipboardRetryDelay = 100 * time.Millisecond
 )
+
+// hwndMessage is HWND_MESSAGE = (HWND)-3 in two's complement, used as a
+// parent to create message-only windows that are invisible and never appear
+// in the Z-order. Expressed as (^0 - 2) to avoid Go's signed-overflow check
+// on uintptr literals.
+var hwndMessage = ^uintptr(0) - 2
+
+var (
+	clipboardOwnerHWND uintptr
+	clipboardOwnerOnce sync.Once
+)
+
+// getClipboardOwnerHWND lazily creates a process-wide message-only window for
+// use as the OpenClipboard hwnd argument. Passing NULL there is associated
+// with sticky clipboard state in some environments (clipboard owner ends up
+// NULL during EmptyClipboard transitions, which causes subsequent
+// SetClipboardData calls from other apps to fail). A real message-only hwnd
+// makes us a well-behaved clipboard participant -- the same approach used by
+// .NET, Qt, and most Win32 clipboard libraries.
+//
+// The window lives for the lifetime of the process; OS reclaims it on exit.
+// We use the always-registered "STATIC" window class so no RegisterClass call
+// is needed.
+func getClipboardOwnerHWND() uintptr {
+	clipboardOwnerOnce.Do(func() {
+		className, err1 := windows.UTF16PtrFromString("STATIC")
+		winName, err2 := windows.UTF16PtrFromString("agent-tool-clipboard")
+		if err1 != nil || err2 != nil {
+			return
+		}
+		hwnd, _, _ := procCreateWindowExW.Call(
+			0, // dwExStyle
+			uintptr(unsafe.Pointer(className)),
+			uintptr(unsafe.Pointer(winName)),
+			0,           // dwStyle (not visible, no WS_VISIBLE)
+			0, 0, 0, 0,  // x, y, width, height (zero-size)
+			hwndMessage, // hWndParent = HWND_MESSAGE -> message-only window
+			0,           // hMenu
+			0,           // hInstance (NULL = exe module)
+			0,           // lpParam
+		)
+		clipboardOwnerHWND = hwnd
+	})
+	return clipboardOwnerHWND
+}
+
+// fullyUnlock calls GlobalUnlock repeatedly until the handle's lock count
+// reaches 0. This is necessary for handles returned by GetClipboardData
+// because the system may return them with a lock count >= 1 already. A
+// single GlobalUnlock would only decrement to >= 1, leaving the handle
+// locked from the system's perspective and preventing it from being freed
+// on the next EmptyClipboard / SetClipboardData -- which manifests as a
+// permanently stuck clipboard until the calling process exits.
+//
+// GlobalUnlock contract (winbase.h): returns 0 (FALSE) when the lock count
+// reaches 0, nonzero when the handle is still locked after the call. The
+// upper bound prevents infinite loops if Windows ever returns nonzero
+// indefinitely, though that should never happen in practice.
+func fullyUnlock(hGlobal uintptr) {
+	const maxUnlocks = 32
+	for i := 0; i < maxUnlocks; i++ {
+		ret, _, _ := procGlobalUnlock.Call(hGlobal)
+		if ret == 0 {
+			return
+		}
+	}
+}
+
+// openClipboardWithRetry retries OpenClipboard on transient lock contention
+// (another process has the clipboard open). 100ms x 10 matches the default
+// behavior of .NET Clipboard.SetDataObject. The clipboard is a global
+// serialized resource so brief contention is normal and benign.
+func openClipboardWithRetry(hwnd uintptr) error {
+	var lastErr error
+	for i := 0; i < openClipboardRetries; i++ {
+		ret, _, err := procOpenClipboard.Call(hwnd)
+		if ret != 0 {
+			return nil
+		}
+		lastErr = err
+		if i < openClipboardRetries-1 {
+			time.Sleep(openClipboardRetryDelay)
+		}
+	}
+	return fmt.Errorf("OpenClipboard failed after %d retries (clipboard locked by another process): %v", openClipboardRetries, lastErr)
+}
 
 // opClipboard reads an image from the Windows clipboard.
 // Default: returns base64 PNG via MCP ImageContent.
@@ -42,15 +134,25 @@ func opClipboard(input WintoolInput) (*CallResult, WintoolOutput, error) {
 		return errorResult("no image in clipboard. Copy an image or take a screenshot (Win+Shift+S) first")
 	}
 
-	// OpenClipboard(NULL) - associate with current task.
+	// Open the clipboard using a message-only window hwnd (not NULL) with a
+	// retry loop. Two reasons:
+	//
+	//  1. NULL hwnd is associated with sticky clipboard state ("clipboard
+	//     stops accepting new copies until cleared with `echo off | clip`")
+	//     in some environments because owner transitions during
+	//     EmptyClipboard go through a NULL hwnd. A real (invisible) hwnd
+	//     makes us a well-behaved clipboard participant.
+	//
+	//  2. The clipboard is a single serialized resource. Transient lock
+	//     contention with other processes is normal -- 100ms x 10 retries
+	//     matches .NET Clipboard.SetDataObject default behavior.
+	//
 	// CRITICAL: keep the clipboard locked for the shortest possible window.
 	// Holding it through PNG encoding/file write blocks every other process
-	// that wants OpenClipboard, and can desync clipboard listeners
-	// (Win+V history, third-party managers) so the user has to clear the
-	// clipboard manually to recover. We unlock+close right after pixel copy.
-	ret, _, err := procOpenClipboard.Call(0)
-	if ret == 0 {
-		return errorResult("OpenClipboard failed: %v", err)
+	// that wants OpenClipboard. We unlock+close right after pixel copy.
+	hwnd := getClipboardOwnerHWND()
+	if openErr := openClipboardWithRetry(hwnd); openErr != nil {
+		return errorResult("%v", openErr)
 	}
 	clipboardOpen := true
 	defer func() {
@@ -70,9 +172,16 @@ func opClipboard(input WintoolInput) (*CallResult, WintoolOutput, error) {
 		return errorResult("GlobalLock failed: %v", err)
 	}
 	locked := true
+	// CRITICAL: GetClipboardData returns a system-cached / synthesized handle
+	// whose lock count may already be >= 1 before we call GlobalLock. A single
+	// GlobalUnlock then leaves lock count >= 1, which prevents the system
+	// from freeing the handle on the next EmptyClipboard / SetClipboardData
+	// -- the symptom is "clipboard permanently stuck after wintool clipboard
+	// read until the agent-tool process is killed". We must keep calling
+	// GlobalUnlock until it returns 0 (lock count reached 0 / already 0).
 	defer func() {
 		if locked {
-			procGlobalUnlock.Call(hGlobal)
+			fullyUnlock(hGlobal)
 		}
 	}()
 
@@ -163,11 +272,11 @@ func opClipboard(input WintoolInput) (*CallResult, WintoolOutput, error) {
 		}
 	}
 
-	// Release clipboard ASAP -- everything below (PNG encode, file write)
-	// no longer needs the source DIB. Holding the clipboard through these
-	// steps blocked other apps from reading/writing it and desynced
-	// clipboard managers (Win+V history, etc.) until manually cleared.
-	procGlobalUnlock.Call(hGlobal)
+	// Release clipboard ASAP -- PNG encode and file write below no longer
+	// need the source DIB. fullyUnlock drains the lock count to 0 (see the
+	// note above: a single GlobalUnlock can leave a system-cached handle
+	// locked, which permanently breaks the clipboard for other apps).
+	fullyUnlock(hGlobal)
 	locked = false
 	procCloseClipboard.Call()
 	clipboardOpen = false
