@@ -6,7 +6,7 @@ require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/go-sql-driver/mysql v1.9.3
 	github.com/google/go-dap v0.12.0
-	github.com/google/jsonschema-go v0.4.2
+	github.com/google/jsonschema-go v0.4.3
 	github.com/kayrus/putty v1.0.5
 	github.com/miekg/dns v1.1.72
 	github.com/modelcontextprotocol/go-sdk v1.5.0
