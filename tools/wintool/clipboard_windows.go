@@ -8,6 +8,7 @@ import (
 	"image"
 	"image/png"
 	"os"
+	"runtime"
 	"sync"
 	"time"
 	"unsafe"
@@ -43,43 +44,124 @@ const (
 // on uintptr literals.
 var hwndMessage = ^uintptr(0) - 2
 
+// ----------------------------------------------------------------------------
+// Dedicated clipboard worker
+//
+// Win32 clipboard APIs (OpenClipboard / CloseClipboard / GetClipboardData /
+// GlobalLock / GlobalUnlock) are bound to the calling OS thread. Go goroutines
+// can migrate between OS threads at any syscall boundary, so a naive
+// "OpenClipboard ... defer CloseClipboard" pattern can end up calling Close
+// from a *different* OS thread than the one that opened it -- in which case
+// CloseClipboard becomes a no-op and the original thread keeps the clipboard
+// locked for the lifetime of the process. This is exactly the "permanently
+// stuck clipboard until agent-tool exits" symptom we kept hitting.
+//
+// Fix: pin all clipboard work to a single dedicated goroutine that calls
+// runtime.LockOSThread and never returns. CreateWindowExW for the owner hwnd
+// is also done on this thread, so window-thread ownership and clipboard-lock
+// ownership are guaranteed to coincide.
+// ----------------------------------------------------------------------------
+
+type clipboardJob struct {
+	do    func() (*mcp.CallToolResult, WintoolOutput, error)
+	reply chan clipboardResult
+}
+
+type clipboardResult struct {
+	cr  *mcp.CallToolResult
+	out WintoolOutput
+	err error
+}
+
 var (
-	clipboardOwnerHWND uintptr
-	clipboardOwnerOnce sync.Once
+	clipboardJobs       chan clipboardJob
+	clipboardWorkerOnce sync.Once
+	clipboardOwnerHWND  uintptr // written only by the worker goroutine
 )
 
-// getClipboardOwnerHWND lazily creates a process-wide message-only window for
-// use as the OpenClipboard hwnd argument. Passing NULL there is associated
-// with sticky clipboard state in some environments (clipboard owner ends up
-// NULL during EmptyClipboard transitions, which causes subsequent
-// SetClipboardData calls from other apps to fail). A real message-only hwnd
-// makes us a well-behaved clipboard participant -- the same approach used by
-// .NET, Qt, and most Win32 clipboard libraries.
-//
-// The window lives for the lifetime of the process; OS reclaims it on exit.
-// We use the always-registered "STATIC" window class so no RegisterClass call
-// is needed.
-func getClipboardOwnerHWND() uintptr {
-	clipboardOwnerOnce.Do(func() {
-		className, err1 := windows.UTF16PtrFromString("STATIC")
-		winName, err2 := windows.UTF16PtrFromString("agent-tool-clipboard")
-		if err1 != nil || err2 != nil {
-			return
-		}
-		hwnd, _, _ := procCreateWindowExW.Call(
-			0, // dwExStyle
-			uintptr(unsafe.Pointer(className)),
-			uintptr(unsafe.Pointer(winName)),
-			0,           // dwStyle (not visible, no WS_VISIBLE)
-			0, 0, 0, 0,  // x, y, width, height (zero-size)
-			hwndMessage, // hWndParent = HWND_MESSAGE -> message-only window
-			0,           // hMenu
-			0,           // hInstance (NULL = exe module)
-			0,           // lpParam
-		)
-		clipboardOwnerHWND = hwnd
+// startClipboardWorker spins up the dedicated clipboard goroutine on first
+// use. It blocks until the worker has finished CreateWindowExW so callers
+// can read clipboardOwnerHWND immediately after this returns.
+func startClipboardWorker() {
+	clipboardWorkerOnce.Do(func() {
+		clipboardJobs = make(chan clipboardJob)
+		ready := make(chan struct{})
+		go clipboardWorker(ready)
+		<-ready
 	})
-	return clipboardOwnerHWND
+}
+
+func clipboardWorker(ready chan<- struct{}) {
+	// Permanently pin this goroutine to its current OS thread. We never call
+	// UnlockOSThread -- when this goroutine exits (it never does in practice),
+	// Go would terminate the underlying OS thread.
+	runtime.LockOSThread()
+
+	clipboardOwnerHWND = createClipboardOwnerHWND()
+	close(ready)
+
+	for job := range clipboardJobs {
+		runJob(job)
+	}
+}
+
+// runJob executes one job and ensures a reply is always sent, even on panic,
+// so callers never block forever on a worker-side fault.
+func runJob(job clipboardJob) {
+	defer func() {
+		if r := recover(); r != nil {
+			job.reply <- clipboardResult{
+				err: fmt.Errorf("clipboard worker panic: %v", r),
+			}
+		}
+	}()
+	cr, out, err := job.do()
+	job.reply <- clipboardResult{cr: cr, out: out, err: err}
+}
+
+// runOnClipboardThread dispatches fn to the dedicated clipboard goroutine
+// and waits for the result.
+func runOnClipboardThread(fn func() (*mcp.CallToolResult, WintoolOutput, error)) (*mcp.CallToolResult, WintoolOutput, error) {
+	startClipboardWorker()
+	reply := make(chan clipboardResult, 1)
+	clipboardJobs <- clipboardJob{do: fn, reply: reply}
+	r := <-reply
+	return r.cr, r.out, r.err
+}
+
+// createClipboardOwnerHWND creates a message-only STATIC window to use as
+// the OpenClipboard hwnd argument. Passing NULL there is associated with
+// sticky clipboard state in some environments (clipboard owner ends up NULL
+// during EmptyClipboard transitions, which causes subsequent SetClipboardData
+// calls from other apps to fail). A real message-only hwnd makes us a
+// well-behaved clipboard participant -- the same approach used by .NET, Qt,
+// and most Win32 clipboard libraries.
+//
+// MUST be called from the dedicated clipboard worker goroutine. The window's
+// owning thread is the caller of CreateWindowExW, and that thread must match
+// the thread that subsequently calls OpenClipboard with this hwnd.
+//
+// The window lives for the lifetime of the process; the OS reclaims it on
+// exit. We use the always-registered "STATIC" window class so no
+// RegisterClass call is needed.
+func createClipboardOwnerHWND() uintptr {
+	className, err1 := windows.UTF16PtrFromString("STATIC")
+	winName, err2 := windows.UTF16PtrFromString("agent-tool-clipboard")
+	if err1 != nil || err2 != nil {
+		return 0
+	}
+	hwnd, _, _ := procCreateWindowExW.Call(
+		0, // dwExStyle
+		uintptr(unsafe.Pointer(className)),
+		uintptr(unsafe.Pointer(winName)),
+		0,           // dwStyle (not visible, no WS_VISIBLE)
+		0, 0, 0, 0,  // x, y, width, height (zero-size)
+		hwndMessage, // hWndParent = HWND_MESSAGE -> message-only window
+		0,           // hMenu
+		0,           // hInstance (NULL = exe module)
+		0,           // lpParam
+	)
+	return hwnd
 }
 
 // fullyUnlock calls GlobalUnlock repeatedly until the handle's lock count
@@ -123,34 +205,36 @@ func openClipboardWithRetry(hwnd uintptr) error {
 	return fmt.Errorf("OpenClipboard failed after %d retries (clipboard locked by another process): %v", openClipboardRetries, lastErr)
 }
 
-// opClipboard reads an image from the Windows clipboard.
+// opClipboard is the public entry point. It dispatches the actual work to the
+// pinned clipboard worker goroutine; see the worker block above for why.
+func opClipboard(input WintoolInput) (*CallResult, WintoolOutput, error) {
+	return runOnClipboardThread(func() (*CallResult, WintoolOutput, error) {
+		return opClipboardOnWorker(input)
+	})
+}
+
+// opClipboardOnWorker reads an image from the Windows clipboard.
 // Default: returns base64 PNG via MCP ImageContent.
 // If save_path is set: saves PNG to that path and returns the path.
 // Reuses bitmapInfoHeader from screenshot_windows.go (same package).
-func opClipboard(input WintoolInput) (*CallResult, WintoolOutput, error) {
+//
+// MUST run on the dedicated clipboard worker goroutine -- all Win32 clipboard
+// calls below are bound to the caller OS thread.
+func opClipboardOnWorker(input WintoolInput) (*CallResult, WintoolOutput, error) {
 	// Check if clipboard has a bitmap
 	avail, _, _ := procIsClipboardFormatAvailable.Call(cfDIB)
 	if avail == 0 {
 		return errorResult("no image in clipboard. Copy an image or take a screenshot (Win+Shift+S) first")
 	}
 
-	// Open the clipboard using a message-only window hwnd (not NULL) with a
-	// retry loop. Two reasons:
-	//
-	//  1. NULL hwnd is associated with sticky clipboard state ("clipboard
-	//     stops accepting new copies until cleared with `echo off | clip`")
-	//     in some environments because owner transitions during
-	//     EmptyClipboard go through a NULL hwnd. A real (invisible) hwnd
-	//     makes us a well-behaved clipboard participant.
-	//
-	//  2. The clipboard is a single serialized resource. Transient lock
-	//     contention with other processes is normal -- 100ms x 10 retries
-	//     matches .NET Clipboard.SetDataObject default behavior.
-	//
+	hwnd := clipboardOwnerHWND
+	if hwnd == 0 {
+		return errorResult("clipboard owner window not initialized (CreateWindowExW failed at startup)")
+	}
+
 	// CRITICAL: keep the clipboard locked for the shortest possible window.
 	// Holding it through PNG encoding/file write blocks every other process
 	// that wants OpenClipboard. We unlock+close right after pixel copy.
-	hwnd := getClipboardOwnerHWND()
 	if openErr := openClipboardWithRetry(hwnd); openErr != nil {
 		return errorResult("%v", openErr)
 	}
