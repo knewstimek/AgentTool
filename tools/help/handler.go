@@ -1242,6 +1242,13 @@ CheatEngine-style: search, filter, write, pointer scan, struct search, diff.
   memtool(operation="diff", pid=1234)             # take first snapshot
   memtool(operation="diff", session_id="abc")      # compare with current
 
+### force_dacl - Bypass a same-user process's hardened DACL (Windows, opt-in)
+  memtool(operation="read", pid=1234, address="0x...", force_dacl=true)
+  When a normal open is denied, temporarily rewrites the target's DACL via
+  owner-implicit WRITE_DAC, opens the handle, then restores the original DACL.
+  Same-user self-hardened targets only -- cannot bypass higher-integrity,
+  other-user, OWNER_RIGHTS-SID, or PPL/anti-cheat processes.
+
 ### info / close - Session management
   memtool(operation="info", session_id="abc")
   memtool(operation="close", session_id="abc")
@@ -1272,7 +1279,10 @@ CheatEngine-style: search, filter, write, pointer scan, struct search, diff.
   - Undo stack: up to 5 levels
 
 ## Permissions
-  - Windows: may require Administrator (OpenProcess)
+  - Windows: same-user processes work without elevation. memtool auto-enables
+    SeDebugPrivilege, so running elevated (Administrator) additionally allows
+    reading DACL-hardened or higher-integrity processes. PPL/anti-cheat
+    (kernel-protected) processes cannot be read from user mode at any privilege.
   - Linux: same-user or root, or CAP_SYS_PTRACE`
 }
 

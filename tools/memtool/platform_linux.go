@@ -19,7 +19,8 @@ func newProcessReader() ProcessReader {
 	return &linuxReader{}
 }
 
-func (r *linuxReader) Open(pid int, writable bool) error {
+// forceDACL is Windows-only (DACL bypass) and ignored on Linux.
+func (r *linuxReader) Open(pid int, writable, forceDACL bool) error {
 	flag := os.O_RDONLY
 	if writable {
 		flag = os.O_RDWR

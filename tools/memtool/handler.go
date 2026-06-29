@@ -23,6 +23,7 @@ type MemtoolInput struct {
 	MaxOffsetInt  int `json:"-"`
 	ModeInt       int `json:"-"`
 	CountInt      int `json:"-"`
+	ForceDACLBool bool `json:"-"`
 
 	Operation     string `json:"operation" jsonschema:"Operation: regions, search, filter, read, write, disasm, info, close, undo, struct_search, pointer_scan, diff,required"`
 	PID           interface{} `json:"pid,omitempty" jsonschema:"Target process ID (for regions, search, read, write, disasm, struct_search, pointer_scan, diff)"`
@@ -41,6 +42,7 @@ type MemtoolInput struct {
 	Arch          string `json:"arch,omitempty" jsonschema:"CPU architecture for disasm: x86 (default) or arm"`
 	Mode          interface{} `json:"mode,omitempty" jsonschema:"CPU mode for disasm: 32 or 64 (default)"`
 	Count         interface{} `json:"count,omitempty" jsonschema:"Number of instructions to disassemble (default 50, max 200)"`
+	ForceDACL     interface{} `json:"force_dacl,omitempty" jsonschema:"Windows only. If a normal OpenProcess is denied, temporarily rewrite the target's DACL (via owner-implicit WRITE_DAC) to gain access, then restore it. Works only for SAME-USER targets that self-hardened their DACL; cannot bypass higher-integrity, other-user, OWNER_RIGHTS-SID, or PPL/anti-cheat targets. Invasive -- opt-in, default false."`
 }
 
 // MemtoolOutput is the output structure.
@@ -69,6 +71,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input MemtoolInput) (
 	input.MaxOffsetInt, _ = common.FlexInt(input.MaxOffset)
 	input.ModeInt, _ = common.FlexInt(input.Mode)
 	input.CountInt, _ = common.FlexInt(input.Count)
+	input.ForceDACLBool = common.FlexBool(input.ForceDACL)
 	input.MaxResultsInt, ok = common.FlexInt(input.MaxResults)
 	if !ok {
 		return errorResult("max_results must be an integer")
@@ -117,7 +120,7 @@ func opRegions(input MemtoolInput) (*mcp.CallToolResult, MemtoolOutput, error) {
 	}
 
 	reader := newProcessReader()
-	if err := reader.Open(input.PIDInt, false); err != nil {
+	if err := reader.Open(input.PIDInt, false, input.ForceDACLBool); err != nil {
 		return errorResult("%v", err)
 	}
 	defer reader.Close()
@@ -163,7 +166,7 @@ func opSearch(input MemtoolInput) (*mcp.CallToolResult, MemtoolOutput, error) {
 		}
 
 		reader := newProcessReader()
-		if err := reader.Open(input.PIDInt, false); err != nil {
+		if err := reader.Open(input.PIDInt, false, input.ForceDACLBool); err != nil {
 			return errorResult("%v", err)
 		}
 
@@ -204,7 +207,7 @@ func opSearch(input MemtoolInput) (*mcp.CallToolResult, MemtoolOutput, error) {
 	}
 
 	reader := newProcessReader()
-	if err := reader.Open(input.PIDInt, false); err != nil {
+	if err := reader.Open(input.PIDInt, false, input.ForceDACLBool); err != nil {
 		return errorResult("%v", err)
 	}
 
@@ -335,7 +338,7 @@ func opRead(input MemtoolInput) (*mcp.CallToolResult, MemtoolOutput, error) {
 	}
 
 	reader := newProcessReader()
-	if err := reader.Open(input.PIDInt, false); err != nil {
+	if err := reader.Open(input.PIDInt, false, input.ForceDACLBool); err != nil {
 		return errorResult("%v", err)
 	}
 	defer reader.Close()
@@ -385,7 +388,7 @@ func opWrite(input MemtoolInput) (*mcp.CallToolResult, MemtoolOutput, error) {
 	}
 
 	reader := newProcessReader()
-	if err := reader.Open(input.PIDInt, true); err != nil {
+	if err := reader.Open(input.PIDInt, true, input.ForceDACLBool); err != nil {
 		return errorResult("%v", err)
 	}
 	defer reader.Close()
@@ -443,7 +446,7 @@ func opDisasm(input MemtoolInput) (*mcp.CallToolResult, MemtoolOutput, error) {
 	}
 
 	reader := newProcessReader()
-	if err := reader.Open(input.PIDInt, false); err != nil {
+	if err := reader.Open(input.PIDInt, false, input.ForceDACLBool); err != nil {
 		return errorResult("%v", err)
 	}
 	defer reader.Close()
@@ -523,7 +526,7 @@ func opStructSearch(input MemtoolInput) (*mcp.CallToolResult, MemtoolOutput, err
 	}
 
 	reader := newProcessReader()
-	if err := reader.Open(input.PIDInt, false); err != nil {
+	if err := reader.Open(input.PIDInt, false, input.ForceDACLBool); err != nil {
 		return errorResult("%v", err)
 	}
 	defer reader.Close()
@@ -550,7 +553,7 @@ func opPointerScan(input MemtoolInput) (*mcp.CallToolResult, MemtoolOutput, erro
 	}
 
 	reader := newProcessReader()
-	if err := reader.Open(input.PIDInt, false); err != nil {
+	if err := reader.Open(input.PIDInt, false, input.ForceDACLBool); err != nil {
 		return errorResult("%v", err)
 	}
 	defer reader.Close()
@@ -622,7 +625,7 @@ func opDiff(input MemtoolInput) (*mcp.CallToolResult, MemtoolOutput, error) {
 
 	// No session: create a temporary one-shot snapshot
 	reader := newProcessReader()
-	if err := reader.Open(input.PIDInt, false); err != nil {
+	if err := reader.Open(input.PIDInt, false, input.ForceDACLBool); err != nil {
 		return errorResult("%v", err)
 	}
 
@@ -727,7 +730,9 @@ filter (narrow: exact/changed/unchanged/increased/decreased), undo (restore prev
 read (hex dump), write (modify memory), disasm (disassemble live memory — x86/x64/ARM/ARM64),
 info (session status + values), close (end session),
 struct_search (multi-field pattern), pointer_scan (find pointer chains to address),
-diff (compare memory snapshots).`,
+diff (compare memory snapshots).
+Windows: auto-enables SeDebugPrivilege when elevated. force_dacl=true opts into a
+DACL-rewrite fallback to read a same-user self-hardened process (restored after).`,
 	}, Handle)
 }
 

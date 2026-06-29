@@ -1,7 +1,9 @@
 package memtool
 
 import (
+	"errors"
 	"fmt"
+	"sync"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -54,20 +56,77 @@ func newProcessReader() ProcessReader {
 	return &windowsReader{}
 }
 
-func (r *windowsReader) Open(pid int, writable bool) error {
+// SeDebugPrivilege lets an elevated process bypass per-object DACL checks when
+// opening other processes -- e.g. a target that self-hardened its DACL, or one
+// running at a higher integrity level. It exists only in an elevated/admin token
+// and is DISABLED by default even there, so without this call even an
+// Administrator-launched memtool cannot open a DACL-restricted process.
+// Best-effort: a standard-user token has no SeDebugPrivilege, so
+// AdjustTokenPrivileges returns ERROR_NOT_ALL_ASSIGNED and we silently keep the
+// prior behavior (same-user, default-DACL targets still work). Adjusting our OWN
+// token needs no elevation, raises no UAC prompt, and never fails fatally. Does
+// NOT defeat PPL/anti-cheat -- that is kernel-enforced and needs a driver.
+var debugPrivOnce sync.Once
+
+func enableDebugPrivilege() {
+	debugPrivOnce.Do(func() {
+		var token windows.Token
+		// CurrentProcess() is a pseudo-handle; no close needed.
+		if err := windows.OpenProcessToken(windows.CurrentProcess(),
+			windows.TOKEN_ADJUST_PRIVILEGES|windows.TOKEN_QUERY, &token); err != nil {
+			return
+		}
+		defer token.Close()
+
+		name, err := windows.UTF16PtrFromString("SeDebugPrivilege")
+		if err != nil {
+			return
+		}
+		var luid windows.LUID
+		if err := windows.LookupPrivilegeValue(nil, name, &luid); err != nil {
+			return
+		}
+
+		priv := windows.Tokenprivileges{PrivilegeCount: 1}
+		priv.Privileges[0] = windows.LUIDAndAttributes{
+			Luid:       luid,
+			Attributes: windows.SE_PRIVILEGE_ENABLED,
+		}
+		// Ignore the result: ERROR_NOT_ALL_ASSIGNED on a non-elevated token is
+		// expected and non-fatal.
+		_ = windows.AdjustTokenPrivileges(token, false, &priv, 0, nil, nil)
+	})
+}
+
+func (r *windowsReader) Open(pid int, writable, forceDACL bool) error {
+	// Best-effort: enable SeDebugPrivilege so an elevated memtool can open
+	// DACL-hardened / higher-integrity targets. Silent no-op for non-admin.
+	enableDebugPrivilege()
+
 	access := uint32(processVMRead | processQueryInfo)
 	if writable {
 		access |= processVMWrite | processVMOperation
 	}
 
 	h, err := windows.OpenProcess(access, false, uint32(pid))
-	if err != nil {
-		return fmt.Errorf("OpenProcess(%d) failed: %w (run as Administrator if access denied)", pid, err)
+	if err == nil {
+		r.handle = h
+		r.pid = pid
+		r.writable = writable
+		return nil
 	}
-	r.handle = h
-	r.pid = pid
-	r.writable = writable
-	return nil
+
+	// Opt-in invasive fallback: only on a genuine access-denied, and only when the
+	// caller explicitly requested it. Any other error (e.g. invalid PID) is final.
+	if forceDACL && errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		if derr := r.openViaDACLRewrite(pid, access); derr != nil {
+			return fmt.Errorf("OpenProcess(%d) denied and force_dacl bypass failed: %v (original: %w)", pid, derr, err)
+		}
+		r.writable = writable
+		return nil
+	}
+
+	return fmt.Errorf("OpenProcess(%d) failed: %w -- run elevated (Administrator) to read DACL-protected or higher-integrity processes (memtool auto-enables SeDebugPrivilege when elevated). For a same-user self-hardened target, retry with force_dacl=true. If it still fails, the target is PPL/anti-cheat protected and cannot be read from user mode", pid, err)
 }
 
 func (r *windowsReader) Close() {

@@ -6,7 +6,7 @@ type darwinReader struct{}
 
 func newProcessReader() ProcessReader { return &darwinReader{} }
 
-func (r *darwinReader) Open(pid int, writable bool) error {
+func (r *darwinReader) Open(pid int, writable, forceDACL bool) error {
 	return fmt.Errorf("memory tools are not supported on macOS due to System Integrity Protection (SIP)")
 }
 

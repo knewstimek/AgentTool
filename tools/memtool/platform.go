@@ -12,7 +12,9 @@ type MemoryRegion struct {
 // Implementations are platform-specific (Windows, Linux).
 type ProcessReader interface {
 	// Open attaches to the target process. writable=true requests write access.
-	Open(pid int, writable bool) error
+	// forceDACL (Windows only) opts into the invasive DACL-rewrite fallback when a
+	// normal open is denied by a same-user target's DACL; ignored on other OSes.
+	Open(pid int, writable, forceDACL bool) error
 
 	// Close releases all handles.
 	Close()
