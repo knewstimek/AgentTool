@@ -313,34 +313,40 @@ func dataPointerStarts(f *pe.File, imageBase uint64, is64 bool) []uint32 {
 	return out
 }
 
-// precededByGap reports whether off sits right after an int3/nop padding run
-// (>=2 bytes) -- the one inter-function boundary signal that is reliable.
+// precededByGap reports whether off sits right after an int3 run (>=2 0xCC) --
+// the one inter-function boundary signal that is reliable on MSVC PEs.
 //
-// A bare RET is deliberately NOT accepted: an early-return path followed by a
-// jump target inside the SAME function also has `ret` right before it, so a
-// single RET would let an intra-function JMP target masquerade as a function
-// start (a wrong-confident answer). MSVC pads function boundaries to 16-byte
-// alignment with int3, so real starts are essentially always padding-preceded;
-// requiring the run keeps false positives at zero.
+// Deliberately strict:
+//   - NOP (0x90) is NOT accepted: nop is also used for intra-function alignment
+//     (loop/branch heads), so a nop run does not imply a function boundary.
+//   - A bare RET is NOT accepted: an early-return path before an intra-function
+//     jump target also ends in `ret`, so it would let a mid-function block pass.
+//
+// MSVC pads inter-function gaps with int3 to 16-byte alignment, so real starts
+// are essentially always int3-preceded; requiring the run keeps false positives
+// at zero. A start that is genuinely nop-padded or unpadded is simply missed by
+// this corroboration (it then falls to the heuristic) -- a conservative miss,
+// never a wrong-confident answer.
 func precededByGap(data []byte, off int) bool {
-	return off >= 2 &&
-		(data[off-1] == 0xCC || data[off-1] == 0x90) &&
-		(data[off-2] == 0xCC || data[off-2] == 0x90)
+	return off >= 2 && data[off-1] == 0xCC && data[off-2] == 0xCC
 }
 
-// linearSweepStarts collects direct CALL/JMP targets across the whole section via
-// an instruction-aligned linear sweep (skipping int3/nop padding, resyncing one
-// byte past any undecodable byte). Unlike the export-reachable call-graph walk,
-// the sweep is reachability-independent, so it finds functions whose only callers
-// are themselves unreachable from the exports (e.g. D2Game.dll 0x6fc4ba10, called
-// from 0x6fceb0ac and jmp-thunked from 0x6fc4be10).
+// linearSweepStarts collects direct CALL (E8) targets across the whole section
+// via an instruction-aligned linear sweep (skipping int3/nop padding, resyncing
+// one byte past any undecodable byte). Unlike the export-reachable call-graph
+// walk, the sweep is reachability-independent, so it finds functions whose only
+// callers are themselves unreachable from the exports (e.g. D2Game.dll 0x6fc4ba10,
+// called from 0x6fceb0ac).
 //
-// A target is accepted ONLY when it is also preceded by a padding run or a RET --
-// the same two-signal rule as the vtable seeding. That corroboration is what
-// keeps false positives at zero even though a linear sweep can briefly desync in
-// inline data: a spurious E8/E9 from misaligned bytes points at a near-random
-// address that is almost never preceded by a real boundary (verified empirically
-// on D2Game.dll: zero false positives).
+// Two independent signals must agree before a target is promoted to a function
+// start, which keeps false positives at zero even though a linear sweep can
+// briefly desync in inline data:
+//   1. it is the operand of a real E8 CALL decoded at an instruction boundary
+//      (a CALL never targets the middle of a function); and
+//   2. the target is preceded by an int3 run (precededByGap) -- a spurious E8
+//      from misaligned bytes points at a near-random address that is almost
+//      never int3-preceded.
+// Verified empirically on D2Game.dll (advisor review): zero false positives.
 func linearSweepStarts(secData []byte, secRVA uint32, mode int) []uint32 {
 	n := len(secData)
 	seen := make(map[uint32]bool)
@@ -358,7 +364,11 @@ func linearSweepStarts(secData []byte, secRVA uint32, mode int) []uint32 {
 			i++ // resync one byte
 			continue
 		}
-		if (b == 0xE8 || b == 0xE9) && inst.Len == 5 {
+		// Only E8 (direct CALL) targets. A compiler never CALLs into the middle of
+		// a function, so a CALL target is unambiguously a function start. E9 (JMP)
+		// is excluded on purpose: it also encodes intra-function jumps, which would
+		// let a mid-function block be promoted to a (wrong) high-confidence start.
+		if b == 0xE8 && inst.Len == 5 {
 			t := i + 5 + int(int32(binary.LittleEndian.Uint32(secData[i+1:])))
 			if t >= 2 && t < n && !seen[secRVA+uint32(t)] && precededByGap(secData, t) {
 				seen[secRVA+uint32(t)] = true
