@@ -29,27 +29,43 @@ const (
 	imageScnCntCode    = 0x00000020
 )
 
-// alignsToX86 reports whether linearly decoding x86 instructions from startOff
-// lands exactly on queryOff (an instruction boundary). A misaligned start --
-// one pointing into the middle of an instruction or immediate -- either fails to
-// decode or steps over queryOff, both returning false. This is the core validity
-// test: the true function start decodes cleanly up to the query address.
-func alignsToX86(data []byte, startOff, queryOff, mode int) bool {
+// decodeReachesWithinFunc reports whether linearly decoding x86 instructions
+// from startOff reaches queryOff exactly (an instruction boundary) WITHOUT
+// crossing a function boundary. A misaligned start -- one pointing into the
+// middle of an instruction or immediate -- fails to decode or steps over
+// queryOff, returning false.
+//
+// The boundary check is essential: a RET/JMP immediately followed by int3/nop
+// padding marks the inter-function gap. Without it, decoding from an export
+// start would flow straight through that padding into a following non-exported
+// internal function and falsely "reach" a query that belongs to that internal
+// function -- attributing it to the wrong (export) function with false certainty.
+func decodeReachesWithinFunc(data []byte, startOff, queryOff, mode int) bool {
 	if startOff < 0 || queryOff < startOff || queryOff >= len(data) {
 		return false
 	}
 	pos := startOff
 	// A real start-to-query span is small; cap iterations defensively so a
 	// pathological stream can't spin.
-	for i := 0; i < 200000 && pos <= queryOff; i++ {
+	for i := 0; i < 200000; i++ {
 		if pos == queryOff {
 			return true
+		}
+		if pos > queryOff {
+			return false // an instruction straddled the query: misaligned
 		}
 		inst, err := x86asm.Decode(data[pos:], mode)
 		if err != nil || inst.Len == 0 {
 			return false
 		}
-		pos += inst.Len
+		next := pos + inst.Len
+		// RET/JMP + int3/nop padding == end of function. If it lies before the
+		// query, the query is in a later (internal) function, not this one.
+		if (inst.Op == x86asm.RET || inst.Op == x86asm.JMP) && next < len(data) &&
+			(data[next] == 0xCC || data[next] == 0x90) {
+			return false
+		}
+		pos = next
 	}
 	return false
 }
@@ -58,7 +74,9 @@ func alignsToX86(data []byte, startOff, queryOff, mode int) bool {
 // data. ok is false if rva is outside every section or lands in a non-code one.
 func execSectionForRVA(f *pe.File, rva uint32) (sec *pe.Section, data []byte, ok bool) {
 	for _, s := range f.Sections {
-		if rva >= s.VirtualAddress && rva < s.VirtualAddress+s.VirtualSize {
+		// uint64 comparison avoids a uint32 wrap of VirtualAddress+VirtualSize
+		// (a crafted section near the 4GB edge) silently dropping the section.
+		if uint64(rva) >= uint64(s.VirtualAddress) && uint64(rva) < uint64(s.VirtualAddress)+uint64(s.VirtualSize) {
 			if s.Characteristics&(imageScnMemExecute|imageScnCntCode) == 0 {
 				return nil, nil, false
 			}
@@ -135,7 +153,7 @@ func refineFuncStart(f *pe.File, queryRVA uint32, bounds *heuristicBounds, mode 
 	//    up to it -> authoritative start.
 	if havePrev {
 		startOff := int(prevStart - secRVA)
-		if alignsToX86(secData, startOff, queryOff, mode) {
+		if decodeReachesWithinFunc(secData, startOff, queryOff, mode) {
 			end := computeFuncEnd(secData, secRVA, queryOff, bounds, haveNext, nextStart, mode)
 			return &heuristicBounds{
 				StartFileOff: secFileOff + (prevStart - secRVA),
@@ -158,7 +176,7 @@ func refineFuncStart(f *pe.File, queryRVA uint32, bounds *heuristicBounds, mode 
 		return bounds
 	}
 	startOff := int(bounds.StartRVA - secRVA)
-	if alignsToX86(secData, startOff, queryOff, mode) {
+	if decodeReachesWithinFunc(secData, startOff, queryOff, mode) {
 		if matchesPrologue(secData, startOff, mode) {
 			bounds.StartSource = "prologue"
 			if bounds.Confidence != "low" {

@@ -261,6 +261,9 @@ func opFunctionAt(input AnalyzeInput) (string, error) {
 	sb.WriteString(fmt.Sprintf("  Size:   %d bytes\n", funcSize))
 	sb.WriteString(fmt.Sprintf("  Unwind: RVA 0x%x\n", entry.UnwindData))
 	sb.WriteString(fmt.Sprintf("  .pdata: %d total entries\n", len(entries)))
+	// .pdata bounds come from the Exception Table -- authoritative, not guessed.
+	sb.WriteString("  start_source: pdata\n")
+	sb.WriteString("  confidence:   exact\n")
 
 	// Auto-disassemble the function
 	count := input.Count
@@ -300,13 +303,18 @@ func opFunctionAt(input AnalyzeInput) (string, error) {
 func formatHeuristicResult(f *pe.File, imageBase, va uint64, bounds *heuristicBounds, input AnalyzeInput) (string, error) {
 	funcStartVA := imageBase + uint64(bounds.StartRVA)
 	funcEndVA := imageBase + uint64(bounds.EndRVA)
-	funcSize := bounds.EndRVA - bounds.StartRVA
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Function containing 0x%x:\n", va))
 	sb.WriteString(fmt.Sprintf("  Start:  0x%x (RVA: 0x%x)\n", funcStartVA, bounds.StartRVA))
 	sb.WriteString(fmt.Sprintf("  End:    0x%x (RVA: 0x%x)\n", funcEndVA, bounds.EndRVA))
-	sb.WriteString(fmt.Sprintf("  Size:   %d bytes\n", funcSize))
+	if bounds.EndRVA > bounds.StartRVA {
+		sb.WriteString(fmt.Sprintf("  Size:   %d bytes\n", bounds.EndRVA-bounds.StartRVA))
+	} else {
+		// Inconsistent bounds (e.g. crafted PE with overlapping section tables):
+		// don't print a garbage size produced by unsigned underflow.
+		sb.WriteString("  Size:   unknown (end <= start)\n")
+	}
 	sb.WriteString(fmt.Sprintf("  start_source: %s\n", bounds.startSourceLabel()))
 	sb.WriteString(fmt.Sprintf("  confidence:   %s\n", bounds.Confidence))
 	switch bounds.StartSource {

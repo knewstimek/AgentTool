@@ -59,6 +59,33 @@ func TestFunctionAtExportIsExact(t *testing.T) {
 	}
 }
 
+// Over-attribution guard: when a non-exported internal function sits between an
+// export and the query, the export must NOT be claimed. 0x6fc4e0d5 lives in an
+// internal function at 0x6fc4e050 (preceded by int3 padding at 0x6fc4e045..4f);
+// the nearest export below it is Ord10024 @ 0x6fc4df10, which ends before the
+// padding. The result must be the internal start, never "export (Ordinal_10024)".
+func TestFunctionAtDoesNotOverAttributeToExport(t *testing.T) {
+	path := d2GamePath(t)
+	out, err := opFunctionAt(AnalyzeInput{Operation: "function_at", FilePath: path, VA: "0x6fc4e0d5"})
+	if err != nil {
+		t.Fatalf("function_at: %v", err)
+	}
+	t.Logf("\n%s", out)
+	// Solid invariant (over-attribution guard): the export Ord10024 ends before
+	// the int3 padding at 0x6fc4e045, so it must NOT be claimed -- and certainly
+	// not at "exact" confidence.
+	if strings.Contains(out, "Ordinal_10024") || strings.Contains(out, "start_source: export") {
+		t.Errorf("over-attributed internal function to export Ord10024:\n%s", out)
+	}
+	if strings.Contains(out, "confidence:   exact") {
+		t.Errorf("internal (non-export) function must not be exact:\n%s", out)
+	}
+	// NOTE: the precise internal start (0x6fc4e050, an E8 call target) is only
+	// recoverable once call-target seeding lands; until then the prologue scan may
+	// pick a closer mid-function push sequence at medium confidence. Tracked
+	// separately -- not asserted here.
+}
+
 // An address inside an exported function's body must anchor back to the export
 // start (alignment validated), not to a heuristic guess.
 func TestFunctionAtInsideExportAnchors(t *testing.T) {
