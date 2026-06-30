@@ -70,3 +70,23 @@ func TestFunctionAtMidFunctionPrologueNotMedium(t *testing.T) {
 		}
 	}
 }
+
+// Jump-table resolution: a query inside a switch CASE block must anchor back to
+// the enclosing function via the resolved table, at high confidence -- not fall
+// to a heuristic low. 0x6fc22bd0 is a case block of the switch function at
+// 0x6fc22ad0; the `jmp [idx*4 + table]` is followed only by resolving its table,
+// so without jump-table support the start was CFG-unreachable and demoted to low.
+func TestFunctionAtSwitchCaseAnchorsViaJumpTable(t *testing.T) {
+	path := filepath.Join(d2Dir(t), "D2Game.dll")
+	out, err := opFunctionAt(AnalyzeInput{Operation: "function_at", FilePath: path, VA: "0x6fc22bd0"})
+	if err != nil {
+		t.Fatalf("function_at: %v", err)
+	}
+	t.Logf("\n%s", out)
+	if !strings.Contains(out, "Start:  0x6fc22ad0") {
+		t.Errorf("expected enclosing switch function 0x6fc22ad0, got:\n%s", out)
+	}
+	if !strings.Contains(out, "start_source: call-target") || !strings.Contains(out, "confidence:   high") {
+		t.Errorf("expected call-target/high via jump table, got:\n%s", out)
+	}
+}

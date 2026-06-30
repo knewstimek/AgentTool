@@ -44,7 +44,7 @@ const (
 //
 // otherStarts holds every known function start except the seed; reaching one
 // means we crossed into a different function, so that path is abandoned.
-func functionContains(data []byte, startOff, queryOff, mode int, otherStarts map[int]bool) bool {
+func functionContains(data []byte, startOff, queryOff, mode int, otherStarts map[int]bool, jt jtResolver) bool {
 	if startOff < 0 || queryOff < startOff || queryOff >= len(data) {
 		return false
 	}
@@ -83,9 +83,13 @@ func functionContains(data []byte, startOff, queryOff, mode int, otherStarts map
 			// terminator: no fallthrough
 		case x86asm.JMP:
 			// Unconditional jump: only the direct target continues (no fallthrough).
-			// Indirect (jump table / register) targets are unknown -> stop.
+			// A direct (PC-relative) target is followed; an indirect jump is a dead
+			// end UNLESS it is a resolvable switch table, in which case every case
+			// block is part of this same function and continues the traversal.
 			if t, ok := branchTargetOff(inst, pos); ok {
 				stack = append(stack, t)
+			} else if jt != nil {
+				stack = append(stack, jt(inst, pos)...)
 			}
 		case x86asm.CALL, x86asm.LCALL:
 			// Assume the call returns: continue at the fallthrough. A call to a
@@ -133,7 +137,7 @@ func branchTargetOff(inst x86asm.Inst, pos int) (int, bool) {
 // trigger is narrow -- such a function is almost always CALLed somewhere too --
 // but it means functionContains can, in that case, walk through a tail-jmp into
 // the helper. Callers must not treat that as a hard guarantee of exactness.
-func discoverFunctionStarts(secData []byte, seedOffs []int, mode int) (map[int]bool, bool) {
+func discoverFunctionStarts(secData []byte, seedOffs []int, mode int, jt jtResolver) (map[int]bool, bool) {
 	starts := make(map[int]bool)
 	var work []int
 	for _, off := range seedOffs {
@@ -172,8 +176,13 @@ func discoverFunctionStarts(secData []byte, seedOffs []int, mode int) (map[int]b
 			case x86asm.RET, x86asm.LRET, x86asm.IRET, x86asm.IRETD, x86asm.IRETQ:
 				// terminator
 			case x86asm.JMP:
+				// Direct jump stays in-function; a switch table's case blocks do too.
+				// (Targets are explored as body, never recorded as new starts -- a
+				// case block is not a function entry.)
 				if t, ok := branchTargetOff(inst, pos); ok {
 					stack = append(stack, t)
+				} else if jt != nil {
+					stack = append(stack, jt(inst, pos)...)
 				}
 			case x86asm.CALL, x86asm.LCALL:
 				// A direct CALL target is a function entry -- record and explore it.
@@ -451,7 +460,13 @@ func refineFuncStart(f *pe.File, queryRVA uint32, bounds *heuristicBounds, mode 
 			seedOffs = append(seedOffs, int(r-secRVA))
 		}
 	}
-	allStarts, complete := discoverFunctionStarts(secData, seedOffs, mode)
+	// Resolver for MSVC switch jump tables, so CFG traversal crosses indirect
+	// `jmp [idx*4 + disp32]` switches instead of stopping there (x86 only).
+	var jt jtResolver
+	if mode == 32 {
+		jt = makeJumpTableResolver(secData, secRVA, peImageBase(f))
+	}
+	allStarts, complete := discoverFunctionStarts(secData, seedOffs, mode, jt)
 	partial := !complete
 
 	// Nearest known start at/below the query owns it (when CFG-reachable); the
@@ -470,7 +485,7 @@ func refineFuncStart(f *pe.File, queryRVA uint32, bounds *heuristicBounds, mode 
 	// 1) Known-start anchor: an export is ground truth ("exact"); a discovered
 	//    direct-call target is a real but unnamed entry ("high"). Authoritative
 	//    only if CFG traversal from it actually reaches the query.
-	if bestOff >= 0 && functionContains(secData, bestOff, queryOff, mode, allStarts) {
+	if bestOff >= 0 && functionContains(secData, bestOff, queryOff, mode, allStarts, jt) {
 		haveNext := nextOff >= 0
 		var nextStartRVA uint32
 		if haveNext {
@@ -517,7 +532,7 @@ func refineFuncStart(f *pe.File, queryRVA uint32, bounds *heuristicBounds, mode 
 		return bounds
 	}
 	startOff := int(bounds.StartRVA - secRVA)
-	if functionContains(secData, startOff, queryOff, mode, allStarts) {
+	if functionContains(secData, startOff, queryOff, mode, allStarts, jt) {
 		// A strong-prologue medium is only trustworthy when startOff is itself a
 		// real function boundary. If the nearest known start (bestOff) sits below
 		// startOff with NO int3 padding run between them, startOff is almost
