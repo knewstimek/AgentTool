@@ -36,7 +36,20 @@ type heuristicBounds struct {
 	EndFileOff   uint32 // file offset of detected function end (after ret + padding)
 	StartRVA     uint32
 	EndRVA       uint32
-	Confidence   string // "medium" or "low"
+	Confidence   string // "exact", "medium", or "low"
+	StartSource  string // how the start was determined: "export", "prologue", "heuristic", "heuristic-misaligned"
+	StartLabel   string // optional label for the start (e.g. "Ordinal_10042" when StartSource=="export")
+}
+
+// startSourceLabel renders StartSource with its optional label appended.
+func (b *heuristicBounds) startSourceLabel() string {
+	if b.StartLabel != "" {
+		return b.StartSource + " (" + b.StartLabel + ")"
+	}
+	if b.StartSource == "" {
+		return "heuristic"
+	}
+	return b.StartSource
 }
 
 // heuristicFuncBounds tries to detect function boundaries by scanning for

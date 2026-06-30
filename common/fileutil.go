@@ -17,8 +17,10 @@ import (
 	"golang.org/x/text/transform"
 )
 
-// DefaultMaxFileSize is the default maximum file size (50MB).
-const DefaultMaxFileSize int64 = 50 * 1024 * 1024
+// DefaultMaxFileSize is the default maximum file size (100MB). RE targets such
+// as game DLLs/EXEs routinely exceed 50MB, so the limit is generous; tune it
+// per-session with set_config max_file_size_mb.
+const DefaultMaxFileSize int64 = 100 * 1024 * 1024
 
 // chardetSampleSize is the maximum number of bytes used for encoding detection.
 // chardet does not need the entire file; a sample from the beginning is sufficient.

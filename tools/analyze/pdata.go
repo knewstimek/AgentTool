@@ -128,8 +128,15 @@ func opFunctionAt(input AnalyzeInput) (string, error) {
 	// Try .pdata first (x64 only), fall back to heuristic for x86 or stripped binaries
 	usePdata := peHasPdata(f)
 	if !usePdata {
-		// No .pdata available -- use heuristic detection
+		// No .pdata available -- use heuristic detection, then refine: anchor the
+		// start on the export table when possible and validate it by alignment so
+		// a misaligned start is flagged rather than presented as ground truth.
+		mode := 64
+		if f.FileHeader.Machine == 0x14c {
+			mode = 32
+		}
 		bounds := heuristicFuncBoundsFromPE(f, imageBase, queryRVA)
+		bounds = refineFuncStart(f, queryRVA, bounds, mode)
 		if bounds == nil {
 			if f.FileHeader.Machine == 0x14c {
 				return "", fmt.Errorf("function_at: no .pdata (x86 PE) and heuristic detection failed for 0x%x. "+
@@ -300,7 +307,22 @@ func formatHeuristicResult(f *pe.File, imageBase, va uint64, bounds *heuristicBo
 	sb.WriteString(fmt.Sprintf("  Start:  0x%x (RVA: 0x%x)\n", funcStartVA, bounds.StartRVA))
 	sb.WriteString(fmt.Sprintf("  End:    0x%x (RVA: 0x%x)\n", funcEndVA, bounds.EndRVA))
 	sb.WriteString(fmt.Sprintf("  Size:   %d bytes\n", funcSize))
-	sb.WriteString(formatHeuristicWarning(bounds.Confidence))
+	sb.WriteString(fmt.Sprintf("  start_source: %s\n", bounds.startSourceLabel()))
+	sb.WriteString(fmt.Sprintf("  confidence:   %s\n", bounds.Confidence))
+	switch bounds.StartSource {
+	case "heuristic-misaligned":
+		// The start does not decode to an instruction boundary reaching the query:
+		// it points inside an instruction, so the disassembly below is meaningless.
+		// Give the agent an actionable next step instead of a false answer.
+		sb.WriteString(fmt.Sprintf("  ** start may be misaligned: 0x%x does not decode cleanly up to 0x%x "+
+			"(likely a padding-like byte inside an instruction was mistaken for a boundary). "+
+			"The real start is elsewhere -- try function_at on a nearby exported ordinal, or disassemble "+
+			"backward from 0x%x to find the prologue. **\n", funcStartVA, va, va))
+	case "export":
+		// Authoritative -- no warning.
+	default:
+		sb.WriteString(formatHeuristicWarning(bounds.Confidence))
+	}
 
 	// Auto-disassemble
 	count := input.Count

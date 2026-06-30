@@ -768,10 +768,13 @@ Find function boundaries in PE files.
   analyze(operation="function_at", file_path="/path/to/binary.exe",
           va="0x140001000")
 
-  Detection methods (automatic):
+  Detection methods (automatic, best source wins):
   1. .pdata (Exception Table) -- reliable, x64 PE with unwind info
-  2. Heuristic (prologue/epilogue pattern scan) -- fallback for x86 PE,
-     stripped x64, or binaries without .pdata
+  2. Export table -- if the query is inside an exported function and the bytes
+     decode cleanly from the export start to the query, that start is ground
+     truth (works for ordinal-only DLLs, e.g. Diablo II's D2*.dll)
+  3. Heuristic (prologue/epilogue pattern scan) -- last resort for x86 PE,
+     stripped x64, or binaries without .pdata/exports
 
   Also auto-disassembles the function (use count to control instruction limit).
 
@@ -779,9 +782,15 @@ Find function boundaries in PE files.
     va: Virtual address inside the function (hex, required)
     count: Max instructions to disassemble (default: 50, max: 200)
 
-  Heuristic scans for prologue patterns (push rbp/ebp; mov rbp/ebp, rsp/esp)
-  and epilogue (ret + int3/nop padding). Results are marked with confidence level.
-  Returns function start, end, size, and disassembly.
+  Output metadata (READ THESE before trusting the result):
+    start_source: export | prologue | heuristic | heuristic-misaligned
+    confidence:   exact (.pdata/export) | medium | low
+
+  IMPORTANT: confidence "low" with start_source "heuristic-misaligned" means the
+  reported start points INTO an instruction (a padding-like byte was mistaken for
+  a boundary) -- the start and disassembly are unreliable. Do NOT build on it.
+  Instead call function_at on a nearby exported ordinal, or disassemble backward
+  to find the real prologue. Only "exact" (export/.pdata) starts are authoritative.
 
 ### call_graph
 Build a static call graph from a root function (PE/ELF/Mach-O, x86/x64).

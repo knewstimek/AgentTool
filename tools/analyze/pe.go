@@ -127,7 +127,11 @@ func opPEInfo(input AnalyzeInput) (string, error) {
 		sb.WriteString(fmt.Sprintf("\nExports (%d):\n", len(exports)))
 		shown := 0
 		for _, exp := range exports {
-			sb.WriteString(fmt.Sprintf("  0x%x  %s\n", exp.rva, exp.name))
+			if exp.forwarder {
+				sb.WriteString(fmt.Sprintf("  0x%x  Ord %d  %s -> %s (forwarder)\n", exp.rva, exp.ordinal, exp.displayName(), readPEString(f, exp.rva)))
+			} else {
+				sb.WriteString(fmt.Sprintf("  0x%x  Ord %d  %s\n", exp.rva, exp.ordinal, exp.displayName()))
+			}
 			shown++
 			if shown >= 200 {
 				sb.WriteString(fmt.Sprintf("  ... +%d more\n", len(exports)-shown))
@@ -318,13 +322,35 @@ func rvaToFileOffset(f *pe.File, rva uint32) (uint32, string, error) {
 	return 0, "", fmt.Errorf("RVA 0x%x not found in any section", rva)
 }
 
+// exportEntry describes one entry from the PE export directory. DLLs that export
+// purely by ordinal (NumberOfNames == 0, e.g. Diablo II's D2*.dll) have an empty
+// name -- displayName() then synthesizes "Ordinal_<n>". rva is a ground-truth
+// function start unless forwarder is set (or the RVA points at data).
 type exportEntry struct {
-	name string
-	rva  uint32
+	ordinal   uint32 // biased ordinal (Base + function-table index)
+	rva       uint32 // function RVA, or forwarder-string RVA when forwarder is true
+	name      string // exported name; "" for ordinal-only exports
+	forwarder bool   // rva points inside the export dir -> "OTHER.Func" string, not code
+}
+
+// displayName returns the export's name, or a synthesized "Ordinal_<n>" for
+// ordinal-only exports, so output and symbol maps always have a usable label.
+func (e exportEntry) displayName() string {
+	if e.name != "" {
+		return e.name
+	}
+	return fmt.Sprintf("Ordinal_%d", e.ordinal)
 }
 
 // parseExports reads the PE export directory to list exported functions.
 // Go's debug/pe doesn't expose exports, so we parse manually.
+//
+// It iterates AddressOfFunctions (the function table) rather than the name
+// table: every non-zero slot is an export at ordinal Base+index, which is the
+// authoritative set of exported function starts. Named exports (AddressOfNames)
+// are only a subset and are absent entirely in ordinal-only DLLs -- the previous
+// name-table-driven parser returned nothing for those (Diablo II's D2Game.dll
+// etc.), silently denying callers any export ground truth.
 func parseExports(f *pe.File) []exportEntry {
 	var dataDir pe.DataDirectory
 
@@ -369,65 +395,67 @@ func parseExports(f *pe.File) []exportEntry {
 		return nil
 	}
 
-	// Parse IMAGE_EXPORT_DIRECTORY (40 bytes)
+	// IMAGE_EXPORT_DIRECTORY: Base@+16, NumberOfFunctions@+20, NumberOfNames@+24,
+	// AddressOfFunctions@+28, AddressOfNames@+32, AddressOfNameOrdinals@+36.
+	ordinalBase := binary.LittleEndian.Uint32(sectionData[dirOff+16:])
+	numFuncs := binary.LittleEndian.Uint32(sectionData[dirOff+20:])
 	numNames := binary.LittleEndian.Uint32(sectionData[dirOff+24:])
 	addrOfFunctions := binary.LittleEndian.Uint32(sectionData[dirOff+28:])
 	addrOfNames := binary.LittleEndian.Uint32(sectionData[dirOff+32:])
 	addrOfOrdinals := binary.LittleEndian.Uint32(sectionData[dirOff+36:])
 
-	// Sanity check: malformed PE can have arbitrarily large numNames,
-	// which would cause excessive memory allocation
-	if numNames == 0 || numNames > 10000 {
+	// Sanity: malformed PE can have huge counts -> excessive allocation.
+	if numFuncs == 0 || numFuncs > 100000 || numNames > 100000 {
 		return nil
 	}
-
-	// Guard against uint32 underflow from malformed PE files
-	if addrOfFunctions < exportSection.VirtualAddress ||
-		addrOfNames < exportSection.VirtualAddress ||
-		addrOfOrdinals < exportSection.VirtualAddress {
+	// AddressOfFunctions must lie within the export section (tables are colocated)
+	// and the whole table must fit -- guards uint32 underflow and OOB reads.
+	if addrOfFunctions < exportSection.VirtualAddress {
 		return nil
 	}
-	// Convert RVAs to section-relative offsets
 	funcTableOff := addrOfFunctions - exportSection.VirtualAddress
-	nameTableOff := addrOfNames - exportSection.VirtualAddress
-	ordTableOff := addrOfOrdinals - exportSection.VirtualAddress
+	if int(funcTableOff)+int(numFuncs)*4 > len(sectionData) {
+		return nil
+	}
 
+	// Build (function-table index -> name) from the name/ordinal tables.
+	// AddressOfNameOrdinals[i] is the UNBIASED index into AddressOfFunctions for
+	// the i-th name -- not the biased ordinal. Keyed by uint32 to avoid collisions
+	// when numFuncs exceeds 65535 (low ordinal base + high ordinals).
+	nameByIndex := make(map[uint32]string)
+	if numNames > 0 && addrOfNames >= exportSection.VirtualAddress && addrOfOrdinals >= exportSection.VirtualAddress {
+		nameTableOff := addrOfNames - exportSection.VirtualAddress
+		ordTableOff := addrOfOrdinals - exportSection.VirtualAddress
+		if int(nameTableOff)+int(numNames)*4 <= len(sectionData) &&
+			int(ordTableOff)+int(numNames)*2 <= len(sectionData) {
+			for i := uint32(0); i < numNames; i++ {
+				nameRVA := binary.LittleEndian.Uint32(sectionData[nameTableOff+i*4:])
+				idx := uint32(binary.LittleEndian.Uint16(sectionData[ordTableOff+i*2:]))
+				if name := readPEString(f, nameRVA); name != "" {
+					nameByIndex[idx] = name
+				}
+			}
+		}
+	}
+
+	// Iterate the function table: every non-zero slot is an export at
+	// ordinal = ordinalBase + index (the ground truth for function starts).
+	dirStart := dataDir.VirtualAddress
+	dirEnd := dataDir.VirtualAddress + dataDir.Size
 	var entries []exportEntry
-	for i := uint32(0); i < numNames; i++ {
-		// Read name RVA
-		nameRVAOff := nameTableOff + i*4
-		if int(nameRVAOff)+4 > len(sectionData) {
-			break
+	for i := uint32(0); i < numFuncs; i++ {
+		funcRVA := binary.LittleEndian.Uint32(sectionData[funcTableOff+i*4:])
+		if funcRVA == 0 {
+			continue // empty ordinal slot
 		}
-		nameRVA := binary.LittleEndian.Uint32(sectionData[nameRVAOff:])
-
-		// Look up ordinal from ordinal table, then use it to index function table
-		ordOff := ordTableOff + i*2
-		if int(ordOff)+2 > len(sectionData) {
-			break
-		}
-		ordinal := binary.LittleEndian.Uint16(sectionData[ordOff:])
-		funcRVAOff := funcTableOff + uint32(ordinal)*4
-		if int(funcRVAOff)+4 > len(sectionData) {
-			break
-		}
-		funcRVA := binary.LittleEndian.Uint32(sectionData[funcRVAOff:])
-
-		// Read name string — guard underflow
-		if nameRVA < exportSection.VirtualAddress {
-			continue
-		}
-		nameOff := nameRVA - exportSection.VirtualAddress
-		if int(nameOff) >= len(sectionData) {
-			continue
-		}
-		end := int(nameOff)
-		for end < len(sectionData) && sectionData[end] != 0 {
-			end++
-		}
-		name := string(sectionData[nameOff:end])
-
-		entries = append(entries, exportEntry{name: name, rva: funcRVA})
+		// Forwarder: RVA points inside the export directory (an "OTHER.Func" string).
+		forwarder := funcRVA >= dirStart && funcRVA < dirEnd
+		entries = append(entries, exportEntry{
+			ordinal:   ordinalBase + i,
+			rva:       funcRVA,
+			name:      nameByIndex[i],
+			forwarder: forwarder,
+		})
 	}
 
 	return entries
@@ -1360,11 +1388,16 @@ func peSymbolMap(f *pe.File, imageBase uint64) map[uint64]string {
 		}
 	}
 
-	// Exports: map function VA -> name
+	// Exports: map function VA -> name. Skip forwarders (their RVA is a string in
+	// the export dir, not a local code address). Ordinal-only exports map to
+	// "Ordinal_<n>" so disassembly annotation still labels them.
 	exports := parseExports(f)
 	for _, exp := range exports {
+		if exp.forwarder {
+			continue
+		}
 		va := imageBase + uint64(exp.rva)
-		syms[va] = exp.name
+		syms[va] = exp.displayName()
 	}
 
 	return syms
