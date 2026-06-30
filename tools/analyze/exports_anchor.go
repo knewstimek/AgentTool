@@ -29,45 +29,82 @@ const (
 	imageScnCntCode    = 0x00000020
 )
 
-// decodeReachesWithinFunc reports whether linearly decoding x86 instructions
-// from startOff reaches queryOff exactly (an instruction boundary) WITHOUT
-// crossing a function boundary. A misaligned start -- one pointing into the
-// middle of an instruction or immediate -- fails to decode or steps over
-// queryOff, returning false.
+// functionContains reports whether queryOff is reachable from startOff by a
+// bounded, CFG-respecting traversal that stays inside a single function. It
+// follows fallthrough and direct (relative) branch targets, stops at returns,
+// indirect/unconditional branches and undecodable bytes, and treats every OTHER
+// known function start as a wall. This is a sound-ish containment proof.
 //
-// The boundary check is essential: a RET/JMP immediately followed by int3/nop
-// padding marks the inter-function gap. Without it, decoding from an export
-// start would flow straight through that padding into a following non-exported
-// internal function and falsely "reach" a query that belongs to that internal
-// function -- attributing it to the wrong (export) function with false certainty.
-func decodeReachesWithinFunc(data []byte, startOff, queryOff, mode int) bool {
+// A plain linear sweep is NOT sound: a RET followed immediately by the next
+// function's prologue (no int3/nop gap), a tail-call JMP, a noreturn CALL, or an
+// inline jump table would all let the sweep walk into a neighbouring function
+// and "reach" a query that does not belong to startOff -- producing a confident
+// wrong answer (advisor-flagged). Traversal stops at those control-flow edges.
+//
+// otherStarts holds every known function start except the seed; reaching one
+// means we crossed into a different function, so that path is abandoned.
+func functionContains(data []byte, startOff, queryOff, mode int, otherStarts map[int]bool) bool {
 	if startOff < 0 || queryOff < startOff || queryOff >= len(data) {
 		return false
 	}
-	pos := startOff
-	// A real start-to-query span is small; cap iterations defensively so a
-	// pathological stream can't spin.
-	for i := 0; i < 200000; i++ {
+	visited := make(map[int]bool)
+	stack := []int{startOff}
+	for len(stack) > 0 && len(visited) < 60000 {
+		pos := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if pos < 0 || pos >= len(data) || visited[pos] {
+			continue
+		}
+		// Another function's start is a hard wall (the seed itself excepted).
+		if pos != startOff && otherStarts[pos] {
+			continue
+		}
 		if pos == queryOff {
 			return true
 		}
-		if pos > queryOff {
-			return false // an instruction straddled the query: misaligned
-		}
+		visited[pos] = true
+
 		inst, err := x86asm.Decode(data[pos:], mode)
 		if err != nil || inst.Len == 0 {
-			return false
+			continue // dead path: undecodable bytes are not a valid continuation
 		}
 		next := pos + inst.Len
-		// RET/JMP + int3/nop padding == end of function. If it lies before the
-		// query, the query is in a later (internal) function, not this one.
-		if (inst.Op == x86asm.RET || inst.Op == x86asm.JMP) && next < len(data) &&
-			(data[next] == 0xCC || data[next] == 0x90) {
-			return false
+		switch inst.Op {
+		case x86asm.RET, x86asm.LRET, x86asm.IRET, x86asm.IRETD, x86asm.IRETQ:
+			// terminator: no fallthrough
+		case x86asm.JMP:
+			// Unconditional jump: only the direct target continues (no fallthrough).
+			// Indirect (jump table / register) targets are unknown -> stop.
+			if t, ok := branchTargetOff(inst, pos); ok {
+				stack = append(stack, t)
+			}
+		case x86asm.CALL, x86asm.LCALL:
+			// Assume the call returns: continue at the fallthrough. (Calls to
+			// noreturn targets are a known minor blind spot -- they need a name list.)
+			stack = append(stack, next)
+		default:
+			// Conditional branch (Jcc/LOOP/JCXZ): both target and fallthrough.
+			// Anything else: plain fallthrough.
+			if t, ok := branchTargetOff(inst, pos); ok {
+				stack = append(stack, t)
+			}
+			stack = append(stack, next)
 		}
-		pos = next
 	}
 	return false
+}
+
+// branchTargetOff returns the section-relative offset of a direct (PC-relative)
+// branch's target, or ok=false for indirect branches (register/memory operands).
+func branchTargetOff(inst x86asm.Inst, pos int) (int, bool) {
+	if len(inst.Args) == 0 {
+		return 0, false
+	}
+	rel, ok := inst.Args[0].(x86asm.Rel)
+	if !ok {
+		return 0, false
+	}
+	return pos + inst.Len + int(rel), true
 }
 
 // execSectionForRVA returns the executable section containing rva and its raw
@@ -117,10 +154,16 @@ func codeExportStarts(f *pe.File) ([]uint32, map[uint32]string) {
 	return starts, labels
 }
 
-// refineFuncStart enriches heuristic bounds with an authoritative start when the
-// query is covered by an export, and validates the chosen start by alignment.
-// bounds may be nil (heuristic found nothing); an export anchor can still produce
-// a result. Returns nil only when neither source yields a usable start.
+// refineFuncStart resolves the start of the function containing queryRVA, using
+// the export table as ground truth and a CFG-respecting containment proof to
+// keep it sound. bounds is the heuristic guess (may be nil). Returns nil only
+// when nothing usable is found.
+//
+// Confidence policy (advisor-aligned): only an export proven to CONTAIN the
+// query via functionContains is "exact". Everything else is an internal,
+// non-exported function -- a strong frame-setup prologue is "medium", anything
+// weaker or unreachable is "low". Internal starts are never exact/high because
+// they are not ground truth.
 func refineFuncStart(f *pe.File, queryRVA uint32, bounds *heuristicBounds, mode int) *heuristicBounds {
 	sec, secData, ok := execSectionForRVA(f, queryRVA)
 	if !ok {
@@ -135,25 +178,29 @@ func refineFuncStart(f *pe.File, queryRVA uint32, bounds *heuristicBounds, mode 
 	queryOff := int(queryRVA - secRVA)
 
 	starts, labels := codeExportStarts(f)
+	// Export starts in this section as offsets -- traversal walls: reaching a
+	// different exported function means we left the candidate's body.
+	exportOffs := make(map[int]bool)
 	var prevStart, nextStart uint32
 	var havePrev, haveNext bool
 	for _, s := range starts {
 		if s < secRVA || s >= secRVA+uint32(len(secData)) {
 			continue
 		}
+		exportOffs[int(s-secRVA)] = true
 		if s <= queryRVA {
 			prevStart, havePrev = s, true
-		} else {
+		} else if !haveNext {
 			nextStart, haveNext = s, true
-			break
 		}
 	}
 
-	// 1) Export anchor: an export covers the query and its bytes decode cleanly
-	//    up to it -> authoritative start.
+	// 1) Export anchor: only the nearest export at/below the query can contain it
+	//    (any earlier export's body ends before this one starts). It is
+	//    authoritative only if CFG traversal from it actually reaches the query.
 	if havePrev {
 		startOff := int(prevStart - secRVA)
-		if decodeReachesWithinFunc(secData, startOff, queryOff, mode) {
+		if functionContains(secData, startOff, queryOff, mode, exportOffs) {
 			end := computeFuncEnd(secData, secRVA, queryOff, bounds, haveNext, nextStart, mode)
 			return &heuristicBounds{
 				StartFileOff: secFileOff + (prevStart - secRVA),
@@ -167,7 +214,8 @@ func refineFuncStart(f *pe.File, queryRVA uint32, bounds *heuristicBounds, mode 
 		}
 	}
 
-	// 2) No export anchor -- validate the heuristic start by alignment.
+	// 2) Internal (non-exported) function: validate the heuristic start with the
+	//    same CFG traversal and label it honestly.
 	if bounds == nil {
 		return nil
 	}
@@ -176,23 +224,51 @@ func refineFuncStart(f *pe.File, queryRVA uint32, bounds *heuristicBounds, mode 
 		return bounds
 	}
 	startOff := int(bounds.StartRVA - secRVA)
-	if decodeReachesWithinFunc(secData, startOff, queryOff, mode) {
-		if matchesPrologue(secData, startOff, mode) {
+	if functionContains(secData, startOff, queryOff, mode, exportOffs) {
+		if strongPrologue(secData, startOff, mode) {
 			bounds.StartSource = "prologue"
-			if bounds.Confidence != "low" {
-				bounds.Confidence = "medium"
-			}
+			bounds.Confidence = "medium"
 		} else {
+			// Reaches the query, but a bare single-byte push (or other weak start)
+			// is too unreliable to call medium -- it could be mid-function.
 			bounds.StartSource = "heuristic"
+			bounds.Confidence = "low"
 		}
 		return bounds
 	}
 
-	// Misaligned: the start does not decode to the query (it points inside an
-	// instruction). Flag it instead of presenting a wrong start as authoritative.
+	// The start does not reach the query under CFG traversal: it points inside an
+	// instruction or into another function. Flag it, never present it as fact.
 	bounds.StartSource = "heuristic-misaligned"
 	bounds.Confidence = "low"
 	return bounds
+}
+
+// strongPrologue reports whether data at off begins with a multi-byte frame-setup
+// prologue. Bare single-byte pushes (0x53/0x56/0x57) are deliberately excluded:
+// they occur mid-function too often to justify medium confidence (advisor
+// guidance). Recognizes the shared multi-byte patterns plus x86 frameless
+// "sub esp, imm" (83 EC / 81 EC).
+func strongPrologue(data []byte, off, mode int) bool {
+	for _, pat := range prologuePatterns {
+		if len(pat) < 2 || off+len(pat) > len(data) {
+			continue
+		}
+		match := true
+		for k := range pat {
+			if data[off+k] != pat[k] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	if mode == 32 && off+2 <= len(data) && (data[off] == 0x83 || data[off] == 0x81) && data[off+1] == 0xEC {
+		return true
+	}
+	return false
 }
 
 // computeFuncEnd picks the tightest defensible end for an export-anchored
