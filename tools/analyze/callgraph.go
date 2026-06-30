@@ -197,7 +197,11 @@ func opCallGraph(input AnalyzeInput) (string, error) {
 		// x86/ARM use heuristic function detection (no .pdata)
 		mode = ", heuristic"
 	}
-	sb.WriteString(fmt.Sprintf("Call graph for %s (depth=%d, %d nodes%s):\n\n", rootName, depth, len(visited), mode))
+	sb.WriteString(fmt.Sprintf("Call graph for %s (depth=%d, %d nodes%s):\n", rootName, depth, len(visited), mode))
+	// Edges are direct CALLs collected along each function's control flow, so they
+	// are high-confidence (no over-extended-boundary "fall-through" edges).
+	// Indirect/computed calls can't be resolved statically and appear as imports.
+	sb.WriteString("(callee edges = direct CALLs resolved via control flow; indirect calls listed as imports)\n\n")
 
 	// Print callers
 	if len(rootCallers) > 0 {
@@ -751,6 +755,11 @@ func cgOpenPE(path string) (*cgBinary, error) {
 	// from CALL targets only and would otherwise miss ordinal-only exports.
 	if exp, _ := codeExportStarts(f); len(exp) > 0 {
 		funcTable = mergeStartsIntoFuncTable(funcTable, exp, execSections)
+	}
+	// Fold in vtable/callback function pointers so virtual-only functions become
+	// real boundaries (and valid call_graph roots), not folded into a neighbour.
+	if ptrs := dataPointerStarts(f, imageBase, is64); len(ptrs) > 0 {
+		funcTable = mergeStartsIntoFuncTable(funcTable, ptrs, execSections)
 	}
 
 	symbols := peSymbolMap(f, imageBase)

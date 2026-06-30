@@ -771,10 +771,11 @@ Find function boundaries in PE files.
   Detection methods (automatic, best source wins):
   1. .pdata (Exception Table) -- reliable, x64 PE with unwind info
   2. Export table + call-graph discovery -- exports are authoritative starts;
-     from them the call graph is walked to discover direct-call targets (also
-     real function starts). The containing function is proven by a CFG-respecting
+     from them the call graph is walked to discover direct-call targets, and
+     vtable/callback function pointers (padding-validated) add functions reached
+     only indirectly. The containing function is proven by a CFG-respecting
      traversal, so the answer is sound even for ordinal-only DLLs (Diablo II's
-     D2*.dll) and for internal (non-exported) functions.
+     D2*.dll), internal (non-exported), and virtual-only functions.
   3. Heuristic (prologue/epilogue pattern scan) -- last resort for code not
      reachable from any export (e.g. indirectly-called callbacks).
 

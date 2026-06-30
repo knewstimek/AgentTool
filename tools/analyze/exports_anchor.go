@@ -19,6 +19,7 @@ package analyze
 
 import (
 	"debug/pe"
+	"encoding/binary"
 	"sort"
 
 	"golang.org/x/arch/x86/x86asm"
@@ -227,6 +228,78 @@ func codeExportStarts(f *pe.File) ([]uint32, map[uint32]string) {
 	return starts, labels
 }
 
+// dataPointerStarts scans read-only data sections for values that, read as a VA,
+// point to a code location immediately preceded by >=2 int3/nop padding bytes --
+// the signature of an inter-function gap. Those are function pointers from
+// vtables / callback tables: entries reached only INDIRECTLY (virtual/callback
+// dispatch) that the direct-CALL walk never discovers. The padding requirement
+// keeps false positives near zero (a stray data word almost never points just
+// past a padding run). Returns deduplicated RVAs.
+func dataPointerStarts(f *pe.File, imageBase uint64, is64 bool) []uint32 {
+	const memExecute, memRead = 0x20000000, 0x40000000
+	ptrSize := 4
+	if is64 {
+		ptrSize = 8
+	}
+	// Preload executable section data ONCE -- Section.Data() re-reads the file on
+	// every call, so resolving each candidate pointer through execSectionForRVA
+	// would be O(pointers * file reads). Here we read each section a single time.
+	type esec struct {
+		rva  uint32
+		data []byte
+	}
+	var exec []esec
+	for _, s := range f.Sections {
+		if s.Characteristics&memExecute == 0 {
+			continue
+		}
+		if d, err := s.Data(); err == nil {
+			exec = append(exec, esec{rva: s.VirtualAddress, data: d})
+		}
+	}
+
+	seen := make(map[uint32]bool)
+	var out []uint32
+	for _, s := range f.Sections {
+		if s.Characteristics&memExecute != 0 || s.Characteristics&memRead == 0 {
+			continue // code or non-readable -- want read-only data (.rdata/.data)
+		}
+		data, err := s.Data()
+		if err != nil {
+			continue
+		}
+		for i := 0; i+ptrSize <= len(data); i += 4 { // pointer tables are >=4-aligned
+			var va uint64
+			if is64 {
+				va = binary.LittleEndian.Uint64(data[i:])
+			} else {
+				va = uint64(binary.LittleEndian.Uint32(data[i:]))
+			}
+			if va < imageBase || va-imageBase > 0xFFFFFFFF {
+				continue
+			}
+			rva := uint32(va - imageBase)
+			if seen[rva] {
+				continue
+			}
+			for _, e := range exec {
+				if uint64(rva) < uint64(e.rva) || uint64(rva) >= uint64(e.rva)+uint64(len(e.data)) {
+					continue
+				}
+				off := int(rva - e.rva)
+				if off >= 2 &&
+					(e.data[off-1] == 0xCC || e.data[off-1] == 0x90) &&
+					(e.data[off-2] == 0xCC || e.data[off-2] == 0x90) {
+					seen[rva] = true
+					out = append(out, rva)
+				}
+				break
+			}
+		}
+	}
+	return out
+}
+
 // refineFuncStart resolves the start of the function containing queryRVA, using
 // the export table as ground truth and a CFG-respecting containment proof to
 // keep it sound. bounds is the heuristic guess (may be nil). Returns nil only
@@ -263,6 +336,13 @@ func refineFuncStart(f *pe.File, queryRVA uint32, bounds *heuristicBounds, mode 
 		off := int(s - secRVA)
 		seedOffs = append(seedOffs, off)
 		labelByOff[off] = labels[s]
+	}
+	// Also seed from vtable/callback function pointers in data, so functions that
+	// are only ever reached indirectly (virtual dispatch) still get discovered.
+	for _, r := range dataPointerStarts(f, peImageBase(f), mode == 64) {
+		if r >= secRVA && r < secRVA+uint32(len(secData)) {
+			seedOffs = append(seedOffs, int(r-secRVA))
+		}
 	}
 	allStarts, complete := discoverFunctionStarts(secData, seedOffs, mode)
 	partial := !complete
