@@ -346,8 +346,10 @@ func formatHeuristicResult(f *pe.File, imageBase, va uint64, bounds *heuristicBo
 				"The real start is elsewhere -- try function_at on a nearby exported ordinal, or disassemble "+
 				"backward from 0x%x to find the prologue. **\n", funcStartVA, va, va))
 		}
-	case "export":
-		// Authoritative -- no warning.
+	case "export", "call-target":
+		// Confident known-start (named export or discovered direct-call target) --
+		// no "boundaries may be inaccurate" warning; that would contradict the
+		// high/exact confidence. (A partial-discovery note may still print below.)
 	default:
 		sb.WriteString(formatHeuristicWarning(bounds.Confidence))
 	}
