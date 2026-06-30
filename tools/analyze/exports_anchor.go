@@ -313,6 +313,63 @@ func dataPointerStarts(f *pe.File, imageBase uint64, is64 bool) []uint32 {
 	return out
 }
 
+// precededByGap reports whether off sits right after an int3/nop padding run
+// (>=2 bytes) -- the one inter-function boundary signal that is reliable.
+//
+// A bare RET is deliberately NOT accepted: an early-return path followed by a
+// jump target inside the SAME function also has `ret` right before it, so a
+// single RET would let an intra-function JMP target masquerade as a function
+// start (a wrong-confident answer). MSVC pads function boundaries to 16-byte
+// alignment with int3, so real starts are essentially always padding-preceded;
+// requiring the run keeps false positives at zero.
+func precededByGap(data []byte, off int) bool {
+	return off >= 2 &&
+		(data[off-1] == 0xCC || data[off-1] == 0x90) &&
+		(data[off-2] == 0xCC || data[off-2] == 0x90)
+}
+
+// linearSweepStarts collects direct CALL/JMP targets across the whole section via
+// an instruction-aligned linear sweep (skipping int3/nop padding, resyncing one
+// byte past any undecodable byte). Unlike the export-reachable call-graph walk,
+// the sweep is reachability-independent, so it finds functions whose only callers
+// are themselves unreachable from the exports (e.g. D2Game.dll 0x6fc4ba10, called
+// from 0x6fceb0ac and jmp-thunked from 0x6fc4be10).
+//
+// A target is accepted ONLY when it is also preceded by a padding run or a RET --
+// the same two-signal rule as the vtable seeding. That corroboration is what
+// keeps false positives at zero even though a linear sweep can briefly desync in
+// inline data: a spurious E8/E9 from misaligned bytes points at a near-random
+// address that is almost never preceded by a real boundary (verified empirically
+// on D2Game.dll: zero false positives).
+func linearSweepStarts(secData []byte, secRVA uint32, mode int) []uint32 {
+	n := len(secData)
+	seen := make(map[uint32]bool)
+	var out []uint32
+	budget := 6000000
+	for i := 0; i < n && budget > 0; {
+		budget--
+		b := secData[i]
+		if b == 0xCC || b == 0x90 { // resync past padding
+			i++
+			continue
+		}
+		inst, err := x86asm.Decode(secData[i:], mode)
+		if err != nil || inst.Len == 0 {
+			i++ // resync one byte
+			continue
+		}
+		if (b == 0xE8 || b == 0xE9) && inst.Len == 5 {
+			t := i + 5 + int(int32(binary.LittleEndian.Uint32(secData[i+1:])))
+			if t >= 2 && t < n && !seen[secRVA+uint32(t)] && precededByGap(secData, t) {
+				seen[secRVA+uint32(t)] = true
+				out = append(out, secRVA+uint32(t))
+			}
+		}
+		i += inst.Len
+	}
+	return out
+}
+
 // refineFuncStart resolves the start of the function containing queryRVA, using
 // the export table as ground truth and a CFG-respecting containment proof to
 // keep it sound. bounds is the heuristic guess (may be nil). Returns nil only
@@ -353,6 +410,14 @@ func refineFuncStart(f *pe.File, queryRVA uint32, bounds *heuristicBounds, mode 
 	// Also seed from vtable/callback function pointers in data, so functions that
 	// are only ever reached indirectly (virtual dispatch) still get discovered.
 	for _, r := range dataPointerStarts(f, peImageBase(f), mode == 64) {
+		if r >= secRVA && r < secRVA+uint32(len(secData)) {
+			seedOffs = append(seedOffs, int(r-secRVA))
+		}
+	}
+	// And from a full instruction-aligned sweep's CALL/JMP targets (corroborated
+	// by a preceding boundary), which catches functions the export-reachable walk
+	// can't reach because their callers are themselves unreachable.
+	for _, r := range linearSweepStarts(secData, secRVA, mode) {
 		if r >= secRVA && r < secRVA+uint32(len(secData)) {
 			seedOffs = append(seedOffs, int(r-secRVA))
 		}

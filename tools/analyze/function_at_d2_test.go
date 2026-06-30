@@ -87,6 +87,27 @@ func TestFunctionAtDoesNotOverAttributeToExport(t *testing.T) {
 	}
 }
 
+// A mid-function call site (0x6fc4bb8e) whose enclosing function (0x6fc4bb10) is
+// reachable only from callers that are themselves unreachable from the exports
+// must still resolve to that enclosing function. The full linear sweep collects
+// the CALL to 0x6fc4bb10 (from 0x6fceb07c) -- corroborated by the int3 run before
+// 0x6fc4bb10 -- so the query resolves to 0x6fc4bb10 at high confidence, not to a
+// nearer heuristic guess or the query address itself.
+func TestFunctionAtLinearSweepRecoversEnclosing(t *testing.T) {
+	path := d2GamePath(t)
+	out, err := opFunctionAt(AnalyzeInput{Operation: "function_at", FilePath: path, VA: "0x6fc4bb8e"})
+	if err != nil {
+		t.Fatalf("function_at: %v", err)
+	}
+	t.Logf("\n%s", out)
+	if !strings.Contains(out, "Start:  0x6fc4bb10") {
+		t.Errorf("expected enclosing start 0x6fc4bb10, got:\n%s", out)
+	}
+	if !strings.Contains(out, "start_source: call-target") || !strings.Contains(out, "confidence:   high") {
+		t.Errorf("expected call-target/high, got:\n%s", out)
+	}
+}
+
 // A function that follows an export which ends in `push -1; call <noreturn>` +
 // int3 padding must NOT be attributed to that export. 0x6fc4ba10 sits right after
 // Ordinal_10031 (0x6fc4b9a0), which ends with a noreturn call at 0x6fc4ba02 then

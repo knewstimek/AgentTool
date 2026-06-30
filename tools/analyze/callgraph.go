@@ -764,6 +764,19 @@ func cgOpenPE(path string) (*cgBinary, error) {
 	if ptrs := dataPointerStarts(f, imageBase, is64); len(ptrs) > 0 {
 		funcTable = mergeStartsIntoFuncTable(funcTable, ptrs, execSections)
 	}
+	// Fold in a full linear sweep's corroborated CALL/JMP targets, so functions
+	// whose callers are unreachable from the exports are still real boundaries.
+	sweepMode := 32
+	if is64 {
+		sweepMode = 64
+	}
+	var sweep []uint32
+	for _, sec := range execSections {
+		sweep = append(sweep, linearSweepStarts(sec.data, sec.rva, sweepMode)...)
+	}
+	if len(sweep) > 0 {
+		funcTable = mergeStartsIntoFuncTable(funcTable, sweep, execSections)
+	}
 
 	symbols := peSymbolMap(f, imageBase)
 
