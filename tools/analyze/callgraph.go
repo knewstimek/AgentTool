@@ -308,7 +308,13 @@ func mergeStartsIntoFuncTable(base []funcRange, extraStarts []uint32, execSectio
 		var secEnd uint32
 		for _, sec := range execSections {
 			if uint64(s) >= uint64(sec.rva) && uint64(s) < uint64(sec.rva)+uint64(len(sec.data)) {
-				secEnd = sec.rva + uint32(len(sec.data))
+				// Cap like the sibling table builders so a section near the 4GB
+				// edge can't wrap and silently drop the start.
+				se64 := uint64(sec.rva) + uint64(len(sec.data))
+				if se64 > 0xFFFFFFFF {
+					se64 = 0xFFFFFFFF
+				}
+				secEnd = uint32(se64)
 				break
 			}
 		}

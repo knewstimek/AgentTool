@@ -36,9 +36,20 @@ type heuristicBounds struct {
 	EndFileOff   uint32 // file offset of detected function end (after ret + padding)
 	StartRVA     uint32
 	EndRVA       uint32
-	Confidence   string // "exact", "medium", or "low"
-	StartSource  string // how the start was determined: "export", "prologue", "heuristic", "heuristic-misaligned"
+	Confidence   string // "exact", "high", "medium", or "low"
+	StartSource  string // how the start was determined: "export", "call-target", "prologue", "heuristic", "heuristic-misaligned"
 	StartLabel   string // optional label for the start (e.g. "Ordinal_10042" when StartSource=="export")
+
+	// Partial is set when call-graph discovery hit its decode budget on a very
+	// large section: the known-start walls may be incomplete, so confidence is
+	// capped (no exact/high) to avoid an over-confident wrong answer.
+	Partial bool
+	// HasHint/HintStartRVA/HintStartLabel carry the nearest known function start
+	// at/below the query for the misaligned case, so the message can say "your
+	// query is mid-instruction inside 0xY" instead of blaming a wrong start.
+	HasHint        bool
+	HintStartRVA   uint32
+	HintStartLabel string
 }
 
 // startSourceLabel renders StartSource with its optional label appended.

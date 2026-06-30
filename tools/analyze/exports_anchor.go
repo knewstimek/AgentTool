@@ -113,8 +113,16 @@ func branchTargetOff(inst x86asm.Inst, pos int) (int, bool) {
 // new ones appear. Because traversal only ever begins at a proven start and
 // follows real control flow, the collected targets are genuine function entries
 // -- unlike a raw E8 byte scan, which also matches E8 bytes inside operands and
-// data and would manufacture false starts. Bounded by a decode budget.
-func discoverFunctionStarts(secData []byte, seedOffs []int, mode int) map[int]bool {
+// data and would manufacture false starts. Bounded by a decode budget; the
+// second return value is false when that budget was exhausted (very large
+// section), signalling callers that the known-start set is incomplete.
+//
+// Blind spot: a helper reached ONLY via a tail-call JMP (never via a direct CALL
+// or export) is not registered as a start, so it cannot wall off traversal. The
+// trigger is narrow -- such a function is almost always CALLed somewhere too --
+// but it means functionContains can, in that case, walk through a tail-jmp into
+// the helper. Callers must not treat that as a hard guarantee of exactness.
+func discoverFunctionStarts(secData []byte, seedOffs []int, mode int) (map[int]bool, bool) {
 	starts := make(map[int]bool)
 	var work []int
 	for _, off := range seedOffs {
@@ -123,7 +131,7 @@ func discoverFunctionStarts(secData []byte, seedOffs []int, mode int) map[int]bo
 			work = append(work, off)
 		}
 	}
-	budget := 4000000 // total instruction-decode cap across all functions
+	budget := 16000000 // total instruction-decode cap (~48MB of code) across all functions
 	for len(work) > 0 && budget > 0 {
 		fn := work[len(work)-1]
 		work = work[:len(work)-1]
@@ -168,7 +176,8 @@ func discoverFunctionStarts(secData []byte, seedOffs []int, mode int) map[int]bo
 			}
 		}
 	}
-	return starts
+	// complete == work drained before the budget ran out.
+	return starts, len(work) == 0
 }
 
 // execSectionForRVA returns the executable section containing rva and its raw
@@ -255,7 +264,8 @@ func refineFuncStart(f *pe.File, queryRVA uint32, bounds *heuristicBounds, mode 
 		seedOffs = append(seedOffs, off)
 		labelByOff[off] = labels[s]
 	}
-	allStarts := discoverFunctionStarts(secData, seedOffs, mode)
+	allStarts, complete := discoverFunctionStarts(secData, seedOffs, mode)
+	partial := !complete
 
 	// Nearest known start at/below the query owns it (when CFG-reachable); the
 	// next known start above caps the function end.
@@ -285,6 +295,11 @@ func refineFuncStart(f *pe.File, queryRVA uint32, bounds *heuristicBounds, mode 
 		if label != "" {
 			source, conf = "export", "exact"
 		}
+		// Partial discovery -> some walls are missing, so containment isn't
+		// guaranteed; cap the confidence rather than risk an over-confident answer.
+		if partial && (conf == "exact" || conf == "high") {
+			conf = "medium"
+		}
 		return &heuristicBounds{
 			StartFileOff: secFileOff + uint32(bestOff),
 			EndFileOff:   secFileOff + (end - secRVA),
@@ -293,6 +308,7 @@ func refineFuncStart(f *pe.File, queryRVA uint32, bounds *heuristicBounds, mode 
 			Confidence:   conf,
 			StartSource:  source,
 			StartLabel:   label,
+			Partial:      partial,
 		}
 	}
 
@@ -300,6 +316,14 @@ func refineFuncStart(f *pe.File, queryRVA uint32, bounds *heuristicBounds, mode 
 	//    same CFG traversal and label it honestly.
 	if bounds == nil {
 		return nil
+	}
+	bounds.Partial = partial
+	// Carry the nearest known function start so the message can say "your query
+	// is mid-instruction inside 0xY" instead of blaming a wrong start.
+	if bestOff >= 0 {
+		bounds.HasHint = true
+		bounds.HintStartRVA = secRVA + uint32(bestOff)
+		bounds.HintStartLabel = labelByOff[bestOff]
 	}
 	if bounds.StartRVA < secRVA {
 		bounds.StartSource = "heuristic"

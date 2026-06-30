@@ -165,6 +165,9 @@ func xrefEnclosingHint(filePath string, targetVA uint64) string {
 	if targetVA < imageBase || targetVA-imageBase > 0xFFFFFFFF {
 		return ""
 	}
+	if m := f.FileHeader.Machine; m != 0x14c && m != 0x8664 {
+		return "" // x86asm-based resolution would emit garbage on ARM
+	}
 	queryRVA := uint32(targetVA - imageBase)
 	mode := 32
 	if f.FileHeader.Machine != 0x14c {

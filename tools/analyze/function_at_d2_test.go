@@ -87,6 +87,23 @@ func TestFunctionAtDoesNotOverAttributeToExport(t *testing.T) {
 	}
 }
 
+// A mid-instruction query inside an exported function must surface the nearest
+// known start (the export) rather than falsely claiming the start is wrong.
+func TestFunctionAtMidInstructionNamesEnclosingStart(t *testing.T) {
+	path := d2GamePath(t)
+	out, err := opFunctionAt(AnalyzeInput{Operation: "function_at", FilePath: path, VA: "0x6fc58bd0"})
+	if err != nil {
+		t.Fatalf("function_at: %v", err)
+	}
+	t.Logf("\n%s", out)
+	if strings.Contains(out, "real start is elsewhere") {
+		t.Errorf("blames the start instead of naming the enclosing function:\n%s", out)
+	}
+	if !strings.Contains(out, "Nearest known start") || !strings.Contains(out, "Ordinal_10042") {
+		t.Errorf("expected nearest-known-start hint naming the export, got:\n%s", out)
+	}
+}
+
 // An address inside an exported function's body must anchor back to the export
 // start (alignment validated), not to a heuristic guess.
 func TestFunctionAtInsideExportAnchors(t *testing.T) {

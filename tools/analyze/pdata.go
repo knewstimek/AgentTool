@@ -128,6 +128,14 @@ func opFunctionAt(input AnalyzeInput) (string, error) {
 	// Try .pdata first (x64 only), fall back to heuristic for x86 or stripped binaries
 	usePdata := peHasPdata(f)
 	if !usePdata {
+		// The heuristic/export path decodes with x86asm; on a non-x86/x64 machine
+		// (ARM/ARM64) that would decode the bytes as x86 and emit confident garbage.
+		// Gate it -- ARM64 PEs normally carry .pdata and take the precise path above.
+		if m := f.FileHeader.Machine; m != 0x14c && m != 0x8664 {
+			return "", fmt.Errorf("function_at: export/heuristic boundary detection supports x86 and x64 only; "+
+				"this PE is machine 0x%x (e.g. ARM/ARM64) and has no .pdata, so boundaries can't be recovered here. "+
+				"Use disassemble with va=\"0x%x\" and arch=\"arm\" to inspect instructions directly", m, va)
+		}
 		// No .pdata available -- use heuristic detection, then refine: anchor the
 		// start on the export table when possible and validate it by alignment so
 		// a misaligned start is flagged rather than presented as ground truth.
@@ -319,17 +327,33 @@ func formatHeuristicResult(f *pe.File, imageBase, va uint64, bounds *heuristicBo
 	sb.WriteString(fmt.Sprintf("  confidence:   %s\n", bounds.Confidence))
 	switch bounds.StartSource {
 	case "heuristic-misaligned":
-		// The start does not decode to an instruction boundary reaching the query:
-		// it points inside an instruction, so the disassembly below is meaningless.
-		// Give the agent an actionable next step instead of a false answer.
-		sb.WriteString(fmt.Sprintf("  ** start may be misaligned: 0x%x does not decode cleanly up to 0x%x "+
-			"(likely a padding-like byte inside an instruction was mistaken for a boundary). "+
-			"The real start is elsewhere -- try function_at on a nearby exported ordinal, or disassemble "+
-			"backward from 0x%x to find the prologue. **\n", funcStartVA, va, va))
+		// The query is not on an instruction boundary reachable from a known start.
+		// Don't blame the (possibly correct) start -- if we know the nearest real
+		// function start, surface it; the query itself is most likely mid-instruction.
+		if bounds.HasHint {
+			hintVA := imageBase + uint64(bounds.HintStartRVA)
+			name := "call target"
+			if bounds.HintStartLabel != "" {
+				name = bounds.HintStartLabel
+			}
+			sb.WriteString(fmt.Sprintf("  ** 0x%x is not on an instruction boundary reachable from any known function "+
+				"start (likely mid-instruction, or inside a function reached only indirectly). Nearest known start "+
+				"at/below it: 0x%x (%s). The disassembly below begins at a heuristic guess and may be meaningless -- "+
+				"disassemble forward from 0x%x, or function_at 0x%x, to inspect. **\n", va, hintVA, name, hintVA, hintVA))
+		} else {
+			sb.WriteString(fmt.Sprintf("  ** start may be misaligned: 0x%x does not decode cleanly up to 0x%x "+
+				"(likely a padding-like byte inside an instruction was mistaken for a boundary). "+
+				"The real start is elsewhere -- try function_at on a nearby exported ordinal, or disassemble "+
+				"backward from 0x%x to find the prologue. **\n", funcStartVA, va, va))
+		}
 	case "export":
 		// Authoritative -- no warning.
 	default:
 		sb.WriteString(formatHeuristicWarning(bounds.Confidence))
+	}
+	if bounds.Partial {
+		sb.WriteString("  ** partial analysis: function discovery hit its decode budget on this large section, " +
+			"so some function boundaries may be missing and the confidence above may be overstated **\n")
 	}
 
 	// Auto-disassemble
