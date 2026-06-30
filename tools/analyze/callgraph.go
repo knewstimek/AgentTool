@@ -437,6 +437,9 @@ func scanCallTargetsCFG(sections []cgSection, funcBegin uint32, imageBase uint64
 			}
 		}
 
+		if data[pos] == 0xCC {
+			continue // int3 padding -- stop, don't collect a neighbour's calls
+		}
 		switch inst.Op {
 		case x86asm.RET, x86asm.LRET, x86asm.IRET, x86asm.IRETD, x86asm.IRETQ:
 			// terminator

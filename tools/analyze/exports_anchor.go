@@ -70,6 +70,14 @@ func functionContains(data []byte, startOff, queryOff, mode int, otherStarts map
 			continue // dead path: undecodable bytes are not a valid continuation
 		}
 		next := pos + inst.Len
+		// int3 (0xCC) is inter-function padding / a trap -- normal control flow
+		// never passes through it. Stopping here is what catches a function that
+		// ends in a CALL to a noreturn target (push -1; call __noreturn) followed
+		// by int3 padding before the next function: without it, the CALL's assumed
+		// fallthrough would walk through the padding into that next function.
+		if data[pos] == 0xCC {
+			continue
+		}
 		switch inst.Op {
 		case x86asm.RET, x86asm.LRET, x86asm.IRET, x86asm.IRETD, x86asm.IRETQ:
 			// terminator: no fallthrough
@@ -80,8 +88,10 @@ func functionContains(data []byte, startOff, queryOff, mode int, otherStarts map
 				stack = append(stack, t)
 			}
 		case x86asm.CALL, x86asm.LCALL:
-			// Assume the call returns: continue at the fallthrough. (Calls to
-			// noreturn targets are a known minor blind spot -- they need a name list.)
+			// Assume the call returns: continue at the fallthrough. A call to a
+			// noreturn target is handled when its trailing int3 padding stops the
+			// walk above; only a noreturn call with NO padding before the next
+			// function remains a (narrow) blind spot.
 			stack = append(stack, next)
 		default:
 			// Conditional branch (Jcc/LOOP/JCXZ): both target and fallthrough.
@@ -155,6 +165,9 @@ func discoverFunctionStarts(secData []byte, seedOffs []int, mode int) (map[int]b
 				continue
 			}
 			next := pos + inst.Len
+			if secData[pos] == 0xCC {
+				continue // int3 padding -- don't walk through it into the next function
+			}
 			switch inst.Op {
 			case x86asm.RET, x86asm.LRET, x86asm.IRET, x86asm.IRETD, x86asm.IRETQ:
 				// terminator

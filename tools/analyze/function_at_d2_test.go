@@ -87,6 +87,25 @@ func TestFunctionAtDoesNotOverAttributeToExport(t *testing.T) {
 	}
 }
 
+// A function that follows an export which ends in `push -1; call <noreturn>` +
+// int3 padding must NOT be attributed to that export. 0x6fc4ba10 sits right after
+// Ordinal_10031 (0x6fc4b9a0), which ends with a noreturn call at 0x6fc4ba02 then
+// 9 int3 bytes; the int3 run is a hard boundary, so the export must not claim it.
+func TestFunctionAtInt3AfterNoreturnCallIsBoundary(t *testing.T) {
+	path := d2GamePath(t)
+	out, err := opFunctionAt(AnalyzeInput{Operation: "function_at", FilePath: path, VA: "0x6fc4ba10"})
+	if err != nil {
+		t.Fatalf("function_at: %v", err)
+	}
+	t.Logf("\n%s", out)
+	if strings.Contains(out, "Ordinal_10031") {
+		t.Errorf("over-attributed across int3 padding to Ord10031:\n%s", out)
+	}
+	if !strings.Contains(out, "Start:  0x6fc4ba10") {
+		t.Errorf("expected start 0x6fc4ba10, got:\n%s", out)
+	}
+}
+
 // A mid-instruction query inside an exported function must surface the nearest
 // known start (the export) rather than falsely claiming the start is wrong.
 func TestFunctionAtMidInstructionNamesEnclosingStart(t *testing.T) {
