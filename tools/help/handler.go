@@ -770,11 +770,13 @@ Find function boundaries in PE files.
 
   Detection methods (automatic, best source wins):
   1. .pdata (Exception Table) -- reliable, x64 PE with unwind info
-  2. Export table -- if the query is inside an exported function and the bytes
-     decode cleanly from the export start to the query, that start is ground
-     truth (works for ordinal-only DLLs, e.g. Diablo II's D2*.dll)
-  3. Heuristic (prologue/epilogue pattern scan) -- last resort for x86 PE,
-     stripped x64, or binaries without .pdata/exports
+  2. Export table + call-graph discovery -- exports are authoritative starts;
+     from them the call graph is walked to discover direct-call targets (also
+     real function starts). The containing function is proven by a CFG-respecting
+     traversal, so the answer is sound even for ordinal-only DLLs (Diablo II's
+     D2*.dll) and for internal (non-exported) functions.
+  3. Heuristic (prologue/epilogue pattern scan) -- last resort for code not
+     reachable from any export (e.g. indirectly-called callbacks).
 
   Also auto-disassembles the function (use count to control instruction limit).
 
@@ -783,14 +785,16 @@ Find function boundaries in PE files.
     count: Max instructions to disassemble (default: 50, max: 200)
 
   Output metadata (READ THESE before trusting the result):
-    start_source: export | prologue | heuristic | heuristic-misaligned
-    confidence:   exact (.pdata/export) | medium | low
+    start_source: pdata | export | call-target | prologue | heuristic | heuristic-misaligned
+    confidence:   exact (.pdata / named export) | high (direct-call target)
+                | medium (strong prologue) | low (weak/uncertain)
 
   IMPORTANT: confidence "low" with start_source "heuristic-misaligned" means the
   reported start points INTO an instruction (a padding-like byte was mistaken for
   a boundary) -- the start and disassembly are unreliable. Do NOT build on it.
   Instead call function_at on a nearby exported ordinal, or disassemble backward
-  to find the real prologue. Only "exact" (export/.pdata) starts are authoritative.
+  to find the real prologue. "exact" and "high" starts are trustworthy; "medium"
+  is a good guess; "low" is not authoritative.
 
 ### call_graph
 Build a static call graph from a root function (PE/ELF/Mach-O, x86/x64).

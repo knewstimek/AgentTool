@@ -13,25 +13,28 @@ func d2GamePath(t *testing.T) string {
 	return filepath.Join(d2Dir(t), "D2Game.dll")
 }
 
-// The agent's original failure: function_at on an address whose heuristic start
-// lands inside a `mov edx, imm32` (a 0x90 in the immediate was mistaken for NOP
-// padding). The refined tool must flag this instead of presenting it as valid.
-func TestFunctionAtMisalignedIsFlagged(t *testing.T) {
+// The agent's original failure: function_at on 0x6fc6761d produced a misaligned
+// start (0x6fc67515, inside a `mov edx, imm32` whose immediate contained a 0x90
+// that the scan mistook for NOP padding). Call-target seeding now recovers the
+// TRUE start at 0x6fc67450 (int3-padded, "sub esp" prologue, a direct-call
+// target) at high confidence. The old wrong start must never reappear.
+func TestFunctionAtResolvesPreviouslyMisaligned(t *testing.T) {
 	path := d2GamePath(t)
 	out, err := opFunctionAt(AnalyzeInput{Operation: "function_at", FilePath: path, VA: "0x6fc6761d"})
 	if err != nil {
 		t.Fatalf("function_at: %v", err)
 	}
 	t.Logf("\n%s", out)
-	if !strings.Contains(out, "start_source:") || !strings.Contains(out, "confidence:") {
-		t.Errorf("output missing start_source/confidence metadata")
+	if strings.Contains(out, "0x6fc67515") {
+		t.Errorf("the old misaligned start 0x6fc67515 reappeared:\n%s", out)
 	}
-	// Must NOT silently present a misaligned start. Either an export anchor
-	// corrected it (exact) or it is flagged misaligned/low.
-	hasExact := strings.Contains(out, "confidence:   exact")
-	flagged := strings.Contains(out, "misaligned") || strings.Contains(out, "confidence:   low")
-	if !hasExact && !flagged {
-		t.Errorf("misaligned start neither corrected nor flagged:\n%s", out)
+	if !strings.Contains(out, "0x6fc67450") {
+		t.Errorf("expected true start 0x6fc67450, got:\n%s", out)
+	}
+	// A discovered direct-call target is "call-target"/"high" -- never the
+	// export-only "exact".
+	if !strings.Contains(out, "start_source: call-target") {
+		t.Errorf("expected start_source: call-target, got:\n%s", out)
 	}
 }
 
@@ -71,19 +74,17 @@ func TestFunctionAtDoesNotOverAttributeToExport(t *testing.T) {
 		t.Fatalf("function_at: %v", err)
 	}
 	t.Logf("\n%s", out)
-	// Solid invariant (over-attribution guard): the export Ord10024 ends before
-	// the int3 padding at 0x6fc4e045, so it must NOT be claimed -- and certainly
-	// not at "exact" confidence.
+	// Ord10024 ends before the int3 padding at 0x6fc4e045, so it must never be
+	// claimed. Call-target seeding recovers the true internal start at 0x6fc4e050.
 	if strings.Contains(out, "Ordinal_10024") || strings.Contains(out, "start_source: export") {
 		t.Errorf("over-attributed internal function to export Ord10024:\n%s", out)
 	}
-	if strings.Contains(out, "confidence:   exact") {
-		t.Errorf("internal (non-export) function must not be exact:\n%s", out)
+	if !strings.Contains(out, "0x6fc4e050") {
+		t.Errorf("expected internal start 0x6fc4e050, got:\n%s", out)
 	}
-	// NOTE: the precise internal start (0x6fc4e050, an E8 call target) is only
-	// recoverable once call-target seeding lands; until then the prologue scan may
-	// pick a closer mid-function push sequence at medium confidence. Tracked
-	// separately -- not asserted here.
+	if !strings.Contains(out, "start_source: call-target") {
+		t.Errorf("expected start_source: call-target, got:\n%s", out)
+	}
 }
 
 // An address inside an exported function's body must anchor back to the export

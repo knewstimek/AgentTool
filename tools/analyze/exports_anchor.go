@@ -107,6 +107,70 @@ func branchTargetOff(inst x86asm.Inst, pos int) (int, bool) {
 	return pos + inst.Len + int(rel), true
 }
 
+// discoverFunctionStarts returns the offsets of function starts reachable from
+// the export seeds by following the call graph: it walks each function's CFG and
+// records the targets of direct CALLs as new function starts, repeating until no
+// new ones appear. Because traversal only ever begins at a proven start and
+// follows real control flow, the collected targets are genuine function entries
+// -- unlike a raw E8 byte scan, which also matches E8 bytes inside operands and
+// data and would manufacture false starts. Bounded by a decode budget.
+func discoverFunctionStarts(secData []byte, seedOffs []int, mode int) map[int]bool {
+	starts := make(map[int]bool)
+	var work []int
+	for _, off := range seedOffs {
+		if off >= 0 && off < len(secData) && !starts[off] {
+			starts[off] = true
+			work = append(work, off)
+		}
+	}
+	budget := 4000000 // total instruction-decode cap across all functions
+	for len(work) > 0 && budget > 0 {
+		fn := work[len(work)-1]
+		work = work[:len(work)-1]
+		visited := make(map[int]bool)
+		stack := []int{fn}
+		for len(stack) > 0 && budget > 0 {
+			pos := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			if pos < 0 || pos >= len(secData) || visited[pos] {
+				continue
+			}
+			// Another function's start ends this function's body.
+			if pos != fn && starts[pos] {
+				continue
+			}
+			visited[pos] = true
+			budget--
+			inst, err := x86asm.Decode(secData[pos:], mode)
+			if err != nil || inst.Len == 0 {
+				continue
+			}
+			next := pos + inst.Len
+			switch inst.Op {
+			case x86asm.RET, x86asm.LRET, x86asm.IRET, x86asm.IRETD, x86asm.IRETQ:
+				// terminator
+			case x86asm.JMP:
+				if t, ok := branchTargetOff(inst, pos); ok {
+					stack = append(stack, t)
+				}
+			case x86asm.CALL, x86asm.LCALL:
+				// A direct CALL target is a function entry -- record and explore it.
+				if t, ok := branchTargetOff(inst, pos); ok && t >= 0 && t < len(secData) && !starts[t] {
+					starts[t] = true
+					work = append(work, t)
+				}
+				stack = append(stack, next)
+			default:
+				if t, ok := branchTargetOff(inst, pos); ok {
+					stack = append(stack, t)
+				}
+				stack = append(stack, next)
+			}
+		}
+	}
+	return starts
+}
+
 // execSectionForRVA returns the executable section containing rva and its raw
 // data. ok is false if rva is outside every section or lands in a non-code one.
 func execSectionForRVA(f *pe.File, rva uint32) (sec *pe.Section, data []byte, ok bool) {
@@ -177,40 +241,58 @@ func refineFuncStart(f *pe.File, queryRVA uint32, bounds *heuristicBounds, mode 
 	secFileOff := uint32(sec.Offset)
 	queryOff := int(queryRVA - secRVA)
 
-	starts, labels := codeExportStarts(f)
-	// Export starts in this section as offsets -- traversal walls: reaching a
-	// different exported function means we left the candidate's body.
-	exportOffs := make(map[int]bool)
-	var prevStart, nextStart uint32
-	var havePrev, haveNext bool
-	for _, s := range starts {
+	exportRVAs, labels := codeExportStarts(f)
+	// Seed call-graph discovery with the exports in this section, then collect
+	// every directly-called function start. allStarts is the known-start set: it
+	// both walls CFG traversal and supplies candidate starts.
+	var seedOffs []int
+	labelByOff := make(map[int]string)
+	for _, s := range exportRVAs {
 		if s < secRVA || s >= secRVA+uint32(len(secData)) {
 			continue
 		}
-		exportOffs[int(s-secRVA)] = true
-		if s <= queryRVA {
-			prevStart, havePrev = s, true
-		} else if !haveNext {
-			nextStart, haveNext = s, true
+		off := int(s - secRVA)
+		seedOffs = append(seedOffs, off)
+		labelByOff[off] = labels[s]
+	}
+	allStarts := discoverFunctionStarts(secData, seedOffs, mode)
+
+	// Nearest known start at/below the query owns it (when CFG-reachable); the
+	// next known start above caps the function end.
+	bestOff, nextOff := -1, -1
+	for off := range allStarts {
+		if off <= queryOff {
+			if off > bestOff {
+				bestOff = off
+			}
+		} else if nextOff == -1 || off < nextOff {
+			nextOff = off
 		}
 	}
 
-	// 1) Export anchor: only the nearest export at/below the query can contain it
-	//    (any earlier export's body ends before this one starts). It is
-	//    authoritative only if CFG traversal from it actually reaches the query.
-	if havePrev {
-		startOff := int(prevStart - secRVA)
-		if functionContains(secData, startOff, queryOff, mode, exportOffs) {
-			end := computeFuncEnd(secData, secRVA, queryOff, bounds, haveNext, nextStart, mode)
-			return &heuristicBounds{
-				StartFileOff: secFileOff + (prevStart - secRVA),
-				EndFileOff:   secFileOff + (end - secRVA),
-				StartRVA:     prevStart,
-				EndRVA:       end,
-				Confidence:   "exact",
-				StartSource:  "export",
-				StartLabel:   labels[prevStart],
-			}
+	// 1) Known-start anchor: an export is ground truth ("exact"); a discovered
+	//    direct-call target is a real but unnamed entry ("high"). Authoritative
+	//    only if CFG traversal from it actually reaches the query.
+	if bestOff >= 0 && functionContains(secData, bestOff, queryOff, mode, allStarts) {
+		haveNext := nextOff >= 0
+		var nextStartRVA uint32
+		if haveNext {
+			nextStartRVA = secRVA + uint32(nextOff)
+		}
+		end := computeFuncEnd(secData, secRVA, queryOff, bounds, haveNext, nextStartRVA, mode)
+		source, conf := "call-target", "high"
+		label := labelByOff[bestOff]
+		if label != "" {
+			source, conf = "export", "exact"
+		}
+		return &heuristicBounds{
+			StartFileOff: secFileOff + uint32(bestOff),
+			EndFileOff:   secFileOff + (end - secRVA),
+			StartRVA:     secRVA + uint32(bestOff),
+			EndRVA:       end,
+			Confidence:   conf,
+			StartSource:  source,
+			StartLabel:   label,
 		}
 	}
 
@@ -224,7 +306,7 @@ func refineFuncStart(f *pe.File, queryRVA uint32, bounds *heuristicBounds, mode 
 		return bounds
 	}
 	startOff := int(bounds.StartRVA - secRVA)
-	if functionContains(secData, startOff, queryOff, mode, exportOffs) {
+	if functionContains(secData, startOff, queryOff, mode, allStarts) {
 		if strongPrologue(secData, startOff, mode) {
 			bounds.StartSource = "prologue"
 			bounds.Confidence = "medium"
