@@ -136,6 +136,11 @@ func opXref(input AnalyzeInput) (string, error) {
 
 	if found == 0 {
 		sb.WriteString("No references found.\n")
+		// Agent-first guidance: 0 direct refs to a mid-function address usually
+		// means the caller wanted the enclosing function. Point at its start.
+		if hint := xrefEnclosingHint(input.FilePath, targetVA); hint != "" {
+			sb.WriteString(hint)
+		}
 	}
 	sb.WriteString(fmt.Sprintf("\n(%d references found)", found))
 	if found >= maxRes {
@@ -143,6 +148,57 @@ func opXref(input AnalyzeInput) (string, error) {
 	}
 
 	return sb.String(), nil
+}
+
+// xrefEnclosingHint returns an actionable note when a target with no direct
+// references sits inside (or is the start of) a known function. PE-only -- it
+// reuses the export + call-graph discovery resolver. Returns "" when nothing
+// useful can be said (non-PE, target not in code, or no enclosing function found).
+func xrefEnclosingHint(filePath string, targetVA uint64) string {
+	f, err := pe.Open(filePath)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	imageBase := peImageBase(f)
+	if targetVA < imageBase || targetVA-imageBase > 0xFFFFFFFF {
+		return ""
+	}
+	queryRVA := uint32(targetVA - imageBase)
+	mode := 32
+	if f.FileHeader.Machine != 0x14c {
+		mode = 64
+	}
+	// Full resolution (export + call-graph discovery, then heuristic) so we can
+	// distinguish a real-but-indirect target, a mid-function address, and an
+	// address that is not even an instruction boundary.
+	bounds := heuristicFuncBoundsFromPE(f, imageBase, queryRVA)
+	refined := refineFuncStart(f, queryRVA, bounds, mode)
+	if refined == nil {
+		return ""
+	}
+	startVA := imageBase + uint64(refined.StartRVA)
+	name := refined.startSourceLabel()
+	// Only assert an enclosing function when resolution is confident (export or a
+	// discovered call target). A heuristic/low guess may be mid-instruction or a
+	// wrong boundary -- claiming it would just repeat the original mislabeling.
+	confident := refined.Confidence == "exact" || refined.Confidence == "high"
+
+	switch {
+	case confident && startVA == targetVA:
+		return fmt.Sprintf("\nNote: 0x%x is a function start (%s) with no DIRECT callers -- "+
+			"it may be reached indirectly (vtable / callback / computed call), which xref cannot see.\n",
+			targetVA, name)
+	case confident:
+		return fmt.Sprintf("\nNote: 0x%x is inside function 0x%x (%s), not its start. "+
+			"To find that function's callers, run xref with target_va=\"0x%x\".\n",
+			targetVA, startVA, name, startVA)
+	default:
+		return fmt.Sprintf("\nNote: 0x%x could not be confidently mapped to a function (no export "+
+			"or call-graph match). It may fall inside an instruction or in an indirectly-reached "+
+			"function -- run function_at on it, or disassemble around a nearby function start.\n", targetVA)
+	}
 }
 
 // --- Binary format openers ---
