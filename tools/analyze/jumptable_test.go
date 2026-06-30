@@ -33,7 +33,7 @@ func TestJumpTableResolver(t *testing.T) {
 	data[2] = 0x85
 	binary.LittleEndian.PutUint32(data[3:], uint32(tableVA))
 
-	jt := makeJumpTableResolver(data, secRVA, imageBase)
+	jt := makeJumpTableResolver([]tableSection{{rva: secRVA, data: data}}, data, secRVA, imageBase)
 	inst, err := x86asm.Decode(data[0:], 32)
 	if err != nil {
 		t.Fatalf("decode: %v", err)

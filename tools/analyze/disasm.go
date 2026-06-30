@@ -18,7 +18,7 @@ import (
 
 const (
 	defaultDisasmCount = 50
-	maxDisasmCount     = 600
+	maxDisasmCount     = 1000
 )
 
 // opDisassemble disassembles machine code from a binary file.
@@ -241,6 +241,15 @@ func disasmX86Opts(data []byte, baseAddr uint64, offset, count, mode int, symbol
 	}
 	suffix += ")"
 	sb.WriteString(suffix)
+	// Truncation hint: hitting the instruction cap (not a ret/boundary) with data
+	// still ahead means this is a large function cut mid-way. Tell the agent where
+	// to resume so it paginates instead of assuming it saw the whole function.
+	if decoded >= count && !stoppedAtRet && pos < len(data) {
+		nextVA := baseAddr + uint64(offset) + uint64(pos)
+		sb.WriteString(fmt.Sprintf("\n** truncated at the %d-instruction cap (NOT a function end). "+
+			"To continue, disassemble with va=\"0x%x\" (or offset=%d), optionally with a larger count or stop_at_ret=true. **",
+			count, nextVA, offset+pos))
+	}
 	return sb.String(), nil
 }
 

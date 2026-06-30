@@ -90,3 +90,25 @@ func TestFunctionAtSwitchCaseAnchorsViaJumpTable(t *testing.T) {
 		t.Errorf("expected call-target/high via jump table, got:\n%s", out)
 	}
 }
+
+// A switch whose jump table the compiler placed in .data (not inline in .text)
+// must still resolve: the resolver reads the table from any readable section
+// while requiring case targets to be code. 0x6fd14a5d is `jmp [eax*4+0x6fd2f8fe]`
+// with the table in .data; its case blocks (0x6fd14a64, ...) must anchor back to
+// the enclosing function 0x6fd14a57, not fall to a heuristic low.
+func TestFunctionAtSwitchCaseAnchorsViaDataTable(t *testing.T) {
+	path := filepath.Join(d2Dir(t), "D2Game.dll")
+	for _, query := range []string{"0x6fd14a64", "0x6fd14a6a", "0x6fd14a75"} {
+		out, err := opFunctionAt(AnalyzeInput{Operation: "function_at", FilePath: path, VA: query})
+		if err != nil {
+			t.Errorf("%s: %v", query, err)
+			continue
+		}
+		if !strings.Contains(out, "Start:  0x6fd14a57") {
+			t.Errorf("%s: expected enclosing 0x6fd14a57, got:\n%s", query, out)
+		}
+		if !strings.Contains(out, "start_source: call-target") || !strings.Contains(out, "confidence:   high") {
+			t.Errorf("%s: expected call-target/high via .data table, got:\n%s", query, out)
+		}
+	}
+}

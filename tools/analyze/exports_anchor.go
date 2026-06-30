@@ -89,7 +89,15 @@ func functionContains(data []byte, startOff, queryOff, mode int, otherStarts map
 			if t, ok := branchTargetOff(inst, pos); ok {
 				stack = append(stack, t)
 			} else if jt != nil {
-				stack = append(stack, jt(inst, pos)...)
+				// Push only in-range, unvisited case targets. visited/len already
+				// bound work, but filtering here also bounds stack growth: a crafted
+				// table of 1024 entries each re-pointing at the same switch can't
+				// keep re-appending the same offsets.
+				for _, ct := range jt(inst, pos) {
+					if ct >= 0 && ct < len(data) && !visited[ct] {
+						stack = append(stack, ct)
+					}
+				}
 			}
 		case x86asm.CALL, x86asm.LCALL:
 			// Assume the call returns: continue at the fallthrough. A call to a
@@ -182,7 +190,11 @@ func discoverFunctionStarts(secData []byte, seedOffs []int, mode int, jt jtResol
 				if t, ok := branchTargetOff(inst, pos); ok {
 					stack = append(stack, t)
 				} else if jt != nil {
-					stack = append(stack, jt(inst, pos)...)
+					for _, ct := range jt(inst, pos) {
+						if ct >= 0 && ct < len(secData) && !visited[ct] {
+							stack = append(stack, ct)
+						}
+					}
 				}
 			case x86asm.CALL, x86asm.LCALL:
 				// A direct CALL target is a function entry -- record and explore it.
@@ -461,10 +473,22 @@ func refineFuncStart(f *pe.File, queryRVA uint32, bounds *heuristicBounds, mode 
 		}
 	}
 	// Resolver for MSVC switch jump tables, so CFG traversal crosses indirect
-	// `jmp [idx*4 + disp32]` switches instead of stopping there (x86 only).
+	// `jmp [idx*4 + disp32]` switches instead of stopping there (x86 only). The
+	// table may live in .rdata/.data, so pass every readable section for the table
+	// lookup; case targets are still required to land in this executable section.
 	var jt jtResolver
 	if mode == 32 {
-		jt = makeJumpTableResolver(secData, secRVA, peImageBase(f))
+		const memRead = 0x40000000
+		var tsecs []tableSection
+		for _, s := range f.Sections {
+			if s.Characteristics&memRead == 0 {
+				continue
+			}
+			if d, err := s.Data(); err == nil {
+				tsecs = append(tsecs, tableSection{rva: s.VirtualAddress, data: d})
+			}
+		}
+		jt = makeJumpTableResolver(tsecs, secData, secRVA, peImageBase(f))
 	}
 	allStarts, complete := discoverFunctionStarts(secData, seedOffs, mode, jt)
 	partial := !complete

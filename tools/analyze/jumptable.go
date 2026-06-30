@@ -36,13 +36,22 @@ type jtResolver func(inst x86asm.Inst, pos int) []int
 // maxJumpTableEntries bounds a single table read (runaway / non-table disp32).
 const maxJumpTableEntries = 1024
 
-// makeJumpTableResolver returns a jtResolver bound to one executable section.
-// secData/secRVA describe the section; imageBase converts the absolute VAs the
-// table stores into section offsets.
-func makeJumpTableResolver(secData []byte, secRVA uint32, imageBase uint64) jtResolver {
-	n := len(secData)
-	secLo := uint64(secRVA)
-	secHi := uint64(secRVA) + uint64(n)
+// tableSection is one readable PE section the jump-table data may live in. The
+// table itself can sit in .rdata/.data (the compiler's choice); only the case
+// TARGETS must be code. Each holds the section's RVA and raw bytes.
+type tableSection struct {
+	rva  uint32
+	data []byte
+}
+
+// makeJumpTableResolver returns a jtResolver. The case targets must land in the
+// executable section described by execData/execRVA (that is where the CFG walk
+// runs), but the table itself is looked up across tableSecs -- so a switch whose
+// table the compiler placed in .rdata/.data still resolves. imageBase converts
+// the absolute VAs the table stores into section offsets.
+func makeJumpTableResolver(tableSecs []tableSection, execData []byte, execRVA uint32, imageBase uint64) jtResolver {
+	execLo := uint64(execRVA)
+	execHi := uint64(execRVA) + uint64(len(execData))
 	return func(inst x86asm.Inst, pos int) []int {
 		if inst.Op != x86asm.JMP || len(inst.Args) == 0 {
 			return nil
@@ -59,25 +68,39 @@ func makeJumpTableResolver(secData []byte, secRVA uint32, imageBase uint64) jtRe
 			return nil
 		}
 		trva := tableVA - imageBase
-		if trva < secLo || trva >= secHi {
-			return nil // table not in this section -> can't read it here
+		// Locate the section that holds the table (any readable section).
+		var tdata []byte
+		var tbase uint64
+		for _, ts := range tableSecs {
+			lo := uint64(ts.rva)
+			hi := lo + uint64(len(ts.data))
+			if trva >= lo && trva < hi {
+				tdata, tbase = ts.data, lo
+				break
+			}
 		}
-		toff := int(trva - secLo)
+		if tdata == nil {
+			return nil // table not in any readable section -> can't read it
+		}
+		toff := int(trva - tbase)
+		tn := len(tdata)
 		var targets []int
 		for k := 0; k < maxJumpTableEntries; k++ {
 			p := toff + k*4
-			if p+4 > n {
+			if p+4 > tn {
 				break
 			}
-			caseVA := uint64(binary.LittleEndian.Uint32(secData[p:]))
+			caseVA := uint64(binary.LittleEndian.Uint32(tdata[p:]))
 			if caseVA < imageBase {
 				break
 			}
 			crva := caseVA - imageBase
-			if crva < secLo || crva >= secHi {
-				break // first out-of-section entry ends the table
+			// A case target must be CODE: inside the executable section. The first
+			// entry that isn't ends the table (keeps a data array from over-reading).
+			if crva < execLo || crva >= execHi {
+				break
 			}
-			targets = append(targets, int(crva-secLo))
+			targets = append(targets, int(crva-execLo))
 		}
 		return targets
 	}

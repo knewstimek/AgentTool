@@ -46,11 +46,13 @@ func pdataFuncEndOffset(f *pe.File, queryRVA uint32) (uint32, bool) {
 			if uint64(off) >= uint64(len(secData)) {
 				return 0, false // .pdata offset beyond section raw data
 			}
-			end := off + excDir.Size
-			if int(end) > len(secData) {
-				end = uint32(len(secData))
+			// uint64 math avoids a uint32 wrap of off+Size (a crafted PE with a huge
+			// exception-table Size) producing end < off and a slice-bounds panic.
+			end := uint64(off) + uint64(excDir.Size)
+			if end > uint64(len(secData)) {
+				end = uint64(len(secData))
 			}
-			pdataData = secData[off:end]
+			pdataData = secData[uint64(off):end]
 			break
 		}
 	}
