@@ -803,7 +803,11 @@ Build a static call graph from a root function (PE/ELF/Mach-O, x86/x64).
 
   Supports PE, ELF, and Mach-O binaries (x86, x64, ARM64, ARM32).
   x64 PE: uses .pdata for precise function boundaries.
-  x86 / ELF / Mach-O: heuristic mode -- detects functions from CALL/BL targets.
+  x86 PE: function starts come from exports + CALL targets (so ordinal-only DLLs
+    resolve correctly), and each function's calls are collected by following its
+    control flow -- NOT a linear range scan -- so an over-long boundary can no
+    longer leak a neighbour's calls in as false "fall-through" edges.
+  ELF / Mach-O: heuristic mode -- detects functions from CALL/BL targets.
   ARM64: scans BL imm26 targets. ARM32: scans BL imm24 targets (PC+8 offset).
   ELF/Mach-O: also merges symbol table entries as function starts.
   BFS traversal from the root function, showing:

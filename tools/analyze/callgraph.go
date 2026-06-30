@@ -103,6 +103,13 @@ func opCallGraph(input AnalyzeInput) (string, error) {
 		}
 	}
 
+	// Known function starts (RVA) -- walls for CFG-based call scanning so a
+	// function's call collection never leaks into a neighbour.
+	startSet := make(map[uint32]bool, len(funcTable))
+	for i := range funcTable {
+		startSet[funcTable[i].begin] = true
+	}
+
 	// BFS to build call graph
 	visited := make(map[uint64]int)          // VA -> depth at which visited
 	imports := make(map[uint64][]string)     // caller VA -> imported function names (FF 15)
@@ -136,7 +143,7 @@ func opCallGraph(input AnalyzeInput) (string, error) {
 		case "arm32":
 			callees = scanCallTargetsARM32(execSections, curFn.begin, curFn.end, imageBase)
 		default: // x86, x64
-			callees = scanCallTargets(execSections, curFn.begin, curFn.end, imageBase, is64)
+			callees = scanCallTargetsCFG(execSections, curFn.begin, imageBase, is64, startSet)
 		}
 
 		for _, ct := range callees {
@@ -275,6 +282,47 @@ func buildFuncTable(f *pe.File, imageBase uint64) []funcRange {
 	return table
 }
 
+// mergeStartsIntoFuncTable folds extra function starts (e.g. PE exports, which
+// the call-target heuristic never sees) into the table as real boundaries. The
+// union of starts is re-ranged as [start_i, start_{i+1}) within each section, so
+// an ordinal-only export (D2*.dll) is no longer folded into a neighbouring call
+// target -- fixing both root resolution and function extents for call_graph.
+func mergeStartsIntoFuncTable(base []funcRange, extraStarts []uint32, execSections []cgSection) []funcRange {
+	startSet := make(map[uint32]bool, len(base)+len(extraStarts))
+	for _, fr := range base {
+		startSet[fr.begin] = true
+	}
+	for _, s := range extraStarts {
+		if isInExecSection(execSections, s) {
+			startSet[s] = true
+		}
+	}
+	starts := make([]uint32, 0, len(startSet))
+	for s := range startSet {
+		starts = append(starts, s)
+	}
+	sort.Slice(starts, func(i, j int) bool { return starts[i] < starts[j] })
+
+	table := make([]funcRange, 0, len(starts))
+	for i, s := range starts {
+		var secEnd uint32
+		for _, sec := range execSections {
+			if uint64(s) >= uint64(sec.rva) && uint64(s) < uint64(sec.rva)+uint64(len(sec.data)) {
+				secEnd = sec.rva + uint32(len(sec.data))
+				break
+			}
+		}
+		end := secEnd
+		if i+1 < len(starts) && starts[i+1] > s && starts[i+1] < secEnd {
+			end = starts[i+1]
+		}
+		if end > s {
+			table = append(table, funcRange{begin: s, end: end})
+		}
+	}
+	return table
+}
+
 // isInExecSection checks if an RVA falls within any executable section.
 // Used to filter false positive CALL targets that land outside code.
 func isInExecSection(sections []cgSection, rva uint32) bool {
@@ -299,86 +347,100 @@ func findFunc(table []funcRange, rva uint32) *funcRange {
 	return nil
 }
 
-// cgCallTarget represents a call target found by scanCallTargets.
+// cgCallTarget represents a call target found by the call scanners.
 type cgCallTarget struct {
 	rva      uint32
 	indirect bool // true = FF 15 [rip+disp32] (IAT slot), false = E8 rel32 (direct)
 }
 
-// scanCallTargets extracts CALL target RVAs from a function's code.
-// Scans E8 rel32 (direct) and FF 15 [rip+disp32] (indirect via IAT).
-// Returns deduplicated list sorted by RVA.
-func scanCallTargets(sections []cgSection, funcBegin, funcEnd uint32, imageBase uint64, is64 bool) []cgCallTarget {
-	seen := make(map[uint32]bool)
-	var targets []cgCallTarget
+// scanCallTargetsCFG collects a function's CALL targets by walking its control
+// flow from funcBegin instead of linearly scanning a [begin,end] byte range.
+// It follows fallthrough and direct branch targets, stops at returns / indirect
+// or unconditional jumps that leave the function, and walls off other known
+// function starts. This prevents the classic mis-attribution where an
+// over-extended heuristic funcEnd makes the linear scan walk into the NEXT
+// function and report ITS calls as edges of this one ("fall-through" edges).
+func scanCallTargetsCFG(sections []cgSection, funcBegin uint32, imageBase uint64, is64 bool, starts map[uint32]bool) []cgCallTarget {
 	mode := 32
 	if is64 {
 		mode = 64
 	}
-
+	var data []byte
+	var secRVA uint32
+	found := false
 	for _, sec := range sections {
-		secEnd64 := uint64(sec.rva) + uint64(len(sec.data))
+		if uint64(funcBegin) >= uint64(sec.rva) && uint64(funcBegin) < uint64(sec.rva)+uint64(len(sec.data)) {
+			data, secRVA, found = sec.data, sec.rva, true
+			break
+		}
+	}
+	if !found {
+		return nil
+	}
 
-		// Check overlap with function range (use uint64 to avoid uint32 wrap-around)
-		scanStart := funcBegin
-		if scanStart < sec.rva {
-			scanStart = sec.rva
-		}
-		scanEnd := funcEnd
-		if uint64(scanEnd) > secEnd64 {
-			scanEnd = uint32(secEnd64)
-		}
-		if scanStart >= scanEnd {
+	startOff := int(funcBegin - secRVA)
+	seen := make(map[uint32]bool)
+	var targets []cgCallTarget
+	visited := make(map[int]bool)
+	stack := []int{startOff}
+	budget := 200000
+
+	for len(stack) > 0 && budget > 0 {
+		pos := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if pos < 0 || pos >= len(data) || visited[pos] {
 			continue
 		}
+		rva := secRVA + uint32(pos)
+		if pos != startOff && starts[rva] {
+			continue // reached another function -- not part of this one
+		}
+		visited[pos] = true
+		budget--
 
-		data := sec.data[scanStart-sec.rva : scanEnd-sec.rva]
+		inst, err := x86asm.Decode(data[pos:], mode)
+		if err != nil || inst.Len == 0 {
+			continue
+		}
+		next := pos + inst.Len
 
-		// Instruction-level scan to avoid false positives from mid-instruction bytes
-		for i := 0; i < len(data); {
-			instrRVA := scanStart + uint32(i)
-			inst, err := x86asm.Decode(data[i:], mode)
-			if err != nil || inst.Len <= 0 {
-				i++
-				continue
+		switch {
+		case data[pos] == 0xE8 && inst.Len == 5:
+			t := uint32(int64(rva) + 5 + int64(int32(binary.LittleEndian.Uint32(data[pos+1:]))))
+			if !seen[t] {
+				seen[t] = true
+				targets = append(targets, cgCallTarget{rva: t, indirect: false})
 			}
-			instBytes := data[i : i+inst.Len]
-
-			// E8 rel32 -- CALL relative (direct call)
-			if instBytes[0] == 0xE8 && inst.Len == 5 {
-				rel := int32(binary.LittleEndian.Uint32(instBytes[1:]))
-				target := uint32(int64(instrRVA) + 5 + int64(rel))
-				if !seen[target] {
-					seen[target] = true
-					targets = append(targets, cgCallTarget{rva: target, indirect: false})
-				}
+		case data[pos] == 0xFF && inst.Len >= 6 && data[pos+1] == 0x15:
+			var t uint32
+			valid := false
+			if is64 {
+				t = uint32(int64(rva) + int64(inst.Len) + int64(int32(binary.LittleEndian.Uint32(data[pos+2:pos+6]))))
+				valid = true
+			} else if addr := binary.LittleEndian.Uint32(data[pos+2 : pos+6]); addr >= uint32(imageBase) {
+				t = addr - uint32(imageBase)
+				valid = true
 			}
-
-			// FF 15 -- indirect call via IAT
-			// x64: CALL [rip+disp32], x86: CALL [abs32]
-			if instBytes[0] == 0xFF && inst.Len >= 6 && instBytes[1] == 0x15 {
-				var target uint32
-				var valid bool
-				if is64 {
-					disp := int32(binary.LittleEndian.Uint32(instBytes[2:6]))
-					target = uint32(int64(instrRVA) + int64(inst.Len) + int64(disp))
-					valid = true
-				} else {
-					// x86 FF 15: absolute address, convert to RVA
-					addr := binary.LittleEndian.Uint32(instBytes[2:6])
-					base32 := uint32(imageBase)
-					if addr >= base32 {
-						target = addr - base32
-						valid = true
-					}
-				}
-				if valid && !seen[target] {
-					seen[target] = true
-					targets = append(targets, cgCallTarget{rva: target, indirect: true})
-				}
+			if valid && !seen[t] {
+				seen[t] = true
+				targets = append(targets, cgCallTarget{rva: t, indirect: true})
 			}
+		}
 
-			i += inst.Len
+		switch inst.Op {
+		case x86asm.RET, x86asm.LRET, x86asm.IRET, x86asm.IRETD, x86asm.IRETQ:
+			// terminator
+		case x86asm.JMP:
+			if to, ok := branchTargetOff(inst, pos); ok {
+				stack = append(stack, to)
+			}
+		case x86asm.CALL, x86asm.LCALL:
+			stack = append(stack, next)
+		default:
+			if to, ok := branchTargetOff(inst, pos); ok {
+				stack = append(stack, to)
+			}
+			stack = append(stack, next)
 		}
 	}
 
@@ -677,6 +739,12 @@ func cgOpenPE(path string) (*cgBinary, error) {
 	} else {
 		// x86 PE: no .pdata, use heuristic
 		funcTable = buildFuncTableFromCalls(execSections, imageBase)
+	}
+
+	// Fold export starts in as real boundaries -- the heuristic table is built
+	// from CALL targets only and would otherwise miss ordinal-only exports.
+	if exp, _ := codeExportStarts(f); len(exp) > 0 {
+		funcTable = mergeStartsIntoFuncTable(funcTable, exp, execSections)
 	}
 
 	symbols := peSymbolMap(f, imageBase)
