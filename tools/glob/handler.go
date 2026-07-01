@@ -155,11 +155,17 @@ func findMatches(baseDir, pattern string) ([]string, error) {
 				return nil
 			}
 			if info.IsDir() {
-				if strings.HasPrefix(info.Name(), ".") && info.Name() != "." {
-					return filepath.SkipDir
-				}
-				if info.Name() == "node_modules" || info.Name() == "vendor" {
-					return filepath.SkipDir
+				// Skip hidden/vendor dirs only when encountered during traversal,
+				// not when they are the explicit search root. Otherwise globbing an
+				// explicitly-given hidden root (e.g. C:\Users\...\.codex) would abort
+				// immediately, since Walk hands the root itself to walkFn first.
+				if path != startDir {
+					if strings.HasPrefix(info.Name(), ".") && info.Name() != "." {
+						return filepath.SkipDir
+					}
+					if info.Name() == "node_modules" || info.Name() == "vendor" {
+						return filepath.SkipDir
+					}
 				}
 				return nil
 			}
