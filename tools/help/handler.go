@@ -1207,7 +1207,7 @@ func helpMemtool() string {
 	return `# Memory Tool (memtool)
 
 Process memory tool for reverse engineering and game hacking.
-CheatEngine-style: search, filter, write, pointer scan, struct search, diff.
+CheatEngine-style: search, filter, write, read_chain, pointer scan, struct search, diff.
 
 ## Platform Support
 - Windows: OpenProcess + ReadProcessMemory/WriteProcessMemory + VirtualQueryEx
@@ -1237,6 +1237,20 @@ CheatEngine-style: search, filter, write, pointer scan, struct search, diff.
 
 ### read - Hex dump at address
   memtool(operation="read", pid=1234, address="0x7FF6A1B20000", length=128)
+
+### read_chain - Resolve base+offset pointer chains (batched)
+  Cheat-Engine semantics: p=deref(base); deref each middle offset; last offset
+  is added (not dereferenced); then the value is read at the final address.
+  Batch many chains in one call so you don't need one read per pointer level.
+  memtool(operation="read_chain", pid=1234, chains='[
+    {"base":"0x7FF6..","offsets":["0x10","0x8","0x0"],"type":"int32","label":"hp"},
+    {"base":"0x7FF6..","offsets":["0x20"],"type":"float32","label":"x"}]')
+  Single chain (flat form): address + offsets + value_type
+  memtool(operation="read_chain", pid=1234, address="0x7FF6..",
+	offsets="0x10, 0x8, 0x0", value_type="int32")
+  Offsets are signed (e.g. "-0x8"). Empty offsets reads directly at base.
+  type omitted -> hex dump (length bytes). ptr_size=4 for a 32-bit target.
+  Broken chains report the exact step that failed (e.g. "BROKEN at step 2").
 
 ### write - Modify memory at address
   memtool(operation="write", pid=1234, address="0x...", value_type="int32", value="999")

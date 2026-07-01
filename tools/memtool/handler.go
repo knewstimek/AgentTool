@@ -2,6 +2,7 @@ package memtool
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -43,6 +44,9 @@ type MemtoolInput struct {
 	Mode          interface{} `json:"mode,omitempty" jsonschema:"CPU mode for disasm: 32 or 64 (default)"`
 	Count         interface{} `json:"count,omitempty" jsonschema:"Number of instructions to disassemble (default 50, max 200)"`
 	ForceDACL     interface{} `json:"force_dacl,omitempty" jsonschema:"Windows only. If a normal OpenProcess is denied, temporarily rewrite the target's DACL (via owner-implicit WRITE_DAC) to gain access, then restore it. Works only for SAME-USER targets that self-hardened their DACL; cannot bypass higher-integrity, other-user, OWNER_RIGHTS-SID, or PPL/anti-cheat targets. Invasive -- opt-in, default false."`
+	Chains        string `json:"chains,omitempty" jsonschema:"read_chain: JSON array of pointer chains to resolve in ONE call. Each: {base:'0x..' (hex), offsets:['0x10','0x8','0x0'] (signed hex/dec, CE order), type:'int32' (omit for hex dump), label:'hp' (optional), length:N (for string/bytes)}. Batches many chains so you avoid one call per pointer level."`
+	Offsets       string `json:"offsets,omitempty" jsonschema:"read_chain single-chain form: offsets for one chain given via address+offsets+value_type. JSON array or comma/space separated hex (e.g. '0x10, 0x8, 0x0'). Signed offsets allowed."`
+	PtrSize       interface{} `json:"ptr_size,omitempty" jsonschema:"read_chain pointer size in bytes: 8 (64-bit, default) or 4 (32-bit process). Set 4 when the target is a 32-bit process or chains resolve to garbage."`
 }
 
 // MemtoolOutput is the output structure.
@@ -54,13 +58,14 @@ var validOps = map[string]bool{
 	"regions": true, "search": true, "filter": true,
 	"read": true, "write": true, "disasm": true, "info": true, "close": true,
 	"undo": true, "struct_search": true, "pointer_scan": true, "diff": true,
+	"read_chain": true,
 }
 
 // Handle processes a memtool invocation.
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input MemtoolInput) (*mcp.CallToolResult, MemtoolOutput, error) {
 	op := strings.ToLower(strings.TrimSpace(input.Operation))
 	if !validOps[op] {
-		return errorResult("invalid operation %q (use: regions, search, filter, read, write, disasm, info, close, undo, struct_search, pointer_scan, diff)", op)
+		return errorResult("invalid operation %q (use: regions, search, filter, read, read_chain, write, disasm, info, close, undo, struct_search, pointer_scan, diff)", op)
 	}
 
 	// Resolve all integer fields upfront to support string-encoded values from XML tool calls
@@ -93,6 +98,8 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input MemtoolInput) (
 		return opFilter(input)
 	case "read":
 		return opRead(input)
+	case "read_chain":
+		return opReadChain(input)
 	case "write":
 		return opWrite(input)
 	case "disasm":
@@ -350,6 +357,65 @@ func opRead(input MemtoolInput) (*mcp.CallToolResult, MemtoolOutput, error) {
 	}
 
 	return successResult(formatHexDump(addr, buf[:n]))
+}
+
+// opReadChain resolves one or more Cheat-Engine-style pointer chains in a
+// single call, so an agent tracking several multi-level pointers doesn't need
+// one round-trip per dereference level.
+func opReadChain(input MemtoolInput) (*mcp.CallToolResult, MemtoolOutput, error) {
+	if input.PIDInt <= 0 {
+		return errorResult("pid is required")
+	}
+
+	// Pointer width: default 64-bit; caller sets 4 for a 32-bit target.
+	ptrSize := 8
+	if v, ok := common.FlexInt(input.PtrSize); ok && (v == 4 || v == 8) {
+		ptrSize = v
+	}
+	bo := getByteOrder(input.Endian)
+
+	var specs []chainSpec
+	if strings.TrimSpace(input.Chains) != "" {
+		// Batch form: JSON array. UseNumber so integer offsets stay exact.
+		dec := json.NewDecoder(strings.NewReader(input.Chains))
+		dec.UseNumber()
+		if err := dec.Decode(&specs); err != nil {
+			return errorResult("invalid chains JSON: %v\nExpected an array, e.g. [{\"base\":\"0x7FF6..\",\"offsets\":[\"0x10\",\"0x8\",\"0x0\"],\"type\":\"int32\",\"label\":\"hp\"}]", err)
+		}
+	} else if strings.TrimSpace(input.Address) != "" {
+		// Single-chain form via address+offsets+value_type.
+		offs, err := parseFlatOffsets(input.Offsets)
+		if err != nil {
+			return errorResult("%v", err)
+		}
+		specs = []chainSpec{{Base: input.Address, Offsets: offs, Type: input.ValueType, Length: input.LengthInt}}
+	} else {
+		return errorResult("provide 'chains' (JSON array of {base,offsets,type,label}) or a single chain via 'address'+'offsets'+'value_type'")
+	}
+
+	if len(specs) == 0 {
+		return errorResult("no chains provided")
+	}
+	if len(specs) > maxChains {
+		return errorResult("too many chains (%d, max %d)", len(specs), maxChains)
+	}
+	for i := range specs {
+		if len(specs[i].Offsets) > maxChainOffsets {
+			return errorResult("chain %d: too many offsets (%d, max %d)", i, len(specs[i].Offsets), maxChainOffsets)
+		}
+	}
+
+	reader := newProcessReader()
+	if err := reader.Open(input.PIDInt, false, input.ForceDACLBool); err != nil {
+		return errorResult("%v", err)
+	}
+	defer reader.Close()
+
+	results := make([]chainResult, len(specs))
+	for i, spec := range specs {
+		results[i] = resolveChain(reader, spec, bo, ptrSize)
+	}
+	return successResult(formatChainResults(results, ptrSize))
 }
 
 func opWrite(input MemtoolInput) (*mcp.CallToolResult, MemtoolOutput, error) {
@@ -727,10 +793,13 @@ CheatEngine-style workflow: search → filter → filter → find exact addresse
 Supported: Windows (ReadProcessMemory/WriteProcessMemory), Linux (/proc/pid/mem). macOS: not supported (SIP).
 Operations: regions (list memory map), search (value scan or unknown initial value scan, creates session),
 filter (narrow: exact/changed/unchanged/increased/decreased), undo (restore previous filter),
-read (hex dump), write (modify memory), disasm (disassemble live memory — x86/x64/ARM/ARM64),
+read (hex dump), read_chain (resolve base+offset pointer chains, batched), write (modify memory),
+disasm (disassemble live memory — x86/x64/ARM/ARM64),
 info (session status + values), close (end session),
 struct_search (multi-field pattern), pointer_scan (find pointer chains to address),
 diff (compare memory snapshots).
+read_chain resolves many Cheat-Engine-style pointer chains (base + offset list) in ONE call --
+use it instead of chained read calls when you have several multi-level pointers to follow.
 Windows: auto-enables SeDebugPrivilege when elevated. force_dacl=true opts into a
 DACL-rewrite fallback to read a same-user self-hardened process (restored after).`,
 	}, Handle)

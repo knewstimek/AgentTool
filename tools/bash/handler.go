@@ -16,7 +16,8 @@ type BashInput struct {
 	Command    string `json:"command" jsonschema:"Shell command to execute"`
 	Cwd        string `json:"cwd,omitempty" jsonschema:"Initial working directory (only used when creating a new session)"`
 	SessionID  string `json:"session_id,omitempty" jsonschema:"Session identifier for persistent shell. Default: default"`
-	TimeoutSec interface{} `json:"timeout_sec,omitempty" jsonschema:"Command timeout in seconds (default 120, max 600)"`
+	TimeoutSec interface{} `json:"timeout_sec,omitempty" jsonschema:"Command timeout in seconds (default 120, max 600). For a longer-running process, raise this up to 600 or launch it detached with procexec instead of waiting here."`
+	Timeout    interface{} `json:"timeout,omitempty" jsonschema:"Alias for timeout_sec (seconds). Used only when timeout_sec is not set."`
 	Disconnect interface{} `json:"disconnect,omitempty" jsonschema:"Close the shell session: true or false. Default: false"`
 }
 
@@ -50,10 +51,15 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input BashInput) (*mc
 		return errorResult("command is required")
 	}
 
-	// Validate timeout
-	timeoutSec, ok := common.FlexInt(input.TimeoutSec)
+	// Validate timeout. Accept 'timeout' as an alias when 'timeout_sec' is unset,
+	// since agents commonly reach for the shorter name (FlexInt maps nil/"" to 0).
+	rawTimeout := input.TimeoutSec
+	if rawTimeout == nil || rawTimeout == "" {
+		rawTimeout = input.Timeout
+	}
+	timeoutSec, ok := common.FlexInt(rawTimeout)
 	if !ok {
-		return errorResult("timeout_sec must be an integer")
+		return errorResult("timeout (seconds) must be an integer")
 	}
 	if timeoutSec <= 0 {
 		timeoutSec = 120
@@ -129,6 +135,7 @@ func Register(server *mcp.Server) {
 		Description: `Execute shell commands with persistent session support.
 Sessions maintain working directory, environment variables, and shell state across calls.
 Use session_id to manage multiple independent shell sessions.
+Set timeout_sec (or its alias timeout) in seconds, default 120, max 600. For a process that runs longer than that, launch it detached with procexec rather than blocking here.
 Use disconnect=true to close a session.
 Platform: bash/sh on Unix, PowerShell/git-bash/cmd on Windows (auto-detected, best available).`,
 	}, Handle)
