@@ -224,6 +224,10 @@ func helpTools() string {
 
 ## edit
 Replace text in a file with smart indentation and encoding preservation.
+When new_string contains non-ASCII text, the result echoes those words back so
+you can check them: a string composed as \uXXXX escapes hides its own typos
+(one wrong hex digit is still a valid character), and rendering it as text is
+the only way to spot that. U+FFFD in the input is reported as corruption.
 Parameters: file_path, old_string, new_string, replace_all, dry_run, indent_style
 
 ## read
@@ -235,6 +239,8 @@ Parameters: file_path, offset (integer, "start-end" string, or [start,end] array
 
 ## write
 Create or overwrite a file. Preserves encoding for existing files.
+U+FFFD in the content is reported: it means the text was already corrupted
+before reaching the tool and the original characters cannot be recovered.
 Parameters: file_path, content
 
 ## grep

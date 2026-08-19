@@ -100,6 +100,16 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input MultiEditInput)
 	}
 
 	msg := fmt.Sprintf("OK: applied %d edit(s) to %s (encoding=%s)\n%s", len(input.Edits), input.FilePath, encInfo.Charset, summary)
+
+	// One notice for the whole call: a per-edit echo would repeat the header
+	// for every entry, and what matters is the set of characters written.
+	var written strings.Builder
+	for _, e := range input.Edits {
+		written.WriteString(e.NewString)
+		written.WriteString("\n")
+	}
+	msg += common.TextGuardNotice(written.String())
+
 	if warning := common.EncodingWarning(encInfo); warning != "" {
 		msg += warning
 	}

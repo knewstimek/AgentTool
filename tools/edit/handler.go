@@ -121,6 +121,10 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input EditInput) (*mc
 
 	msg := fmt.Sprintf("OK: %s (%s, encoding=%s)", result.Message, input.FilePath, encInfo.Charset)
 
+	// Echo back what was written, in the text an agent can actually inspect:
+	// a string composed as \uXXXX escapes hides its own typos until rendered.
+	msg += common.TextGuardNotice(input.NewString)
+
 	// Add warning if encoding detection confidence is low
 	if warning := common.EncodingWarning(encInfo); warning != "" {
 		msg += warning

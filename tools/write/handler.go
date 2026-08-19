@@ -69,6 +69,13 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input WriteInput) (*m
 	}
 
 	msg := fmt.Sprintf("OK: file written (%s, encoding=%s)", input.FilePath, encInfo.Charset)
+
+	// Only the corruption check here -- write takes whole-file content, so
+	// echoing its non-ASCII would be noise rather than something to inspect.
+	if warning := common.ReplacementCharWarning(input.Content); warning != "" {
+		msg += "\n" + warning
+	}
+
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: msg}},
 	}, WriteOutput{Result: msg}, nil
