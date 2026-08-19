@@ -106,12 +106,14 @@ func startShellSession(key string, cwd string) (*shellSession, error) {
 }
 
 // decodeOutput converts shell output to UTF-8.
-// PowerShell and git bash output UTF-8 directly; cmd.exe needs console decoding.
-func decodeOutput(kind shellKind, raw string) string {
-	if kind == kindCmd {
-		return common.DecodeConsoleOutput([]byte(raw))
-	}
-	return raw
+//
+// Every shell kind goes through detection, not just cmd.exe. git-bash and
+// PowerShell emit UTF-8 for their own builtins, but a native Windows exe run
+// from them (chcp, tasklist, python) writes in the ANSI code page -- so the
+// shell kind says nothing about a given line. DecodeConsoleOutput leaves valid
+// UTF-8 untouched, making this safe for the shells that were skipped before.
+func decodeOutput(_ shellKind, raw string) string {
+	return common.DecodeConsoleOutput([]byte(raw))
 }
 
 // findGitBash returns the path to git bash if installed, empty string otherwise.

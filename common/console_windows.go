@@ -3,8 +3,11 @@
 package common
 
 import (
+	"bytes"
 	"fmt"
+	"strings"
 	"syscall"
+	"unicode/utf8"
 
 	"golang.org/x/text/encoding"
 	"golang.org/x/text/encoding/charmap"
@@ -64,32 +67,55 @@ func codePageToEncoding(cp uint32) encoding.Encoding {
 	}
 }
 
-// DecodeConsoleOutput converts Windows console output (system code page) to UTF-8.
-// Dynamically detects the system code page via GetACP() and decodes with the correct encoding.
+// DecodeConsoleOutput converts Windows console output to UTF-8.
+//
+// The encoding cannot be decided from the shell alone: a git-bash or PowerShell
+// session emits UTF-8 for its own builtins, but any native Windows exe it runs
+// (chcp, tasklist, python) writes in the ANSI code page, so a single command's
+// output can carry both. Decide from the bytes instead -- valid UTF-8 is left
+// alone, anything else is decoded with the ACP. The failure direction is the
+// safe one: real UTF-8 is never mistaken for ACP text.
+//
+// Per line, because of that mixing. A whole-buffer verdict would corrupt
+// whichever half lost the vote.
 func DecodeConsoleOutput(data []byte) string {
-	// No high bytes means pure ASCII — no conversion needed
-	hasHighByte := false
-	for _, b := range data {
-		if b >= 0x80 {
-			hasHighByte = true
-			break
-		}
+	if isASCII(data) {
+		return string(data)
 	}
-	if !hasHighByte {
+	if utf8.Valid(data) {
 		return string(data)
 	}
 
-	cp := getSystemCodePage()
-	enc := codePageToEncoding(cp)
+	enc := codePageToEncoding(getSystemCodePage())
 	if enc == nil {
 		return string(data) // UTF-8 or unknown code page
 	}
 
-	decoded, _, err := transform.Bytes(enc.NewDecoder(), data)
-	if err == nil {
-		return string(decoded)
+	lines := bytes.SplitAfter(data, []byte("\n"))
+	var sb strings.Builder
+	sb.Grow(len(data))
+	for _, line := range lines {
+		if isASCII(line) || utf8.Valid(line) {
+			sb.Write(line)
+			continue
+		}
+		decoded, _, err := transform.Bytes(enc.NewDecoder(), line)
+		if err != nil {
+			sb.Write(line) // undecodable: keep the raw bytes rather than lose the line
+			continue
+		}
+		sb.Write(decoded)
 	}
-	return string(data)
+	return sb.String()
+}
+
+func isASCII(data []byte) bool {
+	for _, b := range data {
+		if b >= 0x80 {
+			return false
+		}
+	}
+	return true
 }
 
 // SystemCodePageInfo returns current system code page information (for debugging/logging).
