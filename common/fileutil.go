@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/saintfish/chardet"
 	"golang.org/x/text/encoding"
@@ -166,16 +167,32 @@ func ReadFileWithEncoding(path string, hintCharset string) (string, EncodingInfo
 		return string(raw), info, nil
 	}
 
+	// UTF-16 BOM. The BOM bytes are stripped here and re-added on write, so the
+	// IgnoreBOM decoders below never leak a U+FEFF into the returned text.
+	// UTF-32LE starts with the UTF-16LE BOM, so it has to be excluded first.
+	if bytes.HasPrefix(raw, bomUTF16LE) && !bytes.HasPrefix(raw, bomUTF32LE) {
+		info.HasBOM = true
+		info.Charset = "UTF-16LE"
+		return decodeUTF16(raw[len(bomUTF16LE):], true, info)
+	}
+	if bytes.HasPrefix(raw, bomUTF16BE) {
+		info.HasBOM = true
+		info.Charset = "UTF-16BE"
+		return decodeUTF16(raw[len(bomUTF16BE):], false, info)
+	}
+
 	// Empty file
 	if len(raw) == 0 {
 		info.UsedSource = "fallback"
 		return "", info, nil
 	}
 
-	// Encoding decision priority:
+	// Encoding decision priority (BOMs already handled above):
 	// 1. .editorconfig charset hint (hintCharset)
-	// 2. chardet auto-detection (Confidence >= 50)
-	// 3. FallbackEncoding (default UTF-8, changeable via CLI)
+	// 2. BOM-less UTF-16 (NUL parity heuristic)
+	// 3. utf8.Valid -- proof rather than a guess, so it outranks chardet
+	// 4. chardet auto-detection (Confidence >= 50)
+	// 5. FallbackEncoding (default UTF-8, changeable via CLI)
 
 	charset := ""
 
@@ -186,12 +203,40 @@ func ReadFileWithEncoding(path string, hintCharset string) (string, EncodingInfo
 		info.UsedSource = "hint"
 	}
 
-	// 2. chardet detection (uses only a front sample — full file not needed)
+	sample := raw
+	if len(sample) > chardetSampleSize {
+		sample = sample[:chardetSampleSize]
+	}
+
+	// 2. BOM-less UTF-16. chardet does not flag it, so without this the file
+	// falls through to UTF-8 and every character reads with a NUL wedged
+	// beside it -- searches and edits silently miss.
 	if charset == "" {
-		sample := raw
-		if len(sample) > chardetSampleSize {
-			sample = sample[:chardetSampleSize]
+		if littleEndian, ok := utf16Kind(sample); ok {
+			if littleEndian {
+				info.Charset = "UTF-16LE"
+			} else {
+				info.Charset = "UTF-16BE"
+			}
+			return decodeUTF16(raw, littleEndian, info)
 		}
+	}
+
+	// 3. Valid UTF-8 is proof, not a guess -- decoding cannot go wrong, so this
+	// outranks chardet and carries no warning. It matters most for plain ASCII:
+	// chardet has nothing to distinguish it from Latin-1 and reports ~11-33%
+	// confidence, which used to drop every such file into the fallback branch
+	// and attach a low-confidence warning to over half the files in a repo.
+	// Non-UTF-8 encodings (EUC-KR, Shift_JIS, GBK, CP1252) fail utf8.Valid on
+	// their multi-byte sequences, so they are not swallowed here.
+	if charset == "" && utf8.Valid(raw) {
+		charset = "UTF-8"
+		info.Confidence = 100
+		info.UsedSource = "utf8"
+	}
+
+	// 4. chardet detection (uses only a front sample — full file not needed)
+	if charset == "" {
 		detector := chardet.NewTextDetector()
 		result, detectErr := detector.DetectBest(sample)
 		if detectErr == nil && result.Confidence >= 50 {
@@ -201,7 +246,7 @@ func ReadFileWithEncoding(path string, hintCharset string) (string, EncodingInfo
 		}
 	}
 
-	// 3. Fallback
+	// 5. Fallback
 	if charset == "" {
 		charset = normalizeCharsetName(GetFallbackEncoding())
 		info.Confidence = 0
@@ -231,6 +276,38 @@ func ReadFileWithEncoding(path string, hintCharset string) (string, EncodingInfo
 	return decoded, info, nil
 }
 
+// utf16Encoding returns the UTF-16 codec for the given byte order. IgnoreBOM
+// is deliberate on both sides: ReadFileWithEncoding strips the BOM before
+// decoding and WriteFileWithEncoding re-attaches it, matching how the UTF-8
+// BOM is handled and keeping U+FEFF out of the decoded text.
+func utf16Encoding(littleEndian bool) encoding.Encoding {
+	if littleEndian {
+		return unicode.UTF16(unicode.LittleEndian, unicode.IgnoreBOM)
+	}
+	return unicode.UTF16(unicode.BigEndian, unicode.IgnoreBOM)
+}
+
+// decodeUTF16 decodes BOM-stripped UTF-16 bytes, falling back to the raw bytes
+// if the codec rejects them (a truncated surrogate, say) so a bad guess degrades
+// to the old behaviour instead of failing the read.
+func decodeUTF16(raw []byte, littleEndian bool, info EncodingInfo) (string, EncodingInfo, error) {
+	if info.UsedSource == "" || info.UsedSource == "bom" {
+		if !info.HasBOM {
+			info.UsedSource = "utf16-heuristic"
+		}
+	}
+	info.Confidence = 100
+	decoded, err := decodeBytes(raw, utf16Encoding(littleEndian))
+	if err != nil {
+		info.Charset = "UTF-8"
+		info.HasBOM = false
+		info.UsedSource = "fallback"
+		info.Confidence = 0
+		return string(raw), info, nil
+	}
+	return decoded, info, nil
+}
+
 // WriteFileWithEncoding converts UTF-8 text back to the original encoding and saves it.
 func WriteFileWithEncoding(path string, content string, info EncodingInfo) error {
 	// Preserve original file permissions
@@ -241,7 +318,24 @@ func WriteFileWithEncoding(path string, content string, info EncodingInfo) error
 
 	var data []byte
 
-	if info.HasBOM {
+	// UTF-16 first: its HasBOM means a UTF-16 BOM, and falling into the branch
+	// below would prepend a UTF-8 BOM to UTF-16 bytes and corrupt the file.
+	if info.Charset == "UTF-16LE" || info.Charset == "UTF-16BE" {
+		littleEndian := info.Charset == "UTF-16LE"
+		encoded, err := encodeString(content, utf16Encoding(littleEndian))
+		if err != nil {
+			return fmt.Errorf("encoding conversion failed (%s): %w", info.Charset, err)
+		}
+		if info.HasBOM {
+			if littleEndian {
+				data = append(append([]byte{}, bomUTF16LE...), encoded...)
+			} else {
+				data = append(append([]byte{}, bomUTF16BE...), encoded...)
+			}
+		} else {
+			data = encoded
+		}
+	} else if info.HasBOM {
 		data = append(utf8BOM, []byte(content)...)
 	} else if info.Charset == "UTF-8" || info.Charset == "" {
 		data = []byte(content)

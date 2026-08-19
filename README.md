@@ -93,8 +93,9 @@ LLMs typically output spaces, but many projects use tabs. AgentTool auto-convert
 ### Encoding Preservation
 Edits preserve the original file encoding instead of forcing UTF-8.
 
-- **Detection priority**: `.editorconfig` charset → chardet auto-detection → fallback encoding
-- **Supported**: UTF-8, UTF-8 BOM, EUC-KR, Shift-JIS, ISO-8859-1, UTF-16, and more
+- **Detection priority**: BOM → `.editorconfig` charset → BOM-less UTF-16 → valid UTF-8 → chardet auto-detection → fallback encoding
+- **Supported**: UTF-8, UTF-8 BOM, EUC-KR, Shift-JIS, ISO-8859-1, UTF-16 (LE/BE, with or without BOM), and more
+- **No false warnings on ASCII**: valid UTF-8 is verified directly, so plain ASCII files never raise a low-confidence warning
 - **Line endings**: Preserves `\r\n` / `\n` as-is
 
 ## Quick Start

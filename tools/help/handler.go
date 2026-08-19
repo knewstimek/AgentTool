@@ -136,9 +136,15 @@ func helpEncoding() string {
 
 ## How encoding detection works
 Priority order:
-1. .editorconfig 'charset' value (highest priority)
-2. chardet auto-detection (confidence >= 50%)
-3. Fallback encoding (currently: ` + common.GetFallbackEncoding() + `)
+1. BOM (UTF-8, UTF-16LE, UTF-16BE) -- conclusive, checked first
+2. .editorconfig 'charset' value
+3. BOM-less UTF-16 (detected from NUL-byte layout; chardet does not report it)
+4. Valid UTF-8 -- verified, not guessed, so it outranks chardet and never warns
+5. chardet auto-detection (confidence >= 50%)
+6. Fallback encoding (currently: ` + common.GetFallbackEncoding() + `)
+
+Step 4 matters for plain ASCII: chardet cannot tell it from Latin-1 and reports
+~11-33% confidence, which would otherwise warn on most files in a typical repo.
 
 ## Setting up for non-UTF-8 projects
 
@@ -166,6 +172,8 @@ UTF-8, UTF-8 BOM, EUC-KR, Shift_JIS, ISO-8859-1, UTF-16BE, UTF-16LE, and more.
 
 ## Warning messages
 - "Encoding detection failed (low confidence)": chardet couldn't identify the encoding.
+  The file is not valid UTF-8 either, so this one is real -- short non-UTF-8
+  files are the common case, since chardet needs a decent sample.
   → Add charset to .editorconfig or set --fallback-encoding.
 - "Encoding detected as X (confidence: N%)": chardet is unsure about the result.
   → If text looks correct, no action needed. If garbled, add charset to .editorconfig.

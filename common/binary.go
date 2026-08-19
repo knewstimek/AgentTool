@@ -129,26 +129,21 @@ func IsBinaryFile(path string) bool {
 var (
 	bomUTF16LE = []byte{0xFF, 0xFE}
 	bomUTF16BE = []byte{0xFE, 0xFF}
+	bomUTF32LE = []byte{0xFF, 0xFE, 0x00, 0x00}
 	bomUTF32BE = []byte{0x00, 0x00, 0xFE, 0xFF}
 )
 
-// isBinaryContent classifies a leading sample as binary or text.
+// utf16Kind reports whether a BOM-less sample looks like UTF-16 text, and if
+// so whether it is little-endian.
 //
-// The rule is "contains NUL", with one exception: UTF-16/UTF-32 text is full
-// of NUL bytes and must not be misjudged, or this encoding-aware server would
-// stop searching the very files it exists to handle. BOM-less UTF-16 is caught
-// by parity -- ASCII in UTF-16 puts every NUL on the same odd/even position,
-// while a real binary scatters them. The threshold is 80% rather than 100%
-// because CJK code points ending in 0x00 (U+AC00 GA, for one) put a NUL on
-// the opposite parity, so mixed ASCII/Hangul text never reaches a clean skew.
-// The >=4 NUL floor keeps a binary that happens to hold two aligned zero
-// bytes from passing the parity test.
-func isBinaryContent(sample []byte) bool {
-	if bytes.HasPrefix(sample, bomUTF16LE) || bytes.HasPrefix(sample, bomUTF16BE) ||
-		bytes.HasPrefix(sample, bomUTF32BE) {
-		return false
-	}
-
+// ASCII encoded as UTF-16 puts a NUL beside every character -- on odd offsets
+// for little-endian, even offsets for big-endian -- so the NUL positions pile
+// onto one parity. A real binary scatters them. The 80% threshold (rather than
+// a clean 100%) exists because code points whose low byte is 0x00 (U+AC00 GA,
+// for one) drop a NUL on the opposite parity, which any mixed ASCII/Hangul
+// text does constantly. The >=4 floor stops a binary holding a couple of
+// aligned zero bytes from passing.
+func utf16Kind(sample []byte) (littleEndian, ok bool) {
 	nulls, evenNulls := 0, 0
 	for i, b := range sample {
 		if b != 0 {
@@ -159,17 +154,33 @@ func isBinaryContent(sample []byte) bool {
 			evenNulls++
 		}
 	}
-	if nulls == 0 {
+	if nulls < 4 {
+		return false, false
+	}
+	oddNulls := nulls - evenNulls
+	if oddNulls*5 >= nulls*4 {
+		return true, true // NULs on odd offsets -> high bytes -> little-endian
+	}
+	if evenNulls*5 >= nulls*4 {
+		return false, true
+	}
+	return false, false
+}
+
+// isBinaryContent classifies a leading sample as binary or text.
+//
+// The rule is "contains NUL", with one exception: UTF-16/UTF-32 text is full
+// of NUL bytes and must not be misjudged, or this encoding-aware server would
+// stop searching the very files it exists to handle.
+func isBinaryContent(sample []byte) bool {
+	if bytes.HasPrefix(sample, bomUTF16LE) || bytes.HasPrefix(sample, bomUTF16BE) ||
+		bytes.HasPrefix(sample, bomUTF32BE) {
 		return false
 	}
-
-	oddNulls := nulls - evenNulls
-	skewed := evenNulls
-	if oddNulls > skewed {
-		skewed = oddNulls
+	if bytes.IndexByte(sample, 0) < 0 {
+		return false
 	}
-	// 80% on one parity with enough samples to be meaningful -> UTF-16 text.
-	if nulls >= 4 && skewed*5 >= nulls*4 {
+	if _, ok := utf16Kind(sample); ok {
 		return false
 	}
 	return true

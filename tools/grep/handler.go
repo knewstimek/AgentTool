@@ -127,6 +127,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input GrepInput) (*mc
 	var matches []string
 	var matchCount int
 	hasLowConfidence := false
+	skippedBinary := 0
 
 	if fi.IsDir() {
 		var dirResult searchDirResult
@@ -134,6 +135,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input GrepInput) (*mc
 		matches = dirResult.matches
 		matchCount = dirResult.matchCount
 		hasLowConfidence = dirResult.lowConfidenceCount > 0
+		skippedBinary = dirResult.skippedBinary
 	} else {
 		var fileResult searchFileResult
 		fileResult, err = searchFile(input.Path, re, maxResults, opts)
@@ -155,6 +157,16 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input GrepInput) (*mc
 	text := sb.String()
 	if matchCount == 0 {
 		text = "No matches found"
+	}
+
+	// Say what was not searched, so a missing hit is never a silent mystery.
+	// Only when something was actually skipped -- otherwise it is pure noise.
+	if skippedBinary > 0 {
+		if matchCount == 0 {
+			text += fmt.Sprintf("\n(%d binary file(s) skipped -- pass one as path to search it directly)", skippedBinary)
+		} else {
+			text += fmt.Sprintf("\n(%d binary file(s) skipped)", skippedBinary)
+		}
 	}
 
 	// Add warning if any files had low encoding detection confidence
@@ -306,6 +318,7 @@ type searchDirResult struct {
 	matches            []string
 	matchCount         int // total match count across all files
 	lowConfidenceCount int // number of files with low encoding detection confidence
+	skippedBinary      int // binary files not searched
 }
 
 func searchDir(dir, globPattern string, re *regexp.Regexp, maxResults int, opts searchOpts, recursive bool) (searchDirResult, error) {
@@ -341,6 +354,7 @@ func searchDir(dir, globPattern string, re *regexp.Regexp, maxResults int, opts 
 		// page fragments (binaries have almost no newlines, so one "line" is
 		// huge). A single explicitly-passed file path still gets searched.
 		if common.IsBinaryFile(path) {
+			result.skippedBinary++
 			return nil
 		}
 

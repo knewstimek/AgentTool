@@ -93,8 +93,9 @@ LLM은 보통 공백으로 출력하지만, 많은 프로젝트가 탭을 사용
 ### 인코딩 보존
 UTF-8로 강제 변환하지 않고, 원본 파일 인코딩을 유지합니다.
 
-- **감지 우선순위**: `.editorconfig` charset → chardet 자동 감지 → 폴백 인코딩
-- **지원 인코딩**: UTF-8, UTF-8 BOM, EUC-KR, Shift-JIS, ISO-8859-1, UTF-16 등
+- **감지 우선순위**: BOM → `.editorconfig` charset → BOM 없는 UTF-16 → 유효한 UTF-8 → chardet 자동 감지 → 폴백 인코딩
+- **지원 인코딩**: UTF-8, UTF-8 BOM, EUC-KR, Shift-JIS, ISO-8859-1, UTF-16 (LE/BE, BOM 유무 무관) 등
+- **ASCII 오탐 경고 없음**: 유효한 UTF-8 은 직접 검증하므로 순수 ASCII 파일에 신뢰도 경고가 뜨지 않음
 - **줄바꿈**: `\r\n` / `\n` 원본 유지
 
 ## 빠른 시작
