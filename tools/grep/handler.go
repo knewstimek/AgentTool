@@ -335,8 +335,12 @@ func searchDir(dir, globPattern string, re *regexp.Regexp, maxResults int, opts 
 			}
 		}
 
-		// skip binary files (simple heuristic)
-		if isBinaryExt(info.Name()) {
+		// Skip binary files. Extension alone is not enough -- a SQLite index
+		// like .codegraph.db stores symbol names as plain text inside binary
+		// pages, so every identifier search matched it and dumped multi-KB
+		// page fragments (binaries have almost no newlines, so one "line" is
+		// huge). A single explicitly-passed file path still gets searched.
+		if common.IsBinaryFile(path) {
 			return nil
 		}
 
@@ -367,22 +371,6 @@ func searchDir(dir, globPattern string, re *regexp.Regexp, maxResults int, opts 
 	return result, nil
 }
 
-func isBinaryExt(name string) bool {
-	ext := strings.ToLower(filepath.Ext(name))
-	binaryExts := map[string]bool{
-		".exe": true, ".dll": true, ".so": true, ".dylib": true,
-		".bin": true, ".obj": true, ".o": true, ".a": true,
-		".png": true, ".jpg": true, ".jpeg": true, ".gif": true,
-		".bmp": true, ".ico": true, ".svg": true,
-		".zip": true, ".tar": true, ".gz": true, ".7z": true, ".rar": true,
-		".pdf": true, ".doc": true, ".docx": true, ".xls": true, ".xlsx": true,
-		".woff": true, ".woff2": true, ".ttf": true, ".eot": true,
-		".mp3": true, ".mp4": true, ".avi": true, ".mov": true,
-		".pyc": true, ".class": true,
-	}
-	return binaryExts[ext]
-}
-
 func Register(server *mcp.Server) {
 	common.SafeAddTool(server, &mcp.Tool{
 		Name: "grep",
@@ -390,7 +378,9 @@ func Register(server *mcp.Server) {
 Encoding-aware: auto-detects file encoding.
 Can search a single file or recursively search a directory.
 Output modes: content (default, matching lines), files_with_matches (paths only), count (match counts).
-Context: use before/after/context to include surrounding lines (like grep -B/-A/-C).`,
+Context: use before/after/context to include surrounding lines (like grep -B/-A/-C).
+Directory search skips binary files (extension list + NUL-byte sniff); pass a binary file
+directly as path to search it anyway.`,
 	}, Handle)
 }
 

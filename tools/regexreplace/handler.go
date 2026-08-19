@@ -218,8 +218,10 @@ func processDir(dir, globPattern string, re *regexp.Regexp, replacement string, 
 			}
 		}
 
-		// Skip binary files
-		if isBinaryExt(d.Name()) {
+		// Skip binary files. Content sniffing matters more here than in grep:
+		// a bad match would rewrite the file, and corrupting an on-disk index
+		// (.codegraph.db and friends) is silent until the next query fails.
+		if common.IsBinaryFile(path) {
 			return nil
 		}
 
@@ -241,24 +243,6 @@ func processDir(dir, globPattern string, re *regexp.Regexp, replacement string, 
 		return results, err
 	}
 	return results, nil
-}
-
-// isBinaryExt checks if a filename has a binary file extension.
-// Reuses the same heuristic as grep to maintain consistency.
-func isBinaryExt(name string) bool {
-	ext := strings.ToLower(filepath.Ext(name))
-	binaryExts := map[string]bool{
-		".exe": true, ".dll": true, ".so": true, ".dylib": true,
-		".bin": true, ".obj": true, ".o": true, ".a": true,
-		".png": true, ".jpg": true, ".jpeg": true, ".gif": true,
-		".bmp": true, ".ico": true, ".svg": true,
-		".zip": true, ".tar": true, ".gz": true, ".7z": true, ".rar": true,
-		".pdf": true, ".doc": true, ".docx": true, ".xls": true, ".xlsx": true,
-		".woff": true, ".woff2": true, ".ttf": true, ".eot": true,
-		".mp3": true, ".mp4": true, ".avi": true, ".mov": true,
-		".pyc": true, ".class": true,
-	}
-	return binaryExts[ext]
 }
 
 func Register(server *mcp.Server) {

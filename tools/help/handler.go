@@ -233,6 +233,10 @@ Parameters: file_path, content
 Search file contents with regex. Encoding-aware.
 Output modes: content (default, matching lines), files_with_matches (paths only), count (match counts).
 Context: use before/after/context to include surrounding lines (like grep -B/-A/-C).
+Directory search skips binary files (known extensions plus a NUL-byte content
+sniff), so databases like .codegraph.db no longer flood results with page
+fragments. UTF-16 and other encoded text is still searched. Passing a binary
+file directly as path searches it anyway.
 Parameters: pattern, path, glob, ignore_case, max_results, output_mode, context, before, after
 
 ## glob
@@ -413,7 +417,9 @@ Parameters: file_paths (array, max 50), offset (1-based, or negative for end-rel
 ## regexreplace
 Regex find-and-replace in files or across directories.
 Supports capture groups ($1, $2, ${name}) in replacement strings.
-Encoding-aware: preserves original file encoding. Skips binary files.
+Encoding-aware: preserves original file encoding.
+Skips binary files by extension and NUL-byte content sniff, so an on-disk
+index or compiled artifact is never rewritten.
 Atomic write for each modified file.
 Parameters: pattern, replacement, path (file or directory), glob, ignore_case, dry_run, max_files (default 100)
 

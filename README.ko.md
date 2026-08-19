@@ -31,7 +31,7 @@ Claude Code, Codex CLI, Cursor, Windsurf, Cline, Gemini CLI 및 모든 MCP 호�
 | **Edit** | 스마트 들여쓰기 + 인코딩 보존 문자열 치환 (dry_run 지원) | ✅ |
 | **Read** | 인코딩 인식 파일 읽기 (offset: 정수, `"N-M"` 범위 문자열, `[N,M]` 배열 지원). 이미지 파일(PNG/JPG/GIF/BMP/WebP/TIFF/ICO)은 base64 ImageContent로 반환 | ✅ |
 | **Write** | 인코딩 인식 파일 생성/덮어쓰기 | ✅ |
-| **Grep** | 인코딩 인식 정규식 내용 검색 (output_mode: content/files_with_matches/count, context 옵션 -B/-A/-C) | ✅ |
+| **Grep** | 인코딩 인식 정규식 내용 검색 (output_mode: content/files_with_matches/count, context 옵션 -B/-A/-C). 바이너리 파일 자동 제외 (확장자 + NUL 검사) | ✅ |
 | **Glob** | `**` 재귀 지원 파일 패턴 매칭 | ✅ |
 | **ListDir** | 디렉토리 목록 (flat 또는 tree) | ✅ |
 | **Diff** | 두 파일 비교 (unified diff 출력, 인코딩 인식) | ✅ |
@@ -64,7 +64,7 @@ Claude Code, Codex CLI, Cursor, Windsurf, Cline, Gemini CLI 및 모든 MCP 호�
 | **Copy** | 파일/디렉토리 복사. 원자적 쓰기 + 권한 보존. 재귀 디렉토리 복사. Windows 잠긴 파일 폴백 (실행 중인 exe/DLL 이름 변경 후 교체). dry_run 미리보기 | ✅ |
 | **Mkdir** | 디렉토리 생성. 8진수 권한 모드 지정 가능 (예: 0755). 기본 재귀 생성 (mkdir -p). dry_run 미리보기 | ✅ |
 | **MultiRead** | 여러 파일을 한 번에 읽기 (API 왕복 절약). 인코딩 인식, offset/limit 지원. 최대 50개 | ✅ |
-| **RegexReplace** | 파일/디렉토리 전체 정규식 찾기-바꾸기. 인코딩 보존, 캡처 그룹 ($1, $2) 지원. dry_run 미리보기 | ✅ |
+| **RegexReplace** | 파일/디렉토리 전체 정규식 찾기-바꾸기. 인코딩 보존, 캡처 그룹 ($1, $2) 지원. 바이너리 파일 자동 제외. dry_run 미리보기 | ✅ |
 | **TLSCheck** | TLS 인증서 상세 조회 — 주체, 발급자, 만료일, SAN, TLS 버전, 암호화 스위트 | ✅ |
 | **DNSLookup** | DNS 레코드 조회 (A/AAAA/MX/CNAME/TXT/NS/SOA). DoH(DNS over HTTPS) 기본 활성 | ✅ |
 | **MySQL** | MySQL/MariaDB SQL 쿼리 실행. SELECT 결과 테이블 포맷, DML은 영향 행 수 반환. 최대 1000행 | ✅ |

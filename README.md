@@ -31,7 +31,7 @@ Claude Code, Codex CLI, Cursor, Windsurf, Cline, Gemini CLI, and any MCP-compati
 | **Edit** | String replacement with smart indentation and encoding preservation (supports dry_run) | ✅ |
 | **Read** | Encoding-aware file reading with flexible offset (integer, `"N-M"` range, `[N,M]` array). Image files (PNG/JPG/GIF/BMP/WebP/TIFF/ICO) returned as base64 ImageContent | ✅ |
 | **Write** | Encoding-aware file creation/overwrite | ✅ |
-| **Grep** | Encoding-aware regex content search with output modes (content/files_with_matches/count) and context lines (-B/-A/-C) | ✅ |
+| **Grep** | Encoding-aware regex content search with output modes (content/files_with_matches/count) and context lines (-B/-A/-C). Skips binary files (extension + NUL sniff) | ✅ |
 | **Glob** | File pattern matching with `**` recursive support | ✅ |
 | **ListDir** | Directory listing (flat or tree) | ✅ |
 | **Diff** | Compare two files with unified diff output (encoding-aware) | ✅ |
@@ -64,7 +64,7 @@ Claude Code, Codex CLI, Cursor, Windsurf, Cline, Gemini CLI, and any MCP-compati
 | **Copy** | Copy files/directories with atomic write and permission preservation. Recursive directory copy. Windows locked-file fallback (renames running exe/DLL aside). dry_run preview | ✅ |
 | **Mkdir** | Create directories with optional permission mode (octal, e.g. 0755). Recursive by default (mkdir -p). dry_run preview | ✅ |
 | **MultiRead** | Read multiple files in a single call to reduce API round-trips. Encoding-aware, offset/limit support. Max 50 files | ✅ |
-| **RegexReplace** | Regex find-and-replace across files/directories. Encoding-preserving, capture groups ($1, $2). dry_run preview | ✅ |
+| **RegexReplace** | Regex find-and-replace across files/directories. Encoding-preserving, capture groups ($1, $2). Skips binary files. dry_run preview | ✅ |
 | **TLSCheck** | Check TLS certificate details — subject, issuer, expiry, SANs, TLS version, cipher suite | ✅ |
 | **DNSLookup** | DNS record lookup (A/AAAA/MX/CNAME/TXT/NS/SOA). DNS over HTTPS (DoH) by default for privacy | ✅ |
 | **MySQL** | Execute SQL queries on MySQL/MariaDB. Table-formatted SELECT results, affected rows for DML. Max 1000 rows | ✅ |
