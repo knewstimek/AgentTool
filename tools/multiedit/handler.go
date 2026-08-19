@@ -101,14 +101,30 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input MultiEditInput)
 
 	msg := fmt.Sprintf("OK: applied %d edit(s) to %s (encoding=%s)\n%s", len(input.Edits), input.FilePath, encInfo.Charset, summary)
 
-	// One notice for the whole call: a per-edit echo would repeat the header
-	// for every entry, and what matters is the set of characters written.
+	// One echo for the whole call: a per-edit header would repeat for every
+	// entry, and what matters is the set of characters written. Newline-joined
+	// so a line break ends each run and two edits never merge into one phrase.
 	var written strings.Builder
 	for _, e := range input.Edits {
 		written.WriteString(e.NewString)
 		written.WriteString("\n")
 	}
-	msg += common.TextGuardNotice(written.String())
+	if echo := common.NonASCIIEcho(written.String()); echo != "" {
+		msg += "\nnon-ASCII written: " + echo
+	}
+	if notice := common.InvisibleCharNotice(written.String()); notice != "" {
+		msg += "\n" + notice
+	}
+
+	// U+FFFD is located per edit, not against the concatenation above: a line
+	// number counted through the join points at neither the file nor the edit.
+	for i, e := range input.Edits {
+		if count, _ := common.ReplacementCharCount(e.NewString); count > 0 {
+			msg += fmt.Sprintf("\n%s %d replacement char(s) U+FFFD in edits[%d].new_string. "+
+				"These were corrupted before reaching this tool and the original characters "+
+				"cannot be recovered -- re-send that text.", common.WarnSign, count, i)
+		}
+	}
 
 	if warning := common.EncodingWarning(encInfo); warning != "" {
 		msg += warning

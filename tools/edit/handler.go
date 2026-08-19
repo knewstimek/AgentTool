@@ -109,6 +109,11 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input EditInput) (*mc
 	if common.FlexBool(input.DryRun) {
 		preview := dryRunPreview(content, result.Content, input.FilePath)
 		msg := fmt.Sprintf("[DRY RUN] would %s (%s, encoding=%s)\n\n%s", result.Message, input.FilePath, encInfo.Charset, preview)
+		// Corruption is worth more before the write than after it. The echo is
+		// skipped -- the preview already shows the text.
+		if warning := common.ReplacementCharWarning(input.NewString); warning != "" {
+			msg += "\n" + warning
+		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: msg}},
 		}, EditOutput{Result: msg}, nil

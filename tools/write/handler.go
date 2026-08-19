@@ -12,6 +12,11 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// smallLocaleFileRunes bounds the echo to files whose non-ASCII content is
+// small enough to read back -- a locale or config file, where an escape-composed
+// typo is most likely and most invisible. A large document echoes nothing.
+const smallLocaleFileRunes = 200
+
 type WriteInput struct {
 	FilePath string `json:"file_path,omitempty" jsonschema:"Absolute path to the file to write"`
 	Path     string `json:"path,omitempty" jsonschema:"Alias for file_path"`
@@ -70,10 +75,20 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input WriteInput) (*m
 
 	msg := fmt.Sprintf("OK: file written (%s, encoding=%s)", input.FilePath, encInfo.Charset)
 
-	// Only the corruption check here -- write takes whole-file content, so
-	// echoing its non-ASCII would be noise rather than something to inspect.
+	// write takes whole-file content, so a full echo would be noise. But a new
+	// localized file is exactly where an escape-composed typo lands, so echo
+	// while the non-ASCII is small enough to read; past that, only report
+	// corruption.
 	if warning := common.ReplacementCharWarning(input.Content); warning != "" {
 		msg += "\n" + warning
+	}
+	if notice := common.InvisibleCharNotice(input.Content); notice != "" {
+		msg += "\n" + notice
+	}
+	if common.NonASCIICount(input.Content) < smallLocaleFileRunes {
+		if echo := common.NonASCIIEcho(input.Content); echo != "" {
+			msg += "\nnon-ASCII written: " + echo
+		}
 	}
 
 	return &mcp.CallToolResult{

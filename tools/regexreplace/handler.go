@@ -126,6 +126,11 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input RegexReplaceInp
 		sb.WriteString(fmt.Sprintf("\n%s %d file(s), %d total replacement(s)", action, filesChanged, totalReplacements))
 	}
 
+	// The replacement is agent-authored text heading for disk, same as an edit's
+	// new_string: it carries the same escape-typo and corruption exposure, and
+	// here it is written across many files at once.
+	sb.WriteString(common.TextGuardNotice(input.Replacement))
+
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: sb.String()}},
 	}, RegexReplaceOutput{

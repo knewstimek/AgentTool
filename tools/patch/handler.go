@@ -183,9 +183,27 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input PatchInput) (*m
 	}
 
 	msg := fmt.Sprintf("OK: applied %d hunk(s) to %s (encoding=%s)", len(hunks), input.FilePath, encInfo.Charset)
+
+	// Only the added lines are new text; the rest of the diff is context that
+	// already exists in the file and would be noise to echo back.
+	msg += common.TextGuardNotice(addedLines(input.Patch))
+
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: msg}},
 	}, PatchOutput{Result: msg}, nil
+}
+
+// addedLines extracts the "+" lines of a unified diff -- the text the patch
+// introduces. Hunk headers ("+++") are excluded.
+func addedLines(patch string) string {
+	var sb strings.Builder
+	for _, line := range strings.Split(patch, "\n") {
+		if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") {
+			sb.WriteString(line[1:])
+			sb.WriteString("\n")
+		}
+	}
+	return sb.String()
 }
 
 func Register(server *mcp.Server) {
