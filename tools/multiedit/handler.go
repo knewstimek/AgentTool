@@ -15,16 +15,16 @@ import (
 
 // EditOp is a single old_string -> new_string replacement within a multiedit call.
 type EditOp struct {
-	OldString  string `json:"old_string" jsonschema:"Exact text to find"`
-	NewString  string `json:"new_string" jsonschema:"Replacement text"`
+	OldString  string      `json:"old_string" jsonschema:"Exact text to find"`
+	NewString  string      `json:"new_string" jsonschema:"Replacement text"`
 	ReplaceAll interface{} `json:"replace_all,omitempty" jsonschema:"Replace all occurrences instead of just the first: true or false. Default: false"`
 }
 
 // MultiEditInput is the input for the multiedit tool.
 type MultiEditInput struct {
-	FilePath string   `json:"file_path,omitempty" jsonschema:"Absolute path to the file to edit"`
-	Path     string   `json:"path,omitempty" jsonschema:"Alias for file_path"`
-	Edits    []EditOp `json:"edits" jsonschema:"Ordered list of replacements to apply sequentially"`
+	FilePath string      `json:"file_path,omitempty" jsonschema:"Absolute path to the file to edit"`
+	Path     string      `json:"path,omitempty" jsonschema:"Alias for file_path"`
+	Edits    []EditOp    `json:"edits" jsonschema:"Ordered list of replacements to apply sequentially"`
 	DryRun   interface{} `json:"dry_run,omitempty" jsonschema:"Preview changes without modifying the file: true or false. Default: false"`
 }
 
@@ -143,6 +143,7 @@ func Register(server *mcp.Server) {
 Edits are applied sequentially in order; each edit sees the result of the previous one.
 Atomic: if any edit fails, the file is not modified at all.
 Encoding-aware: preserves original file encoding (UTF-8, EUC-KR, Shift-JIS, etc.).
+Converts inserted newlines to the file's dominant newline style.
 Accepts "path" as alias for "file_path".
 Use dry_run=true to preview all changes without modifying the file.`,
 	}, Handle)

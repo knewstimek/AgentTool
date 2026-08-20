@@ -15,7 +15,7 @@ import (
 type ConfigInput struct {
 	FallbackEncoding string `json:"fallback_encoding,omitempty" jsonschema:"Set the fallback encoding for files when auto-detection fails. Examples: EUC-KR, Shift_JIS, ISO-8859-1. Empty = no change"`
 	EncodingWarnings *bool  `json:"encoding_warnings,omitempty" jsonschema:"Enable/disable encoding detection warning messages in tool results. Default: true"`
-	MaxFileSizeMB    *int   `json:"max_file_size_mb,omitempty" jsonschema:"Maximum file size in MB that read/edit/grep tools will accept. Min: 1, Default: 50"`
+	MaxFileSizeMB    *int   `json:"max_file_size_mb,omitempty" jsonschema:"Maximum file size in MB that read/edit/grep tools will accept. Min: 1, Default: 100"`
 	AllowSymlinks    *bool  `json:"allow_symlinks,omitempty" jsonschema:"Allow creating symlinks when extracting archives. Default: false (skipped for security)"`
 	Workspace        string `json:"workspace,omitempty" jsonschema:"Set the default workspace/project root directory. Used by glob when no explicit path is given. Must be an absolute path to an existing directory"`
 	AllowHTTPPrivate  *bool `json:"allow_http_private,omitempty" jsonschema:"Allow webfetch/download/httpreq to access private IPs (127.x, 192.168.x, 10.x). Default: false (blocked). Cloud metadata IPs always blocked"`

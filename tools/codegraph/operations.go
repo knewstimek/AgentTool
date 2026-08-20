@@ -372,21 +372,33 @@ func opCallees(input CodeGraphInput) (string, error) {
 		FROM calls c
 		WHERE c.caller_file_id = ? AND c.caller_line >= ? AND c.caller_line <= ?
 		ORDER BY c.caller_line
-	`, fileID, startLine, endLine)
+		LIMIT ? OFFSET ?
+	`, fileID, startLine, endLine, input.MaxResults+1, input.Offset)
 	if err != nil {
 		return "", err
 	}
 	defer rows.Close()
 
 	var sb strings.Builder
+	usedChars := 0
+	common.AppendWithinRuneBudget(&sb, &usedChars, fmt.Sprintf("Callees of %q (offset:%d, max:%d):\n", input.Name, input.Offset, input.MaxResults), input.MaxOutputChars)
 	count := 0
+	hasMore := false
 	for rows.Next() {
 		var callee string
 		var line int
 		if err := rows.Scan(&callee, &line); err != nil {
 			continue
 		}
-		sb.WriteString(fmt.Sprintf("  line:%d  %s\n", line, callee))
+		if count >= input.MaxResults {
+			hasMore = true
+			break
+		}
+		entry, _ := common.TruncateRunes(fmt.Sprintf("  line:%d  %s\n", line, callee), min(input.MaxOutputChars/2, 10000), "…\n")
+		if !common.AppendWithinRuneBudget(&sb, &usedChars, entry, input.MaxOutputChars) {
+			hasMore = true
+			break
+		}
 		count++
 	}
 	if err := rows.Err(); err != nil {
@@ -394,9 +406,13 @@ func opCallees(input CodeGraphInput) (string, error) {
 	}
 
 	if count == 0 {
-		return fmt.Sprintf("No callees found for %q.", input.Name), nil
+		return fmt.Sprintf("No callees found for %q at offset %d.", input.Name, input.Offset), nil
 	}
-	return fmt.Sprintf("Callees of %q (%d):\n%s", input.Name, count, sb.String()), nil
+	if hasMore {
+		fmt.Fprintf(&sb, "\n[More callees available; retry with offset=%d.]\n", input.Offset+count)
+	}
+	result, _ := common.TruncateRunes(sb.String(), input.MaxOutputChars, fmt.Sprintf("\n[Output truncated; retry with offset=%d]", input.Offset+count))
+	return result, nil
 }
 
 // opSymbols lists all symbols in a file by parsing it with tree-sitter.
@@ -432,23 +448,23 @@ func opSymbols(input CodeGraphInput) (string, error) {
 		return "", fmt.Errorf("parse failed: %w", err)
 	}
 
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("File: %s\n\n", path))
+	type outputEntry struct {
+		section string
+		text    string
+	}
+	var entries []outputEntry
 
 	if len(result.Classes) > 0 {
-		sb.WriteString("Classes:\n")
 		for _, s := range result.Classes {
 			scope := ""
 			if s.Scope != "" {
 				scope = fmt.Sprintf(" (scope: %s)", s.Scope)
 			}
-			sb.WriteString(fmt.Sprintf("  %s %s  line:%d%s\n", s.NodeType, s.Name, s.Line, scope))
+			entries = append(entries, outputEntry{"Classes", fmt.Sprintf("  %s %s  line:%d%s\n", s.NodeType, s.Name, s.Line, scope)})
 		}
-		sb.WriteString("\n")
 	}
 
 	if len(result.Functions) > 0 {
-		sb.WriteString("Functions/Methods:\n")
 		for _, s := range result.Functions {
 			scope := ""
 			if s.Scope != "" {
@@ -458,25 +474,20 @@ func opSymbols(input CodeGraphInput) (string, error) {
 			if s.Parent == "field_declaration_list" {
 				parent = " [inline]"
 			}
-			sb.WriteString(fmt.Sprintf("  %s  line:%d%s%s\n", cleanSymbolName(s.Name), s.Line, scope, parent))
+			entries = append(entries, outputEntry{"Functions/Methods", fmt.Sprintf("  %s  line:%d%s%s\n", cleanSymbolName(s.Name), s.Line, scope, parent)})
 		}
-		sb.WriteString("\n")
 	}
 
 	if len(result.Imports) > 0 {
-		sb.WriteString("Imports/Includes:\n")
 		for _, s := range result.Imports {
-			sb.WriteString(fmt.Sprintf("  %s  line:%d\n", s.Name, s.Line))
+			entries = append(entries, outputEntry{"Imports/Includes", fmt.Sprintf("  %s  line:%d\n", s.Name, s.Line)})
 		}
-		sb.WriteString("\n")
 	}
 
 	if len(result.Inheritance) > 0 {
-		sb.WriteString("Inheritance:\n")
 		for _, inh := range result.Inheritance {
-			sb.WriteString(fmt.Sprintf("  %s -> %s  line:%d\n", inh.ClassName, inh.ParentName, inh.Line))
+			entries = append(entries, outputEntry{"Inheritance", fmt.Sprintf("  %s -> %s  line:%d\n", inh.ClassName, inh.ParentName, inh.Line)})
 		}
-		sb.WriteString("\n")
 	}
 
 	if len(result.Calls) > 0 {
@@ -486,19 +497,48 @@ func opSymbols(input CodeGraphInput) (string, error) {
 				callCount++
 			}
 		}
-		sb.WriteString(fmt.Sprintf("Calls: %d\n", callCount))
 		for _, s := range result.Calls {
 			if s.Capture == "callee" {
 				scope := ""
 				if s.Scope != "" {
 					scope = fmt.Sprintf(" (in: %s)", s.Scope)
 				}
-				sb.WriteString(fmt.Sprintf("  line:%d%s\n", s.Line, scope))
+				entries = append(entries, outputEntry{fmt.Sprintf("Calls (%d)", callCount), fmt.Sprintf("  %s  line:%d%s\n", cleanSymbolName(s.Name), s.Line, scope)})
 			}
 		}
 	}
 
-	return sb.String(), nil
+	start := input.Offset
+	if start > len(entries) {
+		start = len(entries)
+	}
+	var sb strings.Builder
+	usedChars := 0
+	headerPath, _ := common.TruncateRunes(path, 2000, "…")
+	common.AppendWithinRuneBudget(&sb, &usedChars, fmt.Sprintf("File: %s\nSymbols: %d (offset:%d, max:%d)\n\n", headerPath, len(entries), start, input.MaxResults), input.MaxOutputChars)
+	shown := 0
+	lastSection := ""
+	for _, entry := range entries[start:] {
+		if shown >= input.MaxResults {
+			break
+		}
+		line, _ := common.TruncateRunes(entry.text, min(input.MaxOutputChars/2, 10000), "…\n")
+		fragment := ""
+		if entry.section != lastSection {
+			fragment = entry.section + ":\n"
+		}
+		fragment += line
+		if !common.AppendWithinRuneBudget(&sb, &usedChars, fragment, input.MaxOutputChars) {
+			break
+		}
+		lastSection = entry.section
+		shown++
+	}
+	if start+shown < len(entries) {
+		fmt.Fprintf(&sb, "\n[More symbols available; retry with offset=%d.]\n", start+shown)
+	}
+	resultText, _ := common.TruncateRunes(sb.String(), input.MaxOutputChars, fmt.Sprintf("\n[Output truncated; retry with offset=%d]", start+shown))
+	return resultText, nil
 }
 
 // opMethods lists all methods of a class.

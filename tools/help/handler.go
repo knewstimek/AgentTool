@@ -82,13 +82,13 @@ It auto-detects file encoding and indentation style, preserving them across edit
 - write: Encoding-aware file creation/overwrite
 - grep: Encoding-aware regex content search
 - glob: File pattern matching with ** recursive support
-- listdir: Directory listing (flat or tree)
+- listdir: Bounded/pageable directory listing with type, name, and counts-only filters
 - compress: Create zip / tar.gz archives
 - decompress: Extract zip / tar.gz archives
 - backup: Timestamped zip backup with exclude patterns
 - convert_encoding: Convert file encoding (EUC-KR ↔ UTF-8, BOM, etc.)
 - checksum: Compute file hash (md5, sha1, sha256)
-- file_info: File metadata (size, encoding, line ending, indentation, line count)
+- file_info: File metadata (size, encoding, mixed line-ending counts, indentation, line count)
 - diff: Compare two files (unified diff output)
 - patch: Apply unified diff patch to a file (supports dry_run)
 - delete: Delete a single file (no directories, no symlinks, supports dry_run)
@@ -224,6 +224,7 @@ func helpTools() string {
 
 ## edit
 Replace text in a file with smart indentation and encoding preservation.
+Newlines in new_string are converted to the file's dominant newline style.
 When new_string contains non-ASCII text, the result echoes those words back so
 you can check them: a string composed as \uXXXX escapes hides its own typos
 (one wrong hex digit is still a valid character), and rendering it as text is
@@ -247,11 +248,15 @@ Parameters: file_path, content
 Search file contents with regex. Encoding-aware.
 Output modes: content (default, matching lines), files_with_matches (paths only), count (match counts).
 Context: use before/after/context to include surrounding lines (like grep -B/-A/-C).
+Defaults: max_results=100, max_line_chars=4000, max_output_chars=100000.
+max_results can be raised to 100000; returned text remains bounded by the line
+and total-output budgets. context/before/after accept at most 1000 lines.
 Directory search skips binary files (known extensions plus a NUL-byte content
 sniff), so databases like .codegraph.db no longer flood results with page
 fragments. UTF-16 and other encoded text is still searched. Passing a binary
 file directly as path searches it anyway.
-Parameters: pattern, path, glob, ignore_case, max_results, output_mode, context, before, after
+Parameters: pattern, path, glob, ignore_case, max_results, output_mode, context,
+before, after, max_line_chars, max_output_chars
 
 ## glob
 Find files by pattern. Supports ** for recursive matching.
@@ -259,10 +264,20 @@ Use relative_paths=true to return paths relative to search directory (saves toke
 Parameters: pattern, path, relative_paths
 
 ## listdir
-List directory contents. Default: flat listing (one path per line, token-efficient).
+List directory contents with bounded, pageable output.
+Defaults: flat=true, max_depth=3, max_entries=500 (maximum 10000).
+When has_more=true, pass next_cursor back as cursor to fetch the next page.
+Use directories_only or files_only to filter by type (not both).
+Use name_pattern for one entry-name glob (for example A* or *.go), or include
+for multiple OR glob patterns. Directories are still traversed when their own
+names do not match, so matching descendants can be returned.
+Use counts_only=true to return matching counts without listing names.
 Use flat=false for visual tree structure with connectors.
 Use relative_paths=true to show root as '.' instead of full absolute path (saves tokens).
-Parameters: path, max_depth, relative_paths, flat
+Parameters: path, max_depth, max_entries, cursor, relative_paths, flat,
+directories_only, files_only, name_pattern, include (array), counts_only
+Returns: tree, returned_files, returned_dirs, total_files, total_dirs,
+truncated, has_more, next_cursor
 
 ## compress
 Create zip or tar.gz archive.
@@ -291,6 +306,7 @@ Parameters: file_path, algorithm (md5, sha1, sha256; default sha256)
 
 ## file_info
 Returns detailed file metadata: size, encoding, line ending, indentation, line count.
+Mixed newlines are reported with separate CRLF, LF, and CR counts.
 Parameters: file_path
 
 ## diff
@@ -432,6 +448,7 @@ Parameters: file_paths (array, max 50), offset (1-based, or negative for end-rel
 Regex find-and-replace in files or across directories.
 Supports capture groups ($1, $2, ${name}) in replacement strings.
 Encoding-aware: preserves original file encoding.
+Replacement newlines are converted to each file's dominant newline style.
 Skips binary files by extension and NUL-byte content sniff, so an on-disk
 index or compiled artifact is never rewritten.
 Atomic write for each modified file.
@@ -479,7 +496,11 @@ Execute SQL queries on a MySQL/MariaDB server.
 SELECT/SHOW/DESCRIBE/EXPLAIN queries return results as formatted table.
 Other queries (INSERT/UPDATE/DELETE) return affected rows and last insert ID.
 Connection is opened and closed per call (no session pooling).
-Parameters: host, port (default 3306), user, password, database, query, timeout_sec (default 30, max 120)
+Defaults: max_rows=1000, max_columns=100, max_value_chars=200,
+max_output_chars=100000. Use SQL LIMIT/OFFSET for deterministic paging.
+Parameters: host, port (default 3306), user, password, database, query,
+timeout_sec (default 30, max 120), max_rows, max_columns, max_value_chars,
+max_output_chars
 
 ## redis
 Execute Redis commands on a Redis server.
@@ -510,7 +531,8 @@ Stepping operations (continue, next, step_in, step_out) block until a stopped ev
 Use operation=status to poll for events (output, state changes) between operations.
 Parameters: session_id, operation, adapter_command, adapter_args, address, launch_args (JSON),
   source_path, breakpoints (JSON array), thread_id, frame_id, variables_reference,
-  expression, context, timeout_sec
+  expression, context, timeout_sec, start, max_results, max_value_chars,
+  max_output_chars, variable_filter, start_module, module_count
 
 ## analyze
 Static binary analysis tool with 21 operations:
@@ -537,7 +559,7 @@ Static binary analysis tool with 21 operations:
 - vtable_scan: Scan PE .rdata for all MSVC vtables with RTTI (auto-discovers C++ classes)
 Parameters: operation, file_path, offset, count, mode, arch (x86/arm),
   base_addr, min_length, max_results, length, section, pattern, file_path_b,
-  va, target_va, stop_at_ret
+  va, target_va, stop_at_ret, result_offset, max_output_chars
 Use topic='analyze' for detailed guide with examples.
 
 ## set_config
@@ -592,6 +614,9 @@ Disassemble machine code. Supports x86 (16/32/64-bit) and ARM (32/64-bit).
 Parse PE (Portable Executable) headers -- Windows EXE, DLL, .node files.
   analyze(operation="pe_info", file_path="/path/to/file.dll")
   analyze(operation="pe_info", file_path="/path/to/file.dll", section=".text")
+
+  Import output is paged with result_offset + max_results (default 500,
+  max 100000) and bounded by max_output_chars (default 100000, max 1000000).
 
   Output includes:
     - Machine type, image base, entry point, number of sections
@@ -935,7 +960,7 @@ Scan PE .rdata for all MSVC vtables with RTTI. Auto-discovers C++ classes with v
           offset=163840, length=256)
 
 ## Notes
-- File size limit follows max_file_size_mb setting (default 50 MB)
+- File size limit follows max_file_size_mb setting (default 100 MB)
 - Symlinks are rejected for security
 - x86 disassembly: golang.org/x/arch/x86/x86asm (Intel syntax)
 - ARM disassembly: golang.org/x/arch/arm/armasm + arm64/arm64asm
@@ -1069,6 +1094,13 @@ It works with any language that has a DAP-compatible debug adapter.
     completions: auto-completion suggestions (text + frame_id)
     cancel: cancel a pending request (request_id)
     terminate_threads: terminate specific threads (thread_ids='[1,2]')
+
+  Bounded output and paging:
+    variables/completions/loaded_sources: start + max_results (default 200, max 10000)
+    modules: start_module + module_count (module_count defaults to max_results)
+    variable/evaluation values: max_value_chars (default 4000, max 100000)
+    all listed operations: max_output_chars (default 100000, max 1000000)
+    A continuation hint reports the next start/start_module when more data exists.
 
 ## Adapter-Specific Notes
 
@@ -1490,6 +1522,9 @@ in a local SQLite index. Enables precise symbol lookup without grep noise.
 
   codegraph(op="symbols", path="/path/to/file.cpp")
     List all symbols in a file (classes, functions, calls). No index needed.
+    symbols and callees support offset + max_results (default 500, max 100000)
+    and max_output_chars (default 100000, max 1000000). Follow the returned
+    next-offset hint to continue.
 
   codegraph(op="methods", name="Monster", path="/project/root")
     List all methods of a class.

@@ -147,6 +147,7 @@ func Register(server *mcp.Server) {
 		Description: `Replaces old_string with new_string in the specified file.
 Smart indentation: auto-converts between tabs and spaces to match the file's style.
 Encoding-aware: preserves original file encoding (UTF-8, EUC-KR, Shift-JIS, UTF-8 BOM, etc.).
+Converts new_string newlines to the file's dominant newline style.
 Reads .editorconfig for indentation settings.
 Use dry_run=true to preview changes without modifying the file.`,
 	}, Handle)

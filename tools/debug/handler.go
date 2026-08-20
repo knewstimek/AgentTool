@@ -9,6 +9,15 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+const (
+	defaultDebugMaxResults     = 200
+	hardDebugMaxResults        = 10000
+	defaultDebugMaxValueChars  = 4000
+	hardDebugMaxValueChars     = 100000
+	defaultDebugMaxOutputChars = 100000
+	hardDebugMaxOutputChars    = 1000000
+)
+
 // DebugInput defines the parameters for all debug operations.
 type DebugInput struct {
 	// Session identification
@@ -35,9 +44,14 @@ type DebugInput struct {
 	Filters string `json:"filters,omitempty" jsonschema:"JSON array of exception filter IDs for set_exception_breakpoints (e.g. [\"raised\",\"uncaught\"])"`
 
 	// stack_trace / scopes / variables / evaluate context
-	ThreadID           int `json:"thread_id,omitempty" jsonschema:"Thread ID (for stack_trace, continue, next, step_in, step_out, pause, goto, step_back, reverse_continue, exception_info). Default: 1"`
-	FrameID            int `json:"frame_id,omitempty" jsonschema:"Stack frame ID (for scopes, evaluate, set_expression, restart_frame, step_in_targets, completions)"`
-	VariablesReference int `json:"variables_reference,omitempty" jsonschema:"Variables reference ID from scopes response (for variables, set_variable, data_breakpoint_info)"`
+	ThreadID           int    `json:"thread_id,omitempty" jsonschema:"Thread ID (for stack_trace, continue, next, step_in, step_out, pause, goto, step_back, reverse_continue, exception_info). Default: 1"`
+	FrameID            int    `json:"frame_id,omitempty" jsonschema:"Stack frame ID (for scopes, evaluate, set_expression, restart_frame, step_in_targets, completions)"`
+	VariablesReference int    `json:"variables_reference,omitempty" jsonschema:"Variables reference ID from scopes response (for variables, set_variable, data_breakpoint_info)"`
+	Start              int    `json:"start,omitempty" jsonschema:"Zero-based result offset for variables, completions, and loaded_sources paging. Default: 0"`
+	MaxResults         int    `json:"max_results,omitempty" jsonschema:"Maximum results for variables, completions, modules, and loaded_sources. Default: 200, Max: 10000"`
+	MaxValueChars      int    `json:"max_value_chars,omitempty" jsonschema:"Maximum characters for one variable/evaluation/detail value. Default: 4000, Max: 100000"`
+	MaxOutputChars     int    `json:"max_output_chars,omitempty" jsonschema:"Maximum total returned text characters. Default: 100000, Max: 1000000"`
+	VariableFilter     string `json:"variable_filter,omitempty" jsonschema:"DAP variable filter: indexed or named. For variables"`
 
 	// evaluate / set_expression
 	Expression string `json:"expression,omitempty" jsonschema:"Expression to evaluate in the debug context"`
@@ -56,11 +70,11 @@ type DebugInput struct {
 	Text string `json:"text,omitempty" jsonschema:"Text for completions request"`
 
 	// disassemble / read_memory / write_memory
-	MemoryReference   string `json:"memory_reference,omitempty" jsonschema:"Memory reference address (for disassemble, read_memory, write_memory)"`
-	Count             int    `json:"count,omitempty" jsonschema:"Byte count (read_memory) or instruction count (disassemble)"`
-	InstructionOffset int    `json:"instruction_offset,omitempty" jsonschema:"Instruction offset relative to memory_reference (disassemble)"`
+	MemoryReference   string      `json:"memory_reference,omitempty" jsonschema:"Memory reference address (for disassemble, read_memory, write_memory)"`
+	Count             int         `json:"count,omitempty" jsonschema:"Byte count (read_memory) or instruction count (disassemble)"`
+	InstructionOffset int         `json:"instruction_offset,omitempty" jsonschema:"Instruction offset relative to memory_reference (disassemble)"`
 	ResolveSymbols    interface{} `json:"resolve_symbols,omitempty" jsonschema:"Resolve symbols in disassembly output: true or false. Default: false"`
-	Data              string `json:"data,omitempty" jsonschema:"Base64-encoded data (write_memory)"`
+	Data              string      `json:"data,omitempty" jsonschema:"Base64-encoded data (write_memory)"`
 
 	// source
 	SourceReference int `json:"source_reference,omitempty" jsonschema:"Source reference ID (for source request, from stack frame)"`
@@ -92,17 +106,17 @@ var validOperations = map[string]bool{
 	"continue": true, "next": true, "step_in": true, "step_out": true,
 	"step_back": true, "reverse_continue": true, "restart_frame": true,
 	"goto": true, "goto_targets": true, "step_in_targets": true,
-	"pause": true,
+	"pause":   true,
 	"threads": true, "stack_trace": true, "scopes": true, "variables": true,
 	"set_variable": true, "set_expression": true,
 	"evaluate": true, "completions": true,
 	"source": true, "modules": true, "loaded_sources": true,
 	"exception_info": true,
-	"disassemble": true, "read_memory": true, "write_memory": true,
+	"disassemble":    true, "read_memory": true, "write_memory": true,
 	"terminate": true, "restart": true, "cancel": true,
 	"terminate_threads": true,
 	"resolve_address":   true,
-	"disconnect": true, "status": true,
+	"disconnect":        true, "status": true,
 }
 
 // Handle processes a debug tool invocation.
@@ -112,6 +126,9 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input DebugInput) (*m
 		return errorResult("invalid operation: use help(topic=debug) to see available operations")
 	}
 	input.Operation = op
+	if err := normalizeDebugOutputLimits(&input); err != nil {
+		return errorResult(err.Error())
+	}
 
 	// launch/attach create new sessions — don't require an existing one
 	if op == "launch" {
@@ -238,6 +255,37 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input DebugInput) (*m
 	return successResult(result)
 }
 
+func normalizeDebugOutputLimits(input *DebugInput) error {
+	if input.Start < 0 || input.StartModule < 0 {
+		return fmt.Errorf("start and start_module must be non-negative")
+	}
+	if input.MaxResults <= 0 {
+		input.MaxResults = defaultDebugMaxResults
+	}
+	if input.MaxResults > hardDebugMaxResults {
+		return fmt.Errorf("max_results must be at most %d", hardDebugMaxResults)
+	}
+	if input.MaxValueChars <= 0 {
+		input.MaxValueChars = defaultDebugMaxValueChars
+	}
+	if input.MaxValueChars > hardDebugMaxValueChars {
+		return fmt.Errorf("max_value_chars must be at most %d", hardDebugMaxValueChars)
+	}
+	if input.MaxOutputChars <= 0 {
+		input.MaxOutputChars = defaultDebugMaxOutputChars
+	}
+	if input.MaxOutputChars > hardDebugMaxOutputChars {
+		return fmt.Errorf("max_output_chars must be at most %d", hardDebugMaxOutputChars)
+	}
+	if input.ModuleCount < 0 || input.ModuleCount > hardDebugMaxResults {
+		return fmt.Errorf("module_count must be between 0 and %d", hardDebugMaxResults)
+	}
+	if input.VariableFilter != "" && input.VariableFilter != "indexed" && input.VariableFilter != "named" {
+		return fmt.Errorf("variable_filter must be indexed or named")
+	}
+	return nil
+}
+
 // Register registers the debug tool with the MCP server.
 func Register(server *mcp.Server) {
 	common.SafeAddTool(server, &mcp.Tool{
@@ -248,6 +296,7 @@ Supports breakpoints, stepping, variable inspection, expression evaluation, stac
 Adapters: dlv (Go), debugpy (Python), codelldb/lldb-dap (C/C++/Rust), and more.
 Operations: launch, attach, set_breakpoints, continue, next, step_in, step_out, pause, threads, stack_trace, scopes, variables, evaluate, disconnect, status.
 Extended: breakpoint_locations, set_function_breakpoints, set_exception_breakpoints, set_data_breakpoints, data_breakpoint_info, set_instruction_breakpoints, disassemble, read_memory, write_memory, set_variable, set_expression, goto, goto_targets, step_back, reverse_continue, restart_frame, modules, loaded_sources, exception_info, completions, source, terminate, restart, cancel, step_in_targets, terminate_threads, resolve_address.
+Large results are bounded: variables, completions, and loaded_sources support start/max_results paging; modules supports start_module/module_count; max_value_chars and max_output_chars cap individual values and total output.
 Requires a DAP adapter executable installed on the system (e.g. 'dlv dap' for Go, 'python -m debugpy' for Python).`,
 	}, Handle)
 }

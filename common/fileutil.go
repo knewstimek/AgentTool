@@ -37,8 +37,8 @@ type EncodingInfo struct {
 
 var (
 	// fallbackEncoding is the fallback encoding used when chardet detection fails.
-	fallbackEncoding   = "UTF-8"
-	fallbackMu         sync.RWMutex
+	fallbackEncoding = "UTF-8"
+	fallbackMu       sync.RWMutex
 	// encodingWarnings controls whether encoding detection warning messages are shown.
 	encodingWarnings   = true
 	encodingWarningsMu sync.RWMutex
@@ -383,12 +383,95 @@ func WriteFileWithEncoding(path string, content string, info EncodingInfo) error
 	return nil
 }
 
-// DetectLineEnding detects the line ending character in text.
-func DetectLineEnding(content string) string {
-	if bytes.Contains([]byte(content), []byte("\r\n")) {
-		return "\r\n"
+// LineEndingInfo describes every newline form present in decoded text.
+// Dominant is suitable for normalizing newly inserted text; existing content
+// stays untouched so mixed files are reported accurately instead of rewritten.
+type LineEndingInfo struct {
+	Kind      string
+	LFCount   int
+	CRLFCount int
+	CRCount   int
+	Dominant  string
+}
+
+// AnalyzeLineEndings distinguishes bare LF/CR from CRLF and reports mixed files.
+func AnalyzeLineEndings(content string) LineEndingInfo {
+	info := LineEndingInfo{Kind: "None", Dominant: "\n"}
+	first := ""
+	for i := 0; i < len(content); i++ {
+		switch content[i] {
+		case '\r':
+			if i+1 < len(content) && content[i+1] == '\n' {
+				info.CRLFCount++
+				if first == "" {
+					first = "\r\n"
+				}
+				i++
+			} else {
+				info.CRCount++
+				if first == "" {
+					first = "\r"
+				}
+			}
+		case '\n':
+			info.LFCount++
+			if first == "" {
+				first = "\n"
+			}
+		}
 	}
-	return "\n"
+
+	kinds := 0
+	if info.LFCount > 0 {
+		info.Kind = "LF"
+		kinds++
+	}
+	if info.CRLFCount > 0 {
+		info.Kind = "CRLF"
+		kinds++
+	}
+	if info.CRCount > 0 {
+		info.Kind = "CR"
+		kinds++
+	}
+	if kinds > 1 {
+		info.Kind = "Mixed"
+	}
+
+	maxCount := 0
+	for _, candidate := range []struct {
+		ending string
+		count  int
+	}{
+		{"\r\n", info.CRLFCount},
+		{"\n", info.LFCount},
+		{"\r", info.CRCount},
+	} {
+		if candidate.count > maxCount || candidate.count == maxCount && candidate.ending == first {
+			info.Dominant = candidate.ending
+			maxCount = candidate.count
+		}
+	}
+	return info
+}
+
+// DetectLineEnding returns the dominant newline for newly inserted text.
+// LF is the default when the content has no newline.
+func DetectLineEnding(content string) string {
+	return AnalyzeLineEndings(content).Dominant
+}
+
+// NormalizeLineEndings converts all newline forms in text to target.
+func NormalizeLineEndings(content, target string) string {
+	if target != "\r\n" && target != "\r" {
+		target = "\n"
+	}
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+	content = strings.ReplaceAll(content, "\r", "\n")
+	if target != "\n" {
+		content = strings.ReplaceAll(content, "\n", target)
+	}
+	return content
 }
 
 // normalizeCharsetName normalizes .editorconfig charset values to IANA names.

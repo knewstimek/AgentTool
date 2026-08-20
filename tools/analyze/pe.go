@@ -7,11 +7,21 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
+
+	"agent-tool/common"
 )
 
 // opPEInfo parses PE (Portable Executable) headers and displays
 // machine type, image base, entry point, sections, imports, and exports.
 func opPEInfo(input AnalyzeInput) (string, error) {
+	// Keep direct package callers consistent with the MCP handler defaults.
+	if input.MaxResults <= 0 {
+		input.MaxResults = defaultPEImportResults
+	}
+	if input.MaxOutputChars <= 0 {
+		input.MaxOutputChars = defaultAnalyzeOutputChars
+	}
 	f, err := pe.Open(input.FilePath)
 	if err != nil {
 		return "", fmt.Errorf("not a valid PE file: %w", err)
@@ -92,7 +102,7 @@ func opPEInfo(input AnalyzeInput) (string, error) {
 
 		// RWX warning: sections that are both writable and executable are suspicious
 		// (common in packed/encrypted binaries, shellcode, or self-modifying code)
-		const IMAGE_SCN_MEM_WRITE   = 0x80000000
+		const IMAGE_SCN_MEM_WRITE = 0x80000000
 		const IMAGE_SCN_MEM_EXECUTE = 0x20000000
 		if s.Characteristics&IMAGE_SCN_MEM_WRITE != 0 && s.Characteristics&IMAGE_SCN_MEM_EXECUTE != 0 {
 			sb.WriteString("  ⚠ W+X")
@@ -119,7 +129,7 @@ func opPEInfo(input AnalyzeInput) (string, error) {
 	}
 
 	// Imports with IAT VA -- parse Import Directory for per-function IAT slot addresses
-	parseImportsWithIAT(f, imageBase, &sb)
+	parseImportsWithIAT(f, imageBase, &sb, input.ResultOffset, input.MaxResults, input.MaxOutputChars)
 
 	// Exports (manually parse export directory for DLLs)
 	exports := parseExports(f)
@@ -162,7 +172,8 @@ func opPEInfo(input AnalyzeInput) (string, error) {
 		parseTextEntryDisasm(f, imageBase, input, &sb)
 	}
 
-	return sb.String(), nil
+	result, _ := common.TruncateRunes(sb.String(), input.MaxOutputChars, "\n[Output truncated; use section/result_offset/max_results to continue]")
+	return result, nil
 }
 
 // parseTextEntryDisasm auto-disassembles from the entry point when section=".text" is filtered.
@@ -1132,7 +1143,15 @@ func fileOffsetToRVA(f *pe.File, fileOff uint32) (uint32, bool) {
 // parseImportsWithIAT parses the Import Directory to show per-function IAT slot VAs.
 // IAT VAs are what FF 15/25 [rip+disp32] instructions reference, making them
 // essential for xref cross-referencing.
-func parseImportsWithIAT(f *pe.File, imageBase uint64, sb *strings.Builder) {
+func parseImportsWithIAT(f *pe.File, imageBase uint64, sb *strings.Builder, resultOffset, maxResults, maxOutputChars int) {
+	// opPEInfo is also exercised directly by package tests, so retain safe
+	// defaults even when the MCP handler's normalization was bypassed.
+	if maxResults <= 0 {
+		maxResults = defaultPEImportResults
+	}
+	if maxOutputChars <= 0 {
+		maxOutputChars = defaultAnalyzeOutputChars
+	}
 	var importDir pe.DataDirectory
 	var is64 bool
 	switch oh := f.OptionalHeader.(type) {
@@ -1151,9 +1170,26 @@ func parseImportsWithIAT(f *pe.File, imageBase uint64, sb *strings.Builder) {
 		// Fallback to Go's ImportedSymbols (no IAT info)
 		imports, err := f.ImportedSymbols()
 		if err == nil && len(imports) > 0 {
-			sb.WriteString(fmt.Sprintf("\nImports (%d functions, no IAT info):\n", len(imports)))
-			for _, sym := range imports {
-				sb.WriteString(fmt.Sprintf("  %s\n", sym))
+			start := resultOffset
+			if start > len(imports) {
+				start = len(imports)
+			}
+			usedChars := utf8.RuneCountInString(sb.String())
+			header := fmt.Sprintf("\nImports (%d functions, no IAT info; offset:%d, max:%d):\n", len(imports), start, maxResults)
+			common.AppendWithinRuneBudget(sb, &usedChars, header, maxOutputChars)
+			shown := 0
+			for _, sym := range imports[start:] {
+				if shown >= maxResults {
+					break
+				}
+				line, _ := common.TruncateRunes(fmt.Sprintf("  %s\n", sym), min(maxOutputChars/2, 10000), "…\n")
+				if !common.AppendWithinRuneBudget(sb, &usedChars, line, maxOutputChars) {
+					break
+				}
+				shown++
+			}
+			if start+shown < len(imports) {
+				fmt.Fprintf(sb, "\n[More imports available; retry pe_info with result_offset=%d.]\n", start+shown)
 			}
 		}
 		return
@@ -1181,13 +1217,12 @@ func parseImportsWithIAT(f *pe.File, imageBase uint64, sb *strings.Builder) {
 
 	// Parse IMAGE_IMPORT_DESCRIPTOR entries (20 bytes each, null-terminated)
 	type importDLL struct {
-		name       string
-		iatRVA     uint32 // FirstThunk RVA (IAT base for this DLL)
-		thunkRVA   uint32 // OriginalFirstThunk RVA (for name lookup)
+		name     string
+		iatRVA   uint32 // FirstThunk RVA (IAT base for this DLL)
+		thunkRVA uint32 // OriginalFirstThunk RVA (for name lookup)
 	}
 
 	var dlls []importDLL
-	totalFuncs := 0
 	for i := 0; i < 500; i++ { // safety limit
 		off := int(dirOff) + i*20
 		if off+20 > len(secData) {
@@ -1222,7 +1257,11 @@ func parseImportsWithIAT(f *pe.File, imageBase uint64, sb *strings.Builder) {
 		ptrSize = 8
 	}
 
-	sb.WriteString(fmt.Sprintf("\nImports (%d DLLs):\n", len(dlls)))
+	usedChars := utf8.RuneCountInString(sb.String())
+	common.AppendWithinRuneBudget(sb, &usedChars, fmt.Sprintf("\nImports (%d DLLs; offset:%d, max:%d):\n", len(dlls), resultOffset, maxResults), maxOutputChars)
+	seen := 0
+	shown := 0
+	hasMore := false
 
 	for _, dll := range dlls {
 		// Read thunk array to resolve function names
@@ -1281,13 +1320,37 @@ func parseImportsWithIAT(f *pe.File, imageBase uint64, sb *strings.Builder) {
 			})
 			thunkData = thunkData[ptrSize:]
 			iatSlotRVA += ptrSize
-			totalFuncs++
 		}
 
-		sb.WriteString(fmt.Sprintf("  %s (%d):\n", dll.name, len(entries)))
+		dllHeaderWritten := false
 		for _, e := range entries {
-			sb.WriteString(fmt.Sprintf("    0x%x  %s\n", e.va, e.name))
+			if seen < resultOffset {
+				seen++
+				continue
+			}
+			if shown >= maxResults {
+				hasMore = true
+				break
+			}
+			line, _ := common.TruncateRunes(fmt.Sprintf("    0x%x  %s\n", e.va, e.name), min(maxOutputChars/2, 10000), "…\n")
+			fragment := line
+			if !dllHeaderWritten {
+				fragment = fmt.Sprintf("  %s (%d):\n", dll.name, len(entries)) + line
+			}
+			if !common.AppendWithinRuneBudget(sb, &usedChars, fragment, maxOutputChars) {
+				hasMore = true
+				break
+			}
+			dllHeaderWritten = true
+			seen++
+			shown++
 		}
+		if hasMore {
+			break
+		}
+	}
+	if hasMore {
+		fmt.Fprintf(sb, "\n[More imports available; retry pe_info with result_offset=%d.]\n", resultOffset+shown)
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"agent-tool/common"
 	"agent-tool/tools/edit"
@@ -18,33 +19,53 @@ import (
 
 // errMaxResults is a sentinel error to terminate filepath.Walk early.
 // Callers use errors.Is to distinguish it from real errors.
-var errMaxResults = errors.New("max results reached")
+var (
+	errMaxResults = errors.New("max results reached")
+	errMaxOutput  = errors.New("max output reached")
+)
+
+const (
+	defaultMaxResults     = 100
+	hardMaxResults        = 100000
+	defaultMaxLineChars   = 4000
+	hardMaxLineChars      = 100000
+	defaultMaxOutputChars = 100000
+	hardMaxOutputChars    = 1000000
+	hardMaxContextLines   = 1000
+)
 
 type GrepInput struct {
-	Pattern    string `json:"pattern" jsonschema:"Regular expression pattern to search for"`
-	Path       string `json:"path,omitempty" jsonschema:"File or directory to search in (absolute path). Defaults to current directory"`
-	FilePath   string `json:"file_path,omitempty" jsonschema:"Alias for path"`
-	Glob       string `json:"glob,omitempty" jsonschema:"Glob pattern to filter files (e.g. *.go). Only used when path is a directory"`
-	IgnoreCase interface{} `json:"ignore_case,omitempty" jsonschema:"Case insensitive search: true or false. Default: false"`
-	Recursive  interface{} `json:"recursive,omitempty" jsonschema:"Recurse into subdirectories: true or false. Default: true"`
-	MaxResults interface{} `json:"max_results,omitempty" jsonschema:"Maximum number of matching lines/files to return. Default: 100"`
-	OutputMode string      `json:"output_mode,omitempty" jsonschema:"Output mode: 'content' (matching lines with path:line:text, default), 'files_with_matches' (file paths only), 'count' (match count per file)"`
-	Context    interface{} `json:"context,omitempty" jsonschema:"Lines of context before and after each match (like grep -C). Default: 0"`
-	Before     interface{} `json:"before,omitempty" jsonschema:"Lines of context before each match (like grep -B). Overrides context. Default: 0"`
-	After      interface{} `json:"after,omitempty" jsonschema:"Lines of context after each match (like grep -A). Overrides context. Default: 0"`
+	Pattern        string      `json:"pattern" jsonschema:"Regular expression pattern to search for"`
+	Path           string      `json:"path,omitempty" jsonschema:"File or directory to search in (absolute path). Defaults to current directory"`
+	FilePath       string      `json:"file_path,omitempty" jsonschema:"Alias for path"`
+	Glob           string      `json:"glob,omitempty" jsonschema:"Glob pattern to filter files (e.g. *.go). Only used when path is a directory"`
+	IgnoreCase     interface{} `json:"ignore_case,omitempty" jsonschema:"Case insensitive search: true or false. Default: false"`
+	Recursive      interface{} `json:"recursive,omitempty" jsonschema:"Recurse into subdirectories: true or false. Default: true"`
+	MaxResults     interface{} `json:"max_results,omitempty" jsonschema:"Maximum matching lines/files to inspect for the result. Default: 100, Max: 100000. Total returned text is also bounded by max_output_chars"`
+	OutputMode     string      `json:"output_mode,omitempty" jsonschema:"Output mode: 'content' (matching lines with path:line:text, default), 'files_with_matches' (file paths only), 'count' (match count per file)"`
+	Context        interface{} `json:"context,omitempty" jsonschema:"Lines of context before and after each match (like grep -C). Default: 0, Max: 1000"`
+	Before         interface{} `json:"before,omitempty" jsonschema:"Lines of context before each match (like grep -B). Overrides context. Default: 0, Max: 1000"`
+	After          interface{} `json:"after,omitempty" jsonschema:"Lines of context after each match (like grep -A). Overrides context. Default: 0, Max: 1000"`
+	MaxLineChars   interface{} `json:"max_line_chars,omitempty" jsonschema:"Maximum characters returned from one matching or context line. Default: 4000, Max: 100000"`
+	MaxOutputChars interface{} `json:"max_output_chars,omitempty" jsonschema:"Maximum total result characters. Default: 100000, Max: 1000000"`
 }
 
 type GrepOutput struct {
-	Matches []string `json:"matches"`
-	Count   int      `json:"count"`
+	Matches       []string `json:"matches"`
+	Count         int      `json:"count"`
+	ReturnedLines int      `json:"returned_lines"`
+	Truncated     bool     `json:"truncated"`
+	LimitReached  bool     `json:"limit_reached"`
 }
 
 // searchOpts holds computed search options passed to search functions.
 type searchOpts struct {
-	outputMode string
-	before     int
-	after      int
-	showPath   bool // include file path prefix on each line (true for directory search)
+	outputMode     string
+	before         int
+	after          int
+	showPath       bool // include file path prefix on each line (true for directory search)
+	maxLineChars   int
+	maxOutputChars int
 }
 
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input GrepInput) (*mcp.CallToolResult, GrepOutput, error) {
@@ -70,9 +91,15 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input GrepInput) (*mc
 		return errorResult(fmt.Sprintf("invalid regex pattern: %v", err))
 	}
 
-	maxResults, _ := common.FlexInt(input.MaxResults)
+	maxResults, ok := common.FlexInt(input.MaxResults)
+	if !ok {
+		return errorResult("max_results must be an integer")
+	}
 	if maxResults <= 0 {
-		maxResults = 100
+		maxResults = defaultMaxResults
+	}
+	if maxResults > hardMaxResults {
+		return errorResult(fmt.Sprintf("max_results must be at most %d; use a narrower path/pattern or multiple calls", hardMaxResults))
 	}
 	ctxLines, ok := common.FlexInt(input.Context)
 	if !ok {
@@ -86,9 +113,34 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input GrepInput) (*mc
 	if !ok {
 		return errorResult("after must be an integer")
 	}
+	for name, value := range map[string]int{"context": ctxLines, "before": beforeLines, "after": afterLines} {
+		if value < 0 || value > hardMaxContextLines {
+			return errorResult(fmt.Sprintf("%s must be between 0 and %d", name, hardMaxContextLines))
+		}
+	}
+	maxLineChars, ok := common.FlexInt(input.MaxLineChars)
+	if !ok {
+		return errorResult("max_line_chars must be an integer")
+	}
+	if maxLineChars <= 0 {
+		maxLineChars = defaultMaxLineChars
+	}
+	if maxLineChars > hardMaxLineChars {
+		return errorResult(fmt.Sprintf("max_line_chars must be at most %d", hardMaxLineChars))
+	}
+	maxOutputChars, ok := common.FlexInt(input.MaxOutputChars)
+	if !ok {
+		return errorResult("max_output_chars must be an integer")
+	}
+	if maxOutputChars <= 0 {
+		maxOutputChars = defaultMaxOutputChars
+	}
+	if maxOutputChars > hardMaxOutputChars {
+		return errorResult(fmt.Sprintf("max_output_chars must be at most %d", hardMaxOutputChars))
+	}
 
 	// Compute search options
-	opts := searchOpts{outputMode: input.OutputMode}
+	opts := searchOpts{outputMode: input.OutputMode, maxLineChars: maxLineChars, maxOutputChars: maxOutputChars}
 	switch opts.outputMode {
 	case "", "content", "files_with_matches", "count":
 		// valid
@@ -128,6 +180,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input GrepInput) (*mc
 	var matchCount int
 	hasLowConfidence := false
 	skippedBinary := 0
+	searchOutputTruncated := false
 
 	if fi.IsDir() {
 		var dirResult searchDirResult
@@ -136,12 +189,14 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input GrepInput) (*mc
 		matchCount = dirResult.matchCount
 		hasLowConfidence = dirResult.lowConfidenceCount > 0
 		skippedBinary = dirResult.skippedBinary
+		searchOutputTruncated = dirResult.outputTruncated
 	} else {
 		var fileResult searchFileResult
 		fileResult, err = searchFile(input.Path, re, maxResults, opts)
 		matches = fileResult.matches
 		matchCount = fileResult.matchCount
 		hasLowConfidence = fileResult.lowConfidence
+		searchOutputTruncated = fileResult.outputTruncated
 	}
 
 	if err != nil {
@@ -149,9 +204,16 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input GrepInput) (*mc
 	}
 
 	var sb strings.Builder
+	usedChars := 0
+	displayedMatches := make([]string, 0, len(matches))
+	outputTruncated := searchOutputTruncated
 	for _, m := range matches {
-		sb.WriteString(m)
-		sb.WriteString("\n")
+		line := m + "\n"
+		if !common.AppendWithinRuneBudget(&sb, &usedChars, line, maxOutputChars) {
+			outputTruncated = true
+			break
+		}
+		displayedMatches = append(displayedMatches, m)
 	}
 
 	text := sb.String()
@@ -175,17 +237,24 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input GrepInput) (*mc
 			"Results may be incomplete. Consider setting fallback_encoding via set_config tool " +
 			"or adding 'charset' to .editorconfig."
 	}
+	if outputTruncated {
+		text += fmt.Sprintf("\n[Output truncated at %d characters after %d displayed lines. Narrow path/pattern/context or raise max_output_chars (max %d).]", maxOutputChars, len(displayedMatches), hardMaxOutputChars)
+	}
+	text, finalTruncated := common.TruncateRunes(text, maxOutputChars, "\n[Output truncated]")
+	outputTruncated = outputTruncated || finalTruncated
 
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: text}},
-	}, GrepOutput{Matches: matches, Count: matchCount}, nil
+	}, GrepOutput{Matches: displayedMatches, Count: matchCount, ReturnedLines: len(displayedMatches), Truncated: outputTruncated, LimitReached: matchCount >= maxResults || searchOutputTruncated}, nil
 }
 
 // searchFileResult is the return value of searchFile.
 type searchFileResult struct {
-	matches       []string
-	matchCount    int  // actual regex match count (excludes context lines and separators)
-	lowConfidence bool // file with low encoding detection confidence
+	matches         []string
+	matchCount      int  // actual regex match count (excludes context lines and separators)
+	lowConfidence   bool // file with low encoding detection confidence
+	displayChars    int
+	outputTruncated bool
 }
 
 func searchFile(path string, re *regexp.Regexp, maxResults int, opts searchOpts) (searchFileResult, error) {
@@ -199,13 +268,23 @@ func searchFile(path string, re *regexp.Regexp, maxResults int, opts searchOpts)
 	result := searchFileResult{
 		lowConfidence: common.EncodingWarning(encInfo) != "",
 	}
+	appendDisplay := func(line string) bool {
+		n := utf8.RuneCountInString(line) + 1 // account for the newline added by Handle
+		if result.displayChars+n > opts.maxOutputChars {
+			result.outputTruncated = true
+			return false
+		}
+		result.matches = append(result.matches, line)
+		result.displayChars += n
+		return true
+	}
 
 	// files_with_matches: short-circuit on first match
 	if opts.outputMode == "files_with_matches" {
 		scanner := bufio.NewScanner(strings.NewReader(content))
 		for scanner.Scan() {
 			if re.MatchString(scanner.Text()) {
-				result.matches = append(result.matches, path)
+				appendDisplay(path)
 				result.matchCount = 1
 				return result, nil
 			}
@@ -231,7 +310,7 @@ func searchFile(path string, re *regexp.Regexp, maxResults int, opts searchOpts)
 	// count mode: return "path:count"
 	if opts.outputMode == "count" {
 		if len(matchIndices) > 0 {
-			result.matches = append(result.matches, fmt.Sprintf("%s:%d", path, len(matchIndices)))
+			appendDisplay(fmt.Sprintf("%s:%d", path, len(matchIndices)))
 			result.matchCount = 1 // 1 file entry
 		}
 		return result, nil
@@ -239,12 +318,14 @@ func searchFile(path string, re *regexp.Regexp, maxResults int, opts searchOpts)
 
 	// Line formatting helpers: include path prefix only for directory search
 	fmtMatch := func(lineNum int, text string) string {
+		text, _ = common.TruncateRunes(text, opts.maxLineChars, "… [line truncated]")
 		if opts.showPath {
 			return fmt.Sprintf("%s:%d:%s", path, lineNum, text)
 		}
 		return fmt.Sprintf("%d:%s", lineNum, text)
 	}
 	fmtContext := func(lineNum int, text string) string {
+		text, _ = common.TruncateRunes(text, opts.maxLineChars, "… [line truncated]")
 		if opts.showPath {
 			return fmt.Sprintf("%s:%d-%s", path, lineNum, text)
 		}
@@ -257,7 +338,9 @@ func searchFile(path string, re *regexp.Regexp, maxResults int, opts searchOpts)
 			if result.matchCount >= maxResults {
 				break
 			}
-			result.matches = append(result.matches, fmtMatch(idx+1, lines[idx]))
+			if !appendDisplay(fmtMatch(idx+1, lines[idx])) {
+				break
+			}
 			result.matchCount++
 		}
 		return result, nil
@@ -299,14 +382,23 @@ func searchFile(path string, re *regexp.Regexp, maxResults int, opts searchOpts)
 	// Format output: match lines use ":", context lines use "-" (grep convention)
 	for i, r := range ranges {
 		if i > 0 {
-			result.matches = append(result.matches, "--")
+			if !appendDisplay("--") {
+				break
+			}
 		}
 		for lineIdx := r.start; lineIdx < r.end; lineIdx++ {
+			var formatted string
 			if matchSet[lineIdx] {
-				result.matches = append(result.matches, fmtMatch(lineIdx+1, lines[lineIdx]))
+				formatted = fmtMatch(lineIdx+1, lines[lineIdx])
 			} else {
-				result.matches = append(result.matches, fmtContext(lineIdx+1, lines[lineIdx]))
+				formatted = fmtContext(lineIdx+1, lines[lineIdx])
 			}
+			if !appendDisplay(formatted) {
+				break
+			}
+		}
+		if result.outputTruncated {
+			break
 		}
 	}
 	result.matchCount = used
@@ -319,6 +411,8 @@ type searchDirResult struct {
 	matchCount         int // total match count across all files
 	lowConfidenceCount int // number of files with low encoding detection confidence
 	skippedBinary      int // binary files not searched
+	displayChars       int
+	outputTruncated    bool
 }
 
 func searchDir(dir, globPattern string, re *regexp.Regexp, maxResults int, opts searchOpts, recursive bool) (searchDirResult, error) {
@@ -363,14 +457,25 @@ func searchDir(dir, globPattern string, re *regexp.Regexp, maxResults int, opts 
 			return errMaxResults
 		}
 
-		fileResult, err := searchFile(path, re, remaining, opts)
+		fileOpts := opts
+		fileOpts.maxOutputChars -= result.displayChars
+		if fileOpts.maxOutputChars <= 0 {
+			result.outputTruncated = true
+			return errMaxOutput
+		}
+		fileResult, err := searchFile(path, re, remaining, fileOpts)
 		if err != nil {
 			return nil // skip files that fail to read
 		}
 		result.matches = append(result.matches, fileResult.matches...)
 		result.matchCount += fileResult.matchCount
+		result.displayChars += fileResult.displayChars
 		if fileResult.lowConfidence {
 			result.lowConfidenceCount++
+		}
+		if fileResult.outputTruncated {
+			result.outputTruncated = true
+			return errMaxOutput
 		}
 
 		if result.matchCount >= maxResults {
@@ -379,7 +484,7 @@ func searchDir(dir, globPattern string, re *regexp.Regexp, maxResults int, opts 
 		return nil
 	})
 
-	if err != nil && !errors.Is(err, errMaxResults) {
+	if err != nil && !errors.Is(err, errMaxResults) && !errors.Is(err, errMaxOutput) {
 		return result, err
 	}
 	return result, nil
@@ -393,6 +498,8 @@ Encoding-aware: auto-detects file encoding.
 Can search a single file or recursively search a directory.
 Output modes: content (default, matching lines), files_with_matches (paths only), count (match counts).
 Context: use before/after/context to include surrounding lines (like grep -B/-A/-C).
+Large result sets stay usable: max_results supports up to 100000, while max_line_chars
+and max_output_chars bound the text returned to the agent.
 Directory search skips binary files (extension list + NUL-byte sniff); pass a binary file
 directly as path to search it anyway.`,
 	}, Handle)

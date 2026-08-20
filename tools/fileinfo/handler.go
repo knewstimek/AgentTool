@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"agent-tool/common"
 	"agent-tool/tools/edit"
@@ -51,19 +50,15 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input FileInfoInput) 
 		return errorResult(fmt.Sprintf("failed to read file: %v", err))
 	}
 
-	// Detect line ending
-	lineEnding := "LF"
-	if strings.Contains(content, "\r\n") {
-		lineEnding = "CRLF"
+	// A single CRLF must not hide bare LF lines in a mixed file.
+	lineInfo := common.AnalyzeLineEndings(content)
+	lineEnding := lineInfo.Kind
+	if lineInfo.Kind == "Mixed" {
+		lineEnding = fmt.Sprintf("Mixed (CRLF=%d, LF=%d, CR=%d)", lineInfo.CRLFCount, lineInfo.LFCount, lineInfo.CRCount)
 	}
 
-	// Total line count
-	totalLines := 1
-	for _, c := range content {
-		if c == '\n' {
-			totalLines++
-		}
-	}
+	// Count every recognized newline form, including legacy bare-CR files.
+	totalLines := lineInfo.CRLFCount + lineInfo.LFCount + lineInfo.CRCount + 1
 	if content == "" {
 		totalLines = 0
 	}
@@ -104,6 +99,7 @@ func Register(server *mcp.Server) {
 	common.SafeAddTool(server, &mcp.Tool{
 		Name: "file_info",
 		Description: `Returns detailed file metadata: size, encoding, line ending, indentation style, and line count.
+Mixed line endings are reported with separate CRLF, LF, and CR counts.
 Uses the same encoding detection as read/edit (chardet + .editorconfig).`,
 	}, Handle)
 }

@@ -12,6 +12,13 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+const (
+	defaultPEImportResults    = 500
+	hardPEImportResults       = 100000
+	defaultAnalyzeOutputChars = 100000
+	hardAnalyzeOutputChars    = 1000000
+)
+
 // AnalyzeInput defines parameters for the static binary analysis tool.
 type AnalyzeInput struct {
 	Operation string `json:"operation" jsonschema:"Operation: disassemble, pe_info, elf_info, macho_info, strings, hexdump, pattern_search, entropy, bin_diff, resource_info, imphash, rich_header, overlay_detect, dwarf_info, xref, function_at, call_graph, follow_ptr, rtti_dump, struct_layout, vtable_scan,required"`
@@ -19,25 +26,27 @@ type AnalyzeInput struct {
 	Path      string `json:"path,omitempty" jsonschema:"Alias for file_path"`
 
 	// disassemble / function_at / follow_ptr parameters
-	Offset    int    `json:"offset,omitempty" jsonschema:"Byte offset to start from. Default: 0"`
-	VA        string `json:"va,omitempty" jsonschema:"Virtual address for PE files (hex, e.g. '0x140001000'). Auto-converts to file offset. For disassemble, function_at, follow_ptr, rtti_dump, struct_layout. Preferred over offset+base_addr for PE analysis."`
-	Count     int    `json:"count,omitempty" jsonschema:"Number of instructions (disassemble) or depth (follow_ptr). Default: 50/4, Max: 1000/10. For a large function, raise count or set stop_at_ret=true; if output hits the cap it prints a truncation note with a resume va to continue from."`
+	Offset    int         `json:"offset,omitempty" jsonschema:"Byte offset to start from. Default: 0"`
+	VA        string      `json:"va,omitempty" jsonschema:"Virtual address for PE files (hex, e.g. '0x140001000'). Auto-converts to file offset. For disassemble, function_at, follow_ptr, rtti_dump, struct_layout. Preferred over offset+base_addr for PE analysis."`
+	Count     int         `json:"count,omitempty" jsonschema:"Number of instructions (disassemble) or depth (follow_ptr). Default: 50/4, Max: 1000/10. For a large function, raise count or set stop_at_ret=true; if output hits the cap it prints a truncation note with a resume va to continue from."`
 	StopAtRet interface{} `json:"stop_at_ret,omitempty" jsonschema:"Stop disassembly at function return (RET/RETF). Confirms boundary via INT3/NOP padding or new prologue. For disassemble only: true or false. Default: false"`
-	Mode     int    `json:"mode,omitempty" jsonschema:"CPU mode: 32 or 64. Default: 64"`
-	BaseAddr string `json:"base_addr,omitempty" jsonschema:"Base address for display (hex string, e.g. '0x140001000'). Default: 0x0. This maps to file offset 0, so displayed address = base_addr + offset + instruction_position. For PE files, prefer 'va' parameter instead -- it auto-calculates the correct base_addr."`
-	Arch     string `json:"arch,omitempty" jsonschema:"CPU architecture: x86 (default) or arm. For disassemble"`
+	Mode      int         `json:"mode,omitempty" jsonschema:"CPU mode: 32 or 64. Default: 64"`
+	BaseAddr  string      `json:"base_addr,omitempty" jsonschema:"Base address for display (hex string, e.g. '0x140001000'). Default: 0x0. This maps to file offset 0, so displayed address = base_addr + offset + instruction_position. For PE files, prefer 'va' parameter instead -- it auto-calculates the correct base_addr."`
+	Arch      string      `json:"arch,omitempty" jsonschema:"CPU architecture: x86 (default) or arm. For disassemble"`
 
 	// strings parameters
 	MinLength  int    `json:"min_length,omitempty" jsonschema:"Minimum string length for strings operation. Default: 4"`
-	MaxResults int    `json:"max_results,omitempty" jsonschema:"Maximum number of results for strings. Default: 500, Max: 2000"`
+	MaxResults int    `json:"max_results,omitempty" jsonschema:"Maximum results. strings: Default 500, Max 2000. pe_info imports: Default 500, Max 100000"`
 	Encoding   string `json:"encoding,omitempty" jsonschema:"String encoding to search for: ascii (default) or utf8"`
 
 	// hexdump parameters
 	Length int `json:"length,omitempty" jsonschema:"Number of bytes for hexdump. Default: 256, Max: 4096"`
 
 	// pe_info / elf_info / macho_info parameters
-	Section string `json:"section,omitempty" jsonschema:"Filter by section name (e.g. '.text', '.rdata'). Empty = show all"`
-	RVA     string `json:"rva,omitempty" jsonschema:"RVA to convert to file offset (hex string, e.g. '0x36A20'). For pe_info only"`
+	Section        string `json:"section,omitempty" jsonschema:"Filter by section name (e.g. '.text', '.rdata'). Empty = show all"`
+	RVA            string `json:"rva,omitempty" jsonschema:"RVA to convert to file offset (hex string, e.g. '0x36A20'). For pe_info only"`
+	ResultOffset   int    `json:"result_offset,omitempty" jsonschema:"Zero-based import result offset for pe_info paging. Default: 0"`
+	MaxOutputChars int    `json:"max_output_chars,omitempty" jsonschema:"Maximum returned text characters for paged analysis output. Default: 100000, Max: 1000000"`
 
 	// pattern_search parameters
 	Pattern string `json:"pattern,omitempty" jsonschema:"Hex byte pattern with ?? wildcards (e.g. '4D 5A ?? ?? 50 45'). For pattern_search"`
@@ -79,7 +88,7 @@ var validOperations = map[string]bool{
 	"follow_ptr":     true,
 	"rtti_dump":      true,
 	"struct_layout":  true,
-	"vtable_scan":   true,
+	"vtable_scan":    true,
 }
 
 // Handle dispatches to the appropriate operation.
@@ -91,6 +100,23 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input AnalyzeInput) (
 	}
 	if !validOperations[op] {
 		return errorResult(fmt.Sprintf("unknown operation: %s (available: %s)", op, allOps))
+	}
+	if input.ResultOffset < 0 {
+		return errorResult("result_offset must be non-negative")
+	}
+	if input.MaxOutputChars <= 0 {
+		input.MaxOutputChars = defaultAnalyzeOutputChars
+	}
+	if input.MaxOutputChars > hardAnalyzeOutputChars {
+		return errorResult(fmt.Sprintf("max_output_chars must be at most %d", hardAnalyzeOutputChars))
+	}
+	if op == "pe_info" {
+		if input.MaxResults <= 0 {
+			input.MaxResults = defaultPEImportResults
+		}
+		if input.MaxResults > hardPEImportResults {
+			return errorResult(fmt.Sprintf("max_results for pe_info must be at most %d", hardPEImportResults))
+		}
 	}
 
 	if input.FilePath == "" {
@@ -208,6 +234,7 @@ vtable_scan (scan PE .rdata for all vtables with RTTI -- auto-discovers C++ clas
 Pure Go implementation -- no external tools needed. Supports x86, x64, ARM, ARM64.
 For PE files: use 'va' parameter instead of 'offset' for auto VA display, symbol annotation, and function boundary detection.
 PE strings/pattern_search automatically show VA alongside file offsets.
+PE import output supports result_offset/max_results paging and max_output_chars bounding.
 For runtime debugging, use the debug tool instead.`,
 	}, Handle)
 }

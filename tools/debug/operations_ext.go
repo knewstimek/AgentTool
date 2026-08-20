@@ -608,18 +608,40 @@ func opCompletions(session *debugSession, input DebugInput) (string, error) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Completions for %q:\n", input.Text))
-	for _, item := range cResp.Body.Targets {
-		sb.WriteString(fmt.Sprintf("  %s", item.Label))
-		if item.Detail != "" {
-			sb.WriteString(fmt.Sprintf(" — %s", item.Detail))
-		}
-		if item.Type != "" {
-			sb.WriteString(fmt.Sprintf(" [%s]", item.Type))
-		}
-		sb.WriteString("\n")
+	usedChars := 0
+	query, _ := common.TruncateRunes(input.Text, input.MaxValueChars, "…")
+	common.AppendWithinRuneBudget(&sb, &usedChars, fmt.Sprintf("Completions for %q (start:%d, max:%d):\n", query, input.Start, input.MaxResults), input.MaxOutputChars)
+	start := input.Start
+	if start > len(cResp.Body.Targets) {
+		start = len(cResp.Body.Targets)
 	}
-	return sb.String(), nil
+	shown := 0
+	for _, item := range cResp.Body.Targets[start:] {
+		if shown >= input.MaxResults {
+			break
+		}
+		label, _ := common.TruncateRunes(item.Label, input.MaxValueChars, "…")
+		detail, _ := common.TruncateRunes(item.Detail, input.MaxValueChars, "… [detail truncated]")
+		itemType, _ := common.TruncateRunes(string(item.Type), input.MaxValueChars, "… [type truncated]")
+		var line strings.Builder
+		line.WriteString(fmt.Sprintf("  %s", label))
+		if item.Detail != "" {
+			line.WriteString(fmt.Sprintf(" — %s", detail))
+		}
+		if itemType != "" {
+			line.WriteString(fmt.Sprintf(" [%s]", itemType))
+		}
+		line.WriteString("\n")
+		if !common.AppendWithinRuneBudget(&sb, &usedChars, line.String(), input.MaxOutputChars) {
+			break
+		}
+		shown++
+	}
+	if start+shown < len(cResp.Body.Targets) {
+		fmt.Fprintf(&sb, "\n[More completions available; retry with start=%d.]\n", start+shown)
+	}
+	result, _ := common.TruncateRunes(sb.String(), input.MaxOutputChars, fmt.Sprintf("\n[Output truncated; retry with start=%d]", start+shown))
+	return result, nil
 }
 
 // --- Exception info ---
@@ -717,12 +739,16 @@ func opSource(session *debugSession, input DebugInput) (string, error) {
 // opModules returns loaded modules/libraries.
 func opModules(session *debugSession, input DebugInput) (string, error) {
 	timeout := resolveTimeout(input.TimeoutSec)
+	moduleCount := input.ModuleCount
+	if moduleCount == 0 {
+		moduleCount = input.MaxResults
+	}
 
 	req := &dap.ModulesRequest{}
 	req.Seq = session.client.nextSeq()
 	req.Arguments = dap.ModulesArguments{
 		StartModule: input.StartModule,
-		ModuleCount: input.ModuleCount,
+		ModuleCount: moduleCount,
 	}
 
 	resp, err := session.client.sendRequest(req, timeout)
@@ -739,18 +765,36 @@ func opModules(session *debugSession, input DebugInput) (string, error) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Modules (total: %d):\n", modResp.Body.TotalModules))
-	for _, m := range modResp.Body.Modules {
-		sb.WriteString(fmt.Sprintf("  [%v] %s", m.Id, m.Name))
+	usedChars := 0
+	common.AppendWithinRuneBudget(&sb, &usedChars, fmt.Sprintf("Modules (total:%d, start:%d, max:%d):\n", modResp.Body.TotalModules, input.StartModule, moduleCount), input.MaxOutputChars)
+	shown := 0
+	for i, m := range modResp.Body.Modules {
+		if i >= moduleCount {
+			break
+		}
+		name, _ := common.TruncateRunes(m.Name, input.MaxValueChars, "…")
+		path, _ := common.TruncateRunes(m.Path, input.MaxValueChars, "…")
+		id, _ := common.TruncateRunes(fmt.Sprint(m.Id), input.MaxValueChars, "…")
+		symbolStatus, _ := common.TruncateRunes(m.SymbolStatus, input.MaxValueChars, "… [status truncated]")
+		var line strings.Builder
+		line.WriteString(fmt.Sprintf("  [%s] %s", id, name))
 		if m.Path != "" {
-			sb.WriteString(fmt.Sprintf(" (%s)", m.Path))
+			line.WriteString(fmt.Sprintf(" (%s)", path))
 		}
-		if m.SymbolStatus != "" {
-			sb.WriteString(fmt.Sprintf(" symbols:%s", m.SymbolStatus))
+		if symbolStatus != "" {
+			line.WriteString(fmt.Sprintf(" symbols:%s", symbolStatus))
 		}
-		sb.WriteString("\n")
+		line.WriteString("\n")
+		if !common.AppendWithinRuneBudget(&sb, &usedChars, line.String(), input.MaxOutputChars) {
+			break
+		}
+		shown++
 	}
-	return sb.String(), nil
+	if input.StartModule+shown < modResp.Body.TotalModules || shown < len(modResp.Body.Modules) {
+		fmt.Fprintf(&sb, "\n[More modules available; retry with start_module=%d.]\n", input.StartModule+shown)
+	}
+	result, _ := common.TruncateRunes(sb.String(), input.MaxOutputChars, fmt.Sprintf("\n[Output truncated; retry with start_module=%d]", input.StartModule+shown))
+	return result, nil
 }
 
 // opLoadedSources returns all loaded source files.
@@ -774,15 +818,33 @@ func opLoadedSources(session *debugSession, input DebugInput) (string, error) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Loaded sources (%d):\n", len(lsResp.Body.Sources)))
-	for _, src := range lsResp.Body.Sources {
+	usedChars := 0
+	total := len(lsResp.Body.Sources)
+	start := input.Start
+	if start > total {
+		start = total
+	}
+	common.AppendWithinRuneBudget(&sb, &usedChars, fmt.Sprintf("Loaded sources (total:%d, start:%d, max:%d):\n", total, start, input.MaxResults), input.MaxOutputChars)
+	shown := 0
+	for _, src := range lsResp.Body.Sources[start:] {
+		if shown >= input.MaxResults {
+			break
+		}
 		path := src.Path
 		if path == "" {
 			path = src.Name
 		}
-		sb.WriteString(fmt.Sprintf("  %s\n", path))
+		path, _ = common.TruncateRunes(path, input.MaxValueChars, "…")
+		if !common.AppendWithinRuneBudget(&sb, &usedChars, fmt.Sprintf("  %s\n", path), input.MaxOutputChars) {
+			break
+		}
+		shown++
 	}
-	return sb.String(), nil
+	if start+shown < total {
+		fmt.Fprintf(&sb, "\n[More loaded sources available; retry with start=%d.]\n", start+shown)
+	}
+	result, _ := common.TruncateRunes(sb.String(), input.MaxOutputChars, fmt.Sprintf("\n[Output truncated; retry with start=%d]", start+shown))
+	return result, nil
 }
 
 // --- Memory / disassembly ---

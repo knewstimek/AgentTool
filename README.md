@@ -31,13 +31,13 @@ Claude Code, Codex CLI, Cursor, Windsurf, Cline, Gemini CLI, and any MCP-compati
 | **Edit** | String replacement with smart indentation and encoding preservation (supports dry_run) | ✅ |
 | **Read** | Encoding-aware file reading with flexible offset (integer, `"N-M"` range, `[N,M]` array). Image files (PNG/JPG/GIF/BMP/WebP/TIFF/ICO) returned as base64 ImageContent | ✅ |
 | **Write** | Encoding-aware file creation/overwrite | ✅ |
-| **Grep** | Encoding-aware regex content search with output modes (content/files_with_matches/count) and context lines (-B/-A/-C). Skips binary files (extension + NUL sniff) | ✅ |
+| **Grep** | Encoding-aware regex content search with output modes (content/files_with_matches/count) and context lines (-B/-A/-C). Large result limits are supported while per-line and total output budgets prevent context floods. Skips binary files (extension + NUL sniff) | ✅ |
 | **Glob** | File pattern matching with `**` recursive support | ✅ |
-| **ListDir** | Directory listing (flat or tree) | ✅ |
+| **ListDir** | Bounded/pageable directory listing. max_entries + continuation cursor, directory/file filters, entry-name glob filters, counts-only mode, flat/tree output | ✅ |
 | **Diff** | Compare two files with unified diff output (encoding-aware) | ✅ |
 | **Patch** | Apply unified diff patch to a file (supports dry_run) | ✅ |
 | **Checksum** | Compute file hash (md5, sha1, sha256) | ✅ |
-| **FileInfo** | File metadata (size, encoding, line ending, indentation, line count) | ✅ |
+| **FileInfo** | File metadata (size, encoding, mixed line-ending counts, indentation, line count) | ✅ |
 | **Compress** | Create zip / tar.gz archives | ✅ |
 | **Decompress** | Extract zip / tar.gz archives (Zip Slip/Bomb protection) | ✅ |
 | **Backup** | Timestamped zip backup with exclude patterns. dry_run preview with directory stats, pattern match counts, and largest files | ✅ |
@@ -64,20 +64,20 @@ Claude Code, Codex CLI, Cursor, Windsurf, Cline, Gemini CLI, and any MCP-compati
 | **Copy** | Copy files/directories with atomic write and permission preservation. Recursive directory copy. Windows locked-file fallback (renames running exe/DLL aside). dry_run preview | ✅ |
 | **Mkdir** | Create directories with optional permission mode (octal, e.g. 0755). Recursive by default (mkdir -p). dry_run preview | ✅ |
 | **MultiRead** | Read multiple files in a single call to reduce API round-trips. Encoding-aware, offset/limit support. Max 50 files | ✅ |
-| **RegexReplace** | Regex find-and-replace across files/directories. Encoding-preserving, capture groups ($1, $2). Skips binary files. dry_run preview | ✅ |
+| **RegexReplace** | Regex find-and-replace across files/directories. Encoding and dominant newline preserving, capture groups ($1, $2). Skips binary files. dry_run preview | ✅ |
 | **TLSCheck** | Check TLS certificate details — subject, issuer, expiry, SANs, TLS version, cipher suite | ✅ |
 | **DNSLookup** | DNS record lookup (A/AAAA/MX/CNAME/TXT/NS/SOA). DNS over HTTPS (DoH) by default for privacy | ✅ |
-| **MySQL** | Execute SQL queries on MySQL/MariaDB. Table-formatted SELECT results, affected rows for DML. Max 1000 rows | ✅ |
+| **MySQL** | Execute SQL queries on MySQL/MariaDB. Table-formatted SELECT results with configurable row/column/cell/total-output limits; affected rows for DML. Use SQL LIMIT/OFFSET for paging | ✅ |
 | **Redis** | Execute Redis commands with formatted output by type. TLS support. Dangerous commands (FLUSHALL, SHUTDOWN, etc.) blocked | ✅ |
 | **PortCheck** | Check if a TCP port is open on a host. Returns OPEN/CLOSED with response time. Supports hostname, IPv4, IPv6 | ✅ |
 | **ExternalIP** | Get your external (public) IP address. Multiple providers with automatic fallback (ipify, ifconfig.me, icanhazip) | ✅ |
 | **SLOC** | Count source lines of code per language. 70+ language detection, per-file/language breakdown, blank line stats, max_depth control | ✅ |
-| **Debug** | Interactive debugger via DAP (Debug Adapter Protocol). Full DAP coverage: breakpoints (source/function/data/instruction/exception), stepping (forward/backward), variable inspection and modification, expression evaluation, disassembly, memory read/write, stack traces, modules, goto, completions. Tested with dlv (Go), debugpy (Python), codelldb (C/C++/Rust). Works with any DAP-compatible adapter. Stdio and TCP modes. Note: vsdbg (Microsoft) requires VS Code licensing and is not usable standalone — use codelldb or netcoredbg as open-source alternatives | ✅ |
-| **Analyze** | Static binary analysis and reverse engineering. x86/x64/ARM/ARM64 disassembly (PE/ELF/Mach-O, auto VA display, symbol annotation, stop_at_ret). PE/ELF/Mach-O parsing (RWX warnings, resources, imports with IAT VA, exports). xref (PE/ELF/Mach-O, x86/x64/ARM64/ARM32, summary stats). function_at (export/.pdata ground truth + call-graph/vtable/linear-sweep discovery, CFG-proven boundaries, confidence-graded exact/high/medium/low). call_graph (PE/ELF/Mach-O, x86/x64/ARM64/ARM32, control-flow-scanned edges). follow_ptr (pointer chain tracing with circular detection). rtti_dump (MSVC RTTI parsing with class name demangling, pSelf validation). vtable_scan (auto-discover vtables with RTTI in .rdata). struct_layout (memory layout annotation). imphash, Rich header, DWARF debug info, string extraction (with VA), hexdump, hex pattern search (with section names), entropy analysis, overlay detection, binary diff. No global file size limit | ✅ |
+| **Debug** | Interactive debugger via DAP (Debug Adapter Protocol). Full DAP coverage with bounded values/output and paging for variables, completions, modules, and loaded sources. Tested with dlv (Go), debugpy (Python), codelldb (C/C++/Rust). Works with any DAP-compatible adapter. Stdio and TCP modes. Note: vsdbg (Microsoft) requires VS Code licensing and is not usable standalone — use codelldb or netcoredbg as open-source alternatives | ✅ |
+| **Analyze** | Static binary analysis and reverse engineering. x86/x64/ARM/ARM64 disassembly; PE/ELF/Mach-O parsing with bounded, pageable PE import output; xref, function discovery/call graphs, pointer/RTTI/vtable/struct analysis, imphash, Rich header, DWARF, strings, hexdump, pattern search, entropy, overlay detection, and binary diff. No global file size limit | ✅ |
 | **Memtool** | CheatEngine-style process memory tool — search/filter/read/write memory values, read_chain (resolve base+offset pointer chains, batched in one call), live disassembly (x86/x64/ARM/ARM64), undo, struct pattern search, pointer scan, memory diff. Disk-backed snapshots for large scans. Session management with idle timeout. Windows (ReadProcessMemory) and Linux (/proc/pid/mem). Windows auto-enables SeDebugPrivilege when elevated; opt-in `force_dacl` bypasses a same-user process's self-hardened DACL (original restored after) | ✅ |
 | **IPC** | Inter-process communication between AI agent sessions over TCP. 1:1 message passing with blocking receive. Protocol: [2-byte type][4-byte length][payload]. Operations: send, receive (blocking with timeout), ping. Works across machines. Max 1MB message, 300s timeout | ✅ |
 | **Wintool** | Windows GUI automation — find/enumerate windows and child controls, capture screenshots (ImageContent PNG via PrintWindow), read clipboard images, read/set text, click, type, send raw messages, show/hide/minimize/maximize, move/resize, close, focus. screenshot/clipboard return ImageContent by default (save_path option for file output). Enables AI agents to "see" and interact with GUI applications. Windows only | ✅ |
-| **CodeGraph** | AST-based code indexing with tree-sitter (WASM). 11 operations: index, find, callers, callees, symbols, methods, inherits, stats, importers, unused (dead code), call_tree (recursive call hierarchy). Supports C/C++, Python, Go, C#, Rust, Java. Respects .gitignore (nested), skips venv/vendor/third_party. No LLM calls, zero token cost | ✅ |
+| **CodeGraph** | AST-based code indexing with tree-sitter (WASM). 11 operations; large symbols/callees results support offset paging and total-output limits. Supports C/C++, Python, Go, C#, Rust, Java. Respects .gitignore (nested), skips venv/vendor/third_party. No LLM calls, zero token cost | ✅ |
 | **SetConfig** | Change runtime settings (encoding, file size limit, symlinks, workspace, etc.) | ✅ |
 | **Help** | Built-in usage guide for agents (encoding, indentation, troubleshooting) | ✅ |
 
@@ -96,7 +96,13 @@ Edits preserve the original file encoding instead of forcing UTF-8.
 - **Detection priority**: BOM → `.editorconfig` charset → BOM-less UTF-16 → valid UTF-8 → chardet auto-detection → fallback encoding
 - **Supported**: UTF-8, UTF-8 BOM, EUC-KR, Shift-JIS, ISO-8859-1, UTF-16 (LE/BE, with or without BOM), and more
 - **No false warnings on ASCII**: valid UTF-8 is verified directly, so plain ASCII files never raise a low-confidence warning
-- **Line endings**: Preserves `\r\n` / `\n` as-is
+- **Line endings**: Detects LF, CRLF, CR, and mixed files; inserted edit/regexreplace text follows the file's dominant newline
+
+### Token-safe directory listings
+`listdir` defaults to 500 entries per page and returns `next_cursor` when more
+entries are available. Narrow results with `directories_only`, `files_only`,
+`name_pattern` (for example `A*`), or multiple OR patterns in `include`.
+Use `counts_only=true` when only matching file/directory counts are needed.
 
 ## Quick Start
 
@@ -260,7 +266,7 @@ Agents can change settings at runtime via `set_config` without restarting:
 |-----------|-------------|---------|
 | `fallback_encoding` | Fallback encoding when auto-detection fails | `UTF-8` |
 | `encoding_warnings` | Show encoding detection warnings | `true` |
-| `max_file_size_mb` | Max file size for read/edit/grep (MB) | `50` |
+| `max_file_size_mb` | Max file size for read/edit/grep (MB) | `100` |
 | `allow_symlinks` | Allow symlink extraction from tar archives | `false` |
 | `workspace` | Default workspace/project root for tools like glob when no explicit path is given | _(cwd)_ |
 | `allow_http_private` | Allow webfetch/download/httpreq to access private IPs | `false` |
@@ -327,7 +333,7 @@ When used with AI coding agents, be aware of prompt injection risks:
 - **Zip Slip protection**: Archive entries with `../` path traversal are blocked (both zip and tar)
 - **Zip Bomb protection**: Single file limit (1GB), total extraction limit (5GB)
 - **Symlinks**: Skipped by default. Enable via `set_config allow_symlinks=true` (tar only; zip symlinks always skipped). Even when enabled, symlinks targeting outside the output directory are blocked
-- **File size limit**: Configurable max file size (default 50MB) prevents OOM on large files. Adjustable via `set_config max_file_size_mb=N`
+- **File size limit**: Configurable max file size (default 100MB) prevents OOM on large files. Adjustable via `set_config max_file_size_mb=N`
 - **Encoding safety**: chardet uses 64KB sample (not full file) for memory efficiency
 
 For maximum security, review the AI agent's tool calls before approving, especially for SSH commands, HTTP requests to external URLs, and database queries.

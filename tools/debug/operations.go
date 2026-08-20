@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"agent-tool/common"
+
 	"github.com/google/go-dap"
 )
 
@@ -363,8 +365,8 @@ func opSetBreakpoints(session *debugSession, input DebugInput) (string, error) {
 	dapBPs := make([]dap.SourceBreakpoint, len(bps))
 	for i, bp := range bps {
 		dapBPs[i] = dap.SourceBreakpoint{
-			Line:      bp.Line,
-			Condition: bp.Condition,
+			Line:         bp.Line,
+			Condition:    bp.Condition,
 			HitCondition: bp.HitCondition,
 			LogMessage:   bp.LogMessage,
 		}
@@ -748,6 +750,9 @@ func opVariables(session *debugSession, input DebugInput) (string, error) {
 	req.Seq = session.client.nextSeq()
 	req.Arguments = dap.VariablesArguments{
 		VariablesReference: input.VariablesReference,
+		Filter:             input.VariableFilter,
+		Start:              input.Start,
+		Count:              input.MaxResults,
 	}
 
 	resp, err := session.client.sendRequest(req, timeout)
@@ -761,19 +766,35 @@ func opVariables(session *debugSession, input DebugInput) (string, error) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString("Variables:\n")
-	for _, v := range varsResp.Body.Variables {
+	usedChars := 0
+	common.AppendWithinRuneBudget(&sb, &usedChars, fmt.Sprintf("Variables (start:%d, max:%d):\n", input.Start, input.MaxResults), input.MaxOutputChars)
+	shown := 0
+	for i, v := range varsResp.Body.Variables {
+		if i >= input.MaxResults {
+			break
+		}
 		ref := ""
 		if v.VariablesReference > 0 {
 			ref = fmt.Sprintf(" (ref:%d, expandable)", v.VariablesReference)
 		}
 		typ := ""
 		if v.Type != "" {
-			typ = fmt.Sprintf(" [%s]", v.Type)
+			typeName, _ := common.TruncateRunes(v.Type, input.MaxValueChars, "… [type truncated]")
+			typ = fmt.Sprintf(" [%s]", typeName)
 		}
-		sb.WriteString(fmt.Sprintf("  %s%s = %s%s\n", v.Name, typ, v.Value, ref))
+		name, _ := common.TruncateRunes(v.Name, input.MaxValueChars, "…")
+		value, _ := common.TruncateRunes(v.Value, input.MaxValueChars, "… [value truncated]")
+		line := fmt.Sprintf("  %s%s = %s%s\n", name, typ, value, ref)
+		if !common.AppendWithinRuneBudget(&sb, &usedChars, line, input.MaxOutputChars) {
+			break
+		}
+		shown++
 	}
-	return sb.String(), nil
+	if shown < len(varsResp.Body.Variables) || shown >= input.MaxResults {
+		fmt.Fprintf(&sb, "\n[More variables may be available; retry with start=%d.]\n", input.Start+shown)
+	}
+	result, _ := common.TruncateRunes(sb.String(), input.MaxOutputChars, fmt.Sprintf("\n[Output truncated; retry with start=%d]", input.Start+shown))
+	return result, nil
 }
 
 // opEvaluate evaluates an expression in the current context.
@@ -812,15 +833,22 @@ func opEvaluate(session *debugSession, input DebugInput) (string, error) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Expression: %s\n", input.Expression))
-	sb.WriteString(fmt.Sprintf("Result: %s\n", evalResp.Body.Result))
+	expression, _ := common.TruncateRunes(input.Expression, input.MaxValueChars, "…")
+	value, valueTruncated := common.TruncateRunes(evalResp.Body.Result, input.MaxValueChars, "… [value truncated]")
+	sb.WriteString(fmt.Sprintf("Expression: %s\n", expression))
+	sb.WriteString(fmt.Sprintf("Result: %s\n", value))
 	if evalResp.Body.Type != "" {
-		sb.WriteString(fmt.Sprintf("Type: %s\n", evalResp.Body.Type))
+		typeName, _ := common.TruncateRunes(evalResp.Body.Type, input.MaxValueChars, "…")
+		sb.WriteString(fmt.Sprintf("Type: %s\n", typeName))
 	}
 	if evalResp.Body.VariablesReference > 0 {
 		sb.WriteString(fmt.Sprintf("Expandable: ref:%d\n", evalResp.Body.VariablesReference))
 	}
-	return sb.String(), nil
+	if valueTruncated && evalResp.Body.VariablesReference > 0 {
+		sb.WriteString(fmt.Sprintf("Use variables with variables_reference=%d to inspect the value in pages.\n", evalResp.Body.VariablesReference))
+	}
+	result, _ := common.TruncateRunes(sb.String(), input.MaxOutputChars, "\n[Output truncated]")
+	return result, nil
 }
 
 // opDisconnect terminates the debug session.

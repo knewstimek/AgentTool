@@ -10,15 +10,25 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+const (
+	defaultCodeGraphMaxResults     = 500
+	hardCodeGraphMaxResults        = 100000
+	defaultCodeGraphMaxOutputChars = 100000
+	hardCodeGraphMaxOutputChars    = 1000000
+)
+
 // CodeGraphInput defines parameters for the codegraph tool.
 type CodeGraphInput struct {
-	Operation string `json:"operation" jsonschema:"Operation: index, find, callers, callees, symbols, methods, inherits, stats, importers, unused, call_tree,required"`
-	Path      string `json:"path,omitempty" jsonschema:"Project directory path (for index) or file path (for symbols)"`
-	Name      string `json:"name,omitempty" jsonschema:"Symbol name to search for (for find, callers, callees, methods, inherits, call_tree)"`
-	Language  string `json:"language,omitempty" jsonschema:"Language hint: cpp, python, go, csharp, rust, java. Default: auto-detect from file extension"`
-	Workers   interface{} `json:"workers,omitempty" jsonschema:"Number of parallel parse workers for index operation. Default: 4. Higher = faster but more memory (~7MB per worker)"`
-	Depth     interface{} `json:"depth,omitempty" jsonschema:"Max recursion depth for call_tree. Default: 3, Max: 10"`
-	Direction string `json:"direction,omitempty" jsonschema:"Direction for call_tree: up (callers) or down (callees). Default: up"`
+	Operation      string      `json:"operation" jsonschema:"Operation: index, find, callers, callees, symbols, methods, inherits, stats, importers, unused, call_tree,required"`
+	Path           string      `json:"path,omitempty" jsonschema:"Project directory path (for index) or file path (for symbols)"`
+	Name           string      `json:"name,omitempty" jsonschema:"Symbol name to search for (for find, callers, callees, methods, inherits, call_tree)"`
+	Language       string      `json:"language,omitempty" jsonschema:"Language hint: cpp, python, go, csharp, rust, java. Default: auto-detect from file extension"`
+	Workers        interface{} `json:"workers,omitempty" jsonschema:"Number of parallel parse workers for index operation. Default: 4. Higher = faster but more memory (~7MB per worker)"`
+	Depth          interface{} `json:"depth,omitempty" jsonschema:"Max recursion depth for call_tree. Default: 3, Max: 10"`
+	Direction      string      `json:"direction,omitempty" jsonschema:"Direction for call_tree: up (callers) or down (callees). Default: up"`
+	Offset         int         `json:"offset,omitempty" jsonschema:"Zero-based result offset for symbols and callees paging. Default: 0"`
+	MaxResults     int         `json:"max_results,omitempty" jsonschema:"Maximum results for symbols and callees. Default: 500, Max: 100000"`
+	MaxOutputChars int         `json:"max_output_chars,omitempty" jsonschema:"Maximum total returned text characters for symbols and callees. Default: 100000, Max: 1000000"`
 }
 
 // CodeGraphOutput holds the tool result.
@@ -49,6 +59,9 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input CodeGraphInput)
 	}
 	if !validOperations[op] {
 		return errorResult(fmt.Sprintf("unknown operation: %s (available: %s)", op, allOps))
+	}
+	if err := normalizeCodeGraphLimits(&input); err != nil {
+		return errorResult(err.Error())
 	}
 
 	var result string
@@ -88,6 +101,25 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input CodeGraphInput)
 	}, CodeGraphOutput{Result: result}, nil
 }
 
+func normalizeCodeGraphLimits(input *CodeGraphInput) error {
+	if input.Offset < 0 {
+		return fmt.Errorf("offset must be non-negative")
+	}
+	if input.MaxResults <= 0 {
+		input.MaxResults = defaultCodeGraphMaxResults
+	}
+	if input.MaxResults > hardCodeGraphMaxResults {
+		return fmt.Errorf("max_results must be at most %d", hardCodeGraphMaxResults)
+	}
+	if input.MaxOutputChars <= 0 {
+		input.MaxOutputChars = defaultCodeGraphMaxOutputChars
+	}
+	if input.MaxOutputChars > hardCodeGraphMaxOutputChars {
+		return fmt.Errorf("max_output_chars must be at most %d", hardCodeGraphMaxOutputChars)
+	}
+	return nil
+}
+
 // Register adds the codegraph tool to the MCP server.
 func Register(server *mcp.Server) {
 	common.SafeAddTool(server, &mcp.Tool{
@@ -100,7 +132,7 @@ Operations:
   find(name) - Find symbol definitions by name (function, class, method).
   callers(name) - Find all callers of a function/method.
   callees(name) - Find all functions/methods called by a function.
-  symbols(path) - List all symbols in a file (no index needed).
+  symbols(path) - List all symbols in a file (no index needed). Supports offset/max_results paging.
   methods(name) - List all methods of a class.
   inherits(name) - Show inheritance hierarchy of a class.
   stats(path) - Project index statistics (files, classes, functions, calls).
@@ -112,6 +144,7 @@ Index is stored at project root as .codegraph.db (add to .gitignore).
 Respects .gitignore (including nested) and skips non-source dirs (venv, vendor, third_party, etc.).
 No LLM calls, no embeddings -- pure data lookup, zero token cost.
 Tip: Run index once at the start of a session, then use find/callers/call_tree to navigate.
+Large symbols/callees results are bounded by max_output_chars and include the next offset.
 Re-run index after bulk edits to update changed files (incremental, fast).
 Powered by tree-sitter (MIT) via wazero (pure Go WASM runtime).`,
 	}, Handle)

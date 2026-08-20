@@ -15,21 +15,31 @@ import (
 )
 
 const (
-	defaultPort       = 3306
-	defaultTimeoutSec = 30
-	maxTimeoutSec     = 120
-	maxRows           = 1000
-	maxValueLen       = 200
+	defaultPort           = 3306
+	defaultTimeoutSec     = 30
+	maxTimeoutSec         = 120
+	defaultMaxRows        = 1000
+	hardMaxRows           = 10000
+	defaultMaxColumns     = 100
+	hardMaxColumns        = 1000
+	defaultMaxValueChars  = 200
+	hardMaxValueChars     = 10000
+	defaultMaxOutputChars = 100000
+	hardMaxOutputChars    = 1000000
 )
 
 type MySQLInput struct {
-	Host       string `json:"host" jsonschema:"MySQL server hostname or IP address,required"`
-	Port       interface{} `json:"port,omitempty" jsonschema:"MySQL port number. Default: 3306"`
-	User       string `json:"user" jsonschema:"MySQL username,required"`
-	Password   string `json:"password,omitempty" jsonschema:"Password for authentication"`
-	Database   string `json:"database,omitempty" jsonschema:"Database name to connect to"`
-	Query      string `json:"query" jsonschema:"SQL query to execute,required"`
-	TimeoutSec interface{} `json:"timeout_sec,omitempty" jsonschema:"Query timeout in seconds. Default: 30, Max: 120"`
+	Host           string      `json:"host" jsonschema:"MySQL server hostname or IP address,required"`
+	Port           interface{} `json:"port,omitempty" jsonschema:"MySQL port number. Default: 3306"`
+	User           string      `json:"user" jsonschema:"MySQL username,required"`
+	Password       string      `json:"password,omitempty" jsonschema:"Password for authentication"`
+	Database       string      `json:"database,omitempty" jsonschema:"Database name to connect to"`
+	Query          string      `json:"query" jsonschema:"SQL query to execute,required"`
+	TimeoutSec     interface{} `json:"timeout_sec,omitempty" jsonschema:"Query timeout in seconds. Default: 30, Max: 120"`
+	MaxRows        int         `json:"max_rows,omitempty" jsonschema:"Maximum rows returned by SELECT-like queries. Default: 1000, Max: 10000"`
+	MaxColumns     int         `json:"max_columns,omitempty" jsonschema:"Maximum columns displayed. Default: 100, Max: 1000"`
+	MaxValueChars  int         `json:"max_value_chars,omitempty" jsonschema:"Maximum characters displayed per cell. Default: 200, Max: 10000"`
+	MaxOutputChars int         `json:"max_output_chars,omitempty" jsonschema:"Maximum total returned text characters. Default: 100000, Max: 1000000"`
 }
 
 type MySQLOutput struct {
@@ -71,6 +81,30 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input MySQLInput) (*m
 	}
 	if timeoutSec > maxTimeoutSec {
 		return errorResult(fmt.Sprintf("timeout_sec exceeds maximum (%d)", maxTimeoutSec))
+	}
+	if input.MaxRows <= 0 {
+		input.MaxRows = defaultMaxRows
+	}
+	if input.MaxRows > hardMaxRows {
+		return errorResult(fmt.Sprintf("max_rows must be at most %d", hardMaxRows))
+	}
+	if input.MaxColumns <= 0 {
+		input.MaxColumns = defaultMaxColumns
+	}
+	if input.MaxColumns > hardMaxColumns {
+		return errorResult(fmt.Sprintf("max_columns must be at most %d", hardMaxColumns))
+	}
+	if input.MaxValueChars <= 0 {
+		input.MaxValueChars = defaultMaxValueChars
+	}
+	if input.MaxValueChars > hardMaxValueChars {
+		return errorResult(fmt.Sprintf("max_value_chars must be at most %d", hardMaxValueChars))
+	}
+	if input.MaxOutputChars <= 0 {
+		input.MaxOutputChars = defaultMaxOutputChars
+	}
+	if input.MaxOutputChars > hardMaxOutputChars {
+		return errorResult(fmt.Sprintf("max_output_chars must be at most %d", hardMaxOutputChars))
 	}
 
 	// SSRF policy: cloud metadata always blocked. Private IPs allowed by default
@@ -132,7 +166,10 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input MySQLInput) (*m
 
 	var result string
 	if isSelect {
-		result, err = executeQuery(opCtx, db, input.Query)
+		result, err = executeQuery(opCtx, db, input.Query, queryLimits{
+			maxRows: input.MaxRows, maxColumns: input.MaxColumns,
+			maxValueChars: input.MaxValueChars, maxOutputChars: input.MaxOutputChars,
+		})
 	} else {
 		result, err = executeExec(opCtx, db, input.Query)
 	}
@@ -151,7 +188,14 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input MySQLInput) (*m
 }
 
 // executeQuery runs a SELECT-like query and returns formatted table output.
-func executeQuery(ctx context.Context, db *sql.DB, query string) (string, error) {
+type queryLimits struct {
+	maxRows        int
+	maxColumns     int
+	maxValueChars  int
+	maxOutputChars int
+}
+
+func executeQuery(ctx context.Context, db *sql.DB, query string, limits queryLimits) (string, error) {
 	rows, err := db.QueryContext(ctx, query)
 	if err != nil {
 		return "", err
@@ -163,7 +207,16 @@ func executeQuery(ctx context.Context, db *sql.DB, query string) (string, error)
 		return "", fmt.Errorf("get columns: %w", err)
 	}
 
-	// Read all rows (up to maxRows)
+	displayColumns := len(cols)
+	if displayColumns > limits.maxColumns {
+		displayColumns = limits.maxColumns
+	}
+	displayCols := make([]string, displayColumns)
+	for i := range displayCols {
+		displayCols[i], _ = common.TruncateRunes(cols[i], limits.maxValueChars, "…")
+	}
+
+	// Read only enough formatted data to satisfy both the row and output budgets.
 	var allRows [][]string
 	scanDest := make([]interface{}, len(cols))
 	scanPtrs := make([]interface{}, len(cols))
@@ -173,8 +226,9 @@ func executeQuery(ctx context.Context, db *sql.DB, query string) (string, error)
 
 	rowCount := 0
 	truncated := false
+	estimatedChars := 0
 	for rows.Next() {
-		if rowCount >= maxRows {
+		if rowCount >= limits.maxRows {
 			truncated = true
 			break
 		}
@@ -182,11 +236,18 @@ func executeQuery(ctx context.Context, db *sql.DB, query string) (string, error)
 			return "", fmt.Errorf("scan row: %w", err)
 		}
 
-		row := make([]string, len(cols))
-		for i, v := range scanDest {
-			row[i] = formatValue(v)
+		row := make([]string, displayColumns)
+		rowChars := 1
+		for i := 0; i < displayColumns; i++ {
+			row[i] = formatValue(scanDest[i], limits.maxValueChars)
+			rowChars += utf8.RuneCountInString(row[i]) + 3
+		}
+		if rowCount > 0 && estimatedChars+rowChars > limits.maxOutputChars*2 {
+			truncated = true
+			break
 		}
 		allRows = append(allRows, row)
+		estimatedChars += rowChars
 		rowCount++
 	}
 	if err := rows.Err(); err != nil {
@@ -194,8 +255,8 @@ func executeQuery(ctx context.Context, db *sql.DB, query string) (string, error)
 	}
 
 	// Calculate column widths for alignment
-	widths := make([]int, len(cols))
-	for i, col := range cols {
+	widths := make([]int, len(displayCols))
+	for i, col := range displayCols {
 		widths[i] = utf8.RuneCountInString(col)
 	}
 	for _, row := range allRows {
@@ -207,45 +268,59 @@ func executeQuery(ctx context.Context, db *sql.DB, query string) (string, error)
 		}
 	}
 
-	// Build formatted table
+	// Build formatted table. Rows are appended atomically so a continuation
+	// hint never follows a half-written SQL row.
 	var sb strings.Builder
+	usedChars := 0
 
-	// Header
-	for i, col := range cols {
+	var header strings.Builder
+	for i, col := range displayCols {
 		if i > 0 {
-			sb.WriteString(" | ")
+			header.WriteString(" | ")
 		}
-		sb.WriteString(padRight(col, widths[i]))
+		header.WriteString(padRight(col, widths[i]))
 	}
-	sb.WriteString("\n")
+	header.WriteString("\n")
 
-	// Separator
+	var separator strings.Builder
 	for i, w := range widths {
 		if i > 0 {
-			sb.WriteString("-+-")
+			separator.WriteString("-+-")
 		}
-		sb.WriteString(strings.Repeat("-", w))
+		separator.WriteString(strings.Repeat("-", w))
 	}
-	sb.WriteString("\n")
+	separator.WriteString("\n")
+	common.AppendWithinRuneBudget(&sb, &usedChars, header.String(), limits.maxOutputChars)
+	common.AppendWithinRuneBudget(&sb, &usedChars, separator.String(), limits.maxOutputChars)
 
-	// Rows
+	displayedRows := 0
 	for _, row := range allRows {
+		var line strings.Builder
 		for i, val := range row {
 			if i > 0 {
-				sb.WriteString(" | ")
+				line.WriteString(" | ")
 			}
-			sb.WriteString(padRight(val, widths[i]))
+			line.WriteString(padRight(val, widths[i]))
 		}
-		sb.WriteString("\n")
+		line.WriteString("\n")
+		if !common.AppendWithinRuneBudget(&sb, &usedChars, line.String(), limits.maxOutputChars) {
+			truncated = true
+			break
+		}
+		displayedRows++
 	}
 
-	sb.WriteString(fmt.Sprintf("\n(%d rows", rowCount))
+	sb.WriteString(fmt.Sprintf("\n(%d rows displayed", displayedRows))
+	if len(cols) > displayColumns {
+		sb.WriteString(fmt.Sprintf(", %d/%d columns displayed", displayColumns, len(cols)))
+	}
 	if truncated {
-		sb.WriteString(fmt.Sprintf(", truncated at %d", maxRows))
+		sb.WriteString(", output truncated; use SQL LIMIT/OFFSET, select fewer columns, or adjust output limits")
 	}
 	sb.WriteString(")\n")
 
-	return sb.String(), nil
+	result, _ := common.TruncateRunes(sb.String(), limits.maxOutputChars, "\n[Output truncated; use SQL LIMIT/OFFSET or select fewer columns]")
+	return result, nil
 }
 
 // executeExec runs a non-SELECT query and returns affected rows info.
@@ -268,7 +343,7 @@ func executeExec(ctx context.Context, db *sql.DB, query string) (string, error) 
 }
 
 // formatValue converts a scanned SQL value to a display string.
-func formatValue(v interface{}) string {
+func formatValue(v interface{}, maxValueChars int) string {
 	if v == nil {
 		return "NULL"
 	}
@@ -284,10 +359,7 @@ func formatValue(v interface{}) string {
 	}
 
 	// Truncate long values
-	if utf8.RuneCountInString(s) > maxValueLen {
-		runes := []rune(s)
-		s = string(runes[:maxValueLen]) + "..."
-	}
+	s, _ = common.TruncateRunes(s, maxValueChars, "…")
 	return s
 }
 
@@ -317,7 +389,9 @@ Supports SELECT, INSERT, UPDATE, DELETE, SHOW, DESCRIBE, and other SQL statement
 SELECT-like queries return formatted table output with column alignment.
 Non-SELECT queries return affected row count and last insert ID.
 Connection is closed after each call (no session pooling).
-Max 1000 rows returned, long values truncated at 200 characters.`,
+Defaults: 1000 rows, 100 columns, 200 characters per cell, and 100000 total output characters.
+Use max_rows/max_columns/max_value_chars/max_output_chars to tune bounded output;
+use SQL LIMIT/OFFSET for deterministic paging.`,
 	}, Handle)
 }
 

@@ -3,6 +3,8 @@ package edit
 import (
 	"fmt"
 	"strings"
+
+	"agent-tool/common"
 )
 
 // ReplaceResult holds the result of a replacement operation.
@@ -18,10 +20,7 @@ type ReplaceResult struct {
 // If forceStyle is true, newStr's indentation is force-converted to fileStyle even on direct match.
 func Replace(content, oldStr, newStr string, replaceAll bool, fileStyle IndentStyle, forceStyle bool) ReplaceResult {
 	// Line ending normalization: convert \n in old_string to match the file's line endings
-	lineEnding := "\n"
-	if strings.Contains(content, "\r\n") {
-		lineEnding = "\r\n"
-	}
+	lineEnding := common.DetectLineEnding(content)
 
 	// Match line endings of old_string/new_string to the file
 	normalizedOld := normalizeLineEnding(oldStr, lineEnding)
@@ -345,11 +344,5 @@ func hasLeadingTabs(text string) bool {
 }
 
 func normalizeLineEnding(s, target string) string {
-	// First normalize all line endings to \n
-	s = strings.ReplaceAll(s, "\r\n", "\n")
-	// Convert to target line ending
-	if target == "\r\n" {
-		s = strings.ReplaceAll(s, "\n", "\r\n")
-	}
-	return s
+	return common.NormalizeLineEndings(s, target)
 }

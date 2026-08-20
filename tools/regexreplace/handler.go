@@ -21,11 +21,11 @@ import (
 var errMaxFiles = errors.New("max files reached")
 
 type RegexReplaceInput struct {
-	Pattern     string `json:"pattern" jsonschema:"Regular expression pattern to search for"`
-	Replacement string `json:"replacement" jsonschema:"Replacement string. Supports $1, $2 capture groups"`
-	Path        string `json:"path,omitempty" jsonschema:"File or directory to process (absolute path)"`
-	FilePath    string `json:"file_path,omitempty" jsonschema:"Alias for path"`
-	Glob        string `json:"glob,omitempty" jsonschema:"Glob pattern to filter files when path is a directory (e.g. *.go). Only used when path is a directory"`
+	Pattern     string      `json:"pattern" jsonschema:"Regular expression pattern to search for"`
+	Replacement string      `json:"replacement" jsonschema:"Replacement string. Supports $1, $2 capture groups"`
+	Path        string      `json:"path,omitempty" jsonschema:"File or directory to process (absolute path)"`
+	FilePath    string      `json:"file_path,omitempty" jsonschema:"Alias for path"`
+	Glob        string      `json:"glob,omitempty" jsonschema:"Glob pattern to filter files when path is a directory (e.g. *.go). Only used when path is a directory"`
 	IgnoreCase  interface{} `json:"ignore_case,omitempty" jsonschema:"Case insensitive search: true or false. Default: false"`
 	DryRun      interface{} `json:"dry_run,omitempty" jsonschema:"Preview changes without modifying files: true or false. Default: false"`
 	MaxFiles    interface{} `json:"max_files,omitempty" jsonschema:"Maximum number of files to process in directory mode. Default: 100"`
@@ -132,11 +132,11 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input RegexReplaceInp
 	sb.WriteString(common.TextGuardNotice(input.Replacement))
 
 	return &mcp.CallToolResult{
-		Content: []mcp.Content{&mcp.TextContent{Text: sb.String()}},
-	}, RegexReplaceOutput{
-		FilesChanged:      filesChanged,
-		TotalReplacements: totalReplacements,
-	}, nil
+			Content: []mcp.Content{&mcp.TextContent{Text: sb.String()}},
+		}, RegexReplaceOutput{
+			FilesChanged:      filesChanged,
+			TotalReplacements: totalReplacements,
+		}, nil
 }
 
 // fileResult holds the result of processing a single file.
@@ -176,7 +176,10 @@ func processFile(path string, re *regexp.Regexp, replacement string, dryRun bool
 		return result, nil
 	}
 
-	// Apply replacement
+	// MCP/JSON strings normally carry LF newlines. Normalize only the replacement
+	// so untouched bytes remain unchanged while inserted lines follow the file's
+	// dominant style (including CRLF files).
+	replacement = common.NormalizeLineEndings(replacement, common.DetectLineEnding(content))
 	newContent := re.ReplaceAllString(content, replacement)
 
 	// Write back with original encoding (atomic write via common.WriteFileWithEncoding)
@@ -255,6 +258,7 @@ func Register(server *mcp.Server) {
 		Name: "regexreplace",
 		Description: `Performs regex find-and-replace across files.
 Encoding-aware: preserves original file encoding.
+Converts replacement newlines to each file's dominant newline style.
 Supports single file or recursive directory mode with glob filtering.
 Supports capture group replacement ($1, $2, ${name}).
 Skips binary files. Use dry_run=true to preview changes.`,

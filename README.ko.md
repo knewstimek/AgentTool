@@ -31,13 +31,13 @@ Claude Code, Codex CLI, Cursor, Windsurf, Cline, Gemini CLI 및 모든 MCP 호�
 | **Edit** | 스마트 들여쓰기 + 인코딩 보존 문자열 치환 (dry_run 지원) | ✅ |
 | **Read** | 인코딩 인식 파일 읽기 (offset: 정수, `"N-M"` 범위 문자열, `[N,M]` 배열 지원). 이미지 파일(PNG/JPG/GIF/BMP/WebP/TIFF/ICO)은 base64 ImageContent로 반환 | ✅ |
 | **Write** | 인코딩 인식 파일 생성/덮어쓰기 | ✅ |
-| **Grep** | 인코딩 인식 정규식 내용 검색 (output_mode: content/files_with_matches/count, context 옵션 -B/-A/-C). 바이너리 파일 자동 제외 (확장자 + NUL 검사) | ✅ |
+| **Grep** | 인코딩 인식 정규식 내용 검색 (output_mode: content/files_with_matches/count, context 옵션 -B/-A/-C). 큰 결과 수도 허용하면서 줄별·전체 출력 예산으로 컨텍스트 폭주 방지. 바이너리 파일 자동 제외 (확장자 + NUL 검사) | ✅ |
 | **Glob** | `**` 재귀 지원 파일 패턴 매칭 | ✅ |
-| **ListDir** | 디렉토리 목록 (flat 또는 tree) | ✅ |
+| **ListDir** | 출력 제한·페이징 디렉토리 목록. max_entries + continuation cursor, 디렉토리/파일 필터, 이름 glob 필터, counts-only, flat/tree 지원 | ✅ |
 | **Diff** | 두 파일 비교 (unified diff 출력, 인코딩 인식) | ✅ |
 | **Patch** | unified diff 패치 적용 (dry_run 지원) | ✅ |
 | **Checksum** | 파일 해시 계산 (md5, sha1, sha256) | ✅ |
-| **FileInfo** | 파일 메타데이터 (크기, 인코딩, 줄바꿈, 들여쓰기, 줄 수) | ✅ |
+| **FileInfo** | 파일 메타데이터 (크기, 인코딩, 혼합 줄바꿈별 개수, 들여쓰기, 줄 수) | ✅ |
 | **Compress** | zip / tar.gz 압축 | ✅ |
 | **Decompress** | zip / tar.gz 해제 (Zip Slip/Bomb 보호) | ✅ |
 | **Backup** | 타임스탬프 zip 백업 (제외 패턴 지원). dry_run 미리보기 — 디렉토리별 집계, 패턴별 매칭 수, 큰 파일 목록 | ✅ |
@@ -64,20 +64,20 @@ Claude Code, Codex CLI, Cursor, Windsurf, Cline, Gemini CLI 및 모든 MCP 호�
 | **Copy** | 파일/디렉토리 복사. 원자적 쓰기 + 권한 보존. 재귀 디렉토리 복사. Windows 잠긴 파일 폴백 (실행 중인 exe/DLL 이름 변경 후 교체). dry_run 미리보기 | ✅ |
 | **Mkdir** | 디렉토리 생성. 8진수 권한 모드 지정 가능 (예: 0755). 기본 재귀 생성 (mkdir -p). dry_run 미리보기 | ✅ |
 | **MultiRead** | 여러 파일을 한 번에 읽기 (API 왕복 절약). 인코딩 인식, offset/limit 지원. 최대 50개 | ✅ |
-| **RegexReplace** | 파일/디렉토리 전체 정규식 찾기-바꾸기. 인코딩 보존, 캡처 그룹 ($1, $2) 지원. 바이너리 파일 자동 제외. dry_run 미리보기 | ✅ |
+| **RegexReplace** | 파일/디렉토리 전체 정규식 찾기-바꾸기. 인코딩과 dominant 줄바꿈 보존, 캡처 그룹 ($1, $2) 지원. 바이너리 파일 자동 제외. dry_run 미리보기 | ✅ |
 | **TLSCheck** | TLS 인증서 상세 조회 — 주체, 발급자, 만료일, SAN, TLS 버전, 암호화 스위트 | ✅ |
 | **DNSLookup** | DNS 레코드 조회 (A/AAAA/MX/CNAME/TXT/NS/SOA). DoH(DNS over HTTPS) 기본 활성 | ✅ |
-| **MySQL** | MySQL/MariaDB SQL 쿼리 실행. SELECT 결과 테이블 포맷, DML은 영향 행 수 반환. 최대 1000행 | ✅ |
+| **MySQL** | MySQL/MariaDB SQL 쿼리 실행. SELECT 결과의 행·열·셀·전체 출력 제한을 각각 설정 가능하고 DML은 영향 행 수 반환. 페이징은 SQL LIMIT/OFFSET 사용 | ✅ |
 | **Redis** | Redis 명령 실행. 타입별 포맷 출력. TLS 지원. 위험 명령(FLUSHALL, SHUTDOWN 등) 차단 | ✅ |
 | **PortCheck** | TCP 포트 열림 여부 확인. OPEN/CLOSED 상태 + 응답 시간 반환. 호스트명, IPv4, IPv6 지원 | ✅ |
 | **ExternalIP** | 외부(공인) IP 주소 조회. 복수 제공자 자동 fallback (ipify, ifconfig.me, icanhazip) | ✅ |
 | **SLOC** | 언어별 소스 코드 라인 수 집계. 70+ 언어 감지, 파일/언어별 분류, 빈 줄 통계, max_depth 제어 | ✅ |
-| **Debug** | DAP(Debug Adapter Protocol) 기반 인터랙티브 디버거. DAP 전체 커버리지: 브레이크포인트(소스/함수/데이터/명령어/예외), 스텝(정방향/역방향), 변수 조회/수정, 표현식 평가, 디스어셈블리, 메모리 읽기/쓰기, 콜스택, 모듈, goto, 자동완성. dlv(Go), debugpy(Python), codelldb(C/C++/Rust) 테스트 완료. 모든 DAP 호환 어댑터 사용 가능. Stdio/TCP 모드. 참고: vsdbg(Microsoft)는 VS Code 라이센스 필수로 단독 사용 불가 — codelldb 또는 netcoredbg를 대안으로 사용 | ✅ |
-| **Analyze** | 정적 바이너리 분석 및 리버스 엔지니어링. x86/x64/ARM/ARM64 디스어셈블리 (PE/ELF/Mach-O 멀티포맷, 자동 VA 표시, 심볼 주석, stop_at_ret). PE/ELF/Mach-O 파싱 (RWX 경고, 리소스, IAT VA 포함 임포트, 익스포트). xref (PE/ELF/Mach-O, x86/x64/ARM64/ARM32, 요약 통계). function_at (export/.pdata ground truth + call-graph/vtable/linear-sweep 발견, CFG 기반 경계 증명, 신뢰도 등급 exact/high/medium/low). call_graph (PE/ELF/Mach-O, x86/x64/ARM64/ARM32, 제어흐름 기반 엣지 수집). follow_ptr (포인터 체인 추적, 순환 참조 감지). rtti_dump (MSVC RTTI 파싱, 클래스명 디맹글링, pSelf 검증). vtable_scan (.rdata에서 RTTI가 있는 vtable 자동 발견). struct_layout (메모리 레이아웃 어노테이션). imphash, Rich 헤더, DWARF 디버그 정보, 문자열 추출(VA 포함), hexdump, 헥스 패턴 검색(섹션명 표시), 엔트로피 분석, 오버레이 탐지, 바이너리 비교. 글로벌 파일 크기 제한 없음 | ✅ |
+| **Debug** | DAP(Debug Adapter Protocol) 기반 인터랙티브 디버거. 변수값·전체 출력 제한과 variables/completions/modules/loaded_sources 페이징 지원. dlv(Go), debugpy(Python), codelldb(C/C++/Rust) 테스트 완료. 모든 DAP 호환 어댑터 사용 가능. Stdio/TCP 모드. 참고: vsdbg(Microsoft)는 VS Code 라이센스 필수로 단독 사용 불가 — codelldb 또는 netcoredbg를 대안으로 사용 | ✅ |
+| **Analyze** | 정적 바이너리 분석 및 리버스 엔지니어링. x86/x64/ARM/ARM64 디스어셈블리, PE/ELF/Mach-O 파싱과 PE import 출력 페이징·상한, xref, 함수/콜그래프, 포인터/RTTI/vtable/구조체 분석, imphash, Rich 헤더, DWARF, 문자열, hexdump, 패턴 검색, 엔트로피, 오버레이, 바이너리 비교. 글로벌 파일 크기 제한 없음 | ✅ |
 | **Memtool** | CheatEngine 스타일 프로세스 메모리 도구 — 메모리 값 검색/필터/읽기/쓰기, read_chain(base+offset 포인터 체인을 한 콜에 배치로 해소), 라이브 디스어셈블리(x86/x64/ARM/ARM64), 실행 취소, 구조체 패턴 검색, 포인터 스캔, 메모리 diff. 대용량 스캔을 위한 디스크 기반 스냅샷. 세션 관리 (유휴 타임아웃). Windows (ReadProcessMemory), Linux (/proc/pid/mem). Windows는 elevated 시 SeDebugPrivilege 자동 활성화, opt-in `force_dacl`로 같은 유저의 self-harden DACL 프로세스 우회(원본 DACL 원복) | ✅ |
 | **IPC** | AI 에이전트 세션 간 TCP 기반 프로세스 간 통신. 1:1 메시지 전달 (블로킹 수신). 프로토콜: [2바이트 타입][4바이트 길이][페이로드]. 작업: send, receive (타임아웃 블로킹), ping. 다른 PC 간 통신 가능. 최대 1MB 메시지, 300초 타임아웃 | ✅ |
 | **Wintool** | Windows GUI 자동화 -- 창/자식 컨트롤 검색/열거, 스크린샷 캡처(ImageContent PNG, PrintWindow), 클립보드 이미지 읽기, 텍스트 읽기/쓰기, 클릭, 타이핑, 원시 메시지 전송, 표시/숨기기/최소화/최대화, 이동/크기 변경, 닫기, 포커스. screenshot/clipboard 기본 ImageContent 반환 (save_path 옵션으로 파일 저장). AI 에이전트가 GUI 앱을 "보고" 조작할 수 있게 함. Windows 전용 | ✅ |
-| **CodeGraph** | tree-sitter(WASM) 기반 AST 코드 인덱싱. 11개 operation: index, find, callers, callees, symbols, methods, inherits, stats, importers, unused(데드코드), call_tree(재귀 호출 트리). C/C++, Python, Go, C#, Rust, Java 지원. .gitignore 존중(중첩), venv/vendor/third_party 자동 스킵. LLM 호출 없음, 토큰 비용 0 | ✅ |
+| **CodeGraph** | tree-sitter(WASM) 기반 AST 코드 인덱싱. 11개 operation, 대형 symbols/callees 결과의 offset 페이징과 전체 출력 제한 지원. C/C++, Python, Go, C#, Rust, Java 지원. .gitignore 존중(중첩), venv/vendor/third_party 자동 스킵. LLM 호출 없음, 토큰 비용 0 | ✅ |
 | **SetConfig** | 런타임 설정 변경 (인코딩, 파일 크기 제한, symlink, workspace 등) | ✅ |
 | **Help** | 에이전트용 사용법 안내 (인코딩, 들여쓰기, 트러블슈팅) | ✅ |
 
@@ -96,7 +96,13 @@ UTF-8로 강제 변환하지 않고, 원본 파일 인코딩을 유지합니다.
 - **감지 우선순위**: BOM → `.editorconfig` charset → BOM 없는 UTF-16 → 유효한 UTF-8 → chardet 자동 감지 → 폴백 인코딩
 - **지원 인코딩**: UTF-8, UTF-8 BOM, EUC-KR, Shift-JIS, ISO-8859-1, UTF-16 (LE/BE, BOM 유무 무관) 등
 - **ASCII 오탐 경고 없음**: 유효한 UTF-8 은 직접 검증하므로 순수 ASCII 파일에 신뢰도 경고가 뜨지 않음
-- **줄바꿈**: `\r\n` / `\n` 원본 유지
+- **줄바꿈**: LF, CRLF, CR, 혼합 파일을 구분하고 edit/regexreplace로 삽입되는 문자열은 파일의 dominant 줄바꿈을 사용
+
+### 토큰을 보호하는 디렉토리 목록
+`listdir`는 기본적으로 페이지당 500개까지만 반환하고, 항목이 더 있으면
+`next_cursor`를 제공합니다. `directories_only`, `files_only`, `name_pattern`
+(예: `A*`) 또는 여러 OR 패턴을 받는 `include`로 결과를 좁힐 수 있습니다.
+이름이 필요 없으면 `counts_only=true`로 파일/디렉토리 개수만 반환합니다.
 
 ## 빠른 시작
 
@@ -260,7 +266,7 @@ export AGENT_TOOL_FALLBACK_ENCODING=EUC-KR
 |----------|------|--------|
 | `fallback_encoding` | 자동 감지 실패 시 폴백 인코딩 | `UTF-8` |
 | `encoding_warnings` | 인코딩 감지 경고 표시 | `true` |
-| `max_file_size_mb` | read/edit/grep 최대 파일 크기 (MB) | `50` |
+| `max_file_size_mb` | read/edit/grep 최대 파일 크기 (MB) | `100` |
 | `allow_symlinks` | tar 압축 해제 시 symlink 생성 허용 | `false` |
 | `workspace` | glob 등에서 경로 미지정 시 사용할 기본 프로젝트 루트 | _(cwd)_ |
 | `allow_http_private` | webfetch/download/httpreq의 사설 IP 접근 허용 | `false` |
@@ -321,7 +327,7 @@ AI 코딩 에이전트와 함께 사용할 때 프롬프트 인젝션 위험에 
 - **Zip Slip 보호**: `../` 경로 조작을 통한 Path Traversal 차단 (zip, tar 모두)
 - **Zip Bomb 보호**: 단일 파일 1GB, 총 추출 크기 5GB 제한
 - **Symlink**: 기본 스킵 (보안). `set_config allow_symlinks=true`로 활성화 (tar만 지원). 활성화해도 outputDir 밖을 가리키는 symlink는 차단
-- **파일 크기 제한**: 설정 가능한 최대 파일 크기 (기본 50MB)로 OOM 방지. `set_config max_file_size_mb=N`으로 조절 가능
+- **파일 크기 제한**: 설정 가능한 최대 파일 크기 (기본 100MB)로 OOM 방지. `set_config max_file_size_mb=N`으로 조절 가능
 - **인코딩 안전성**: chardet는 64KB 샘플만 사용하여 메모리 효율적
 
 보안을 위해 AI 에이전트의 도구 호출을 승인 전에 검토하세요. 특히 SSH 명령, 외부 URL로의 HTTP 요청, 데이터베이스 쿼리에 주의가 필요합니다.
