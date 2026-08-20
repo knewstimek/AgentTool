@@ -251,6 +251,8 @@ Context: use before/after/context to include surrounding lines (like grep -B/-A/
 Defaults: max_results=100, max_line_chars=4000, max_output_chars=100000.
 max_results can be raised to 100000; returned text remains bounded by the line
 and total-output budgets. context/before/after accept at most 1000 lines.
+When additional output exists, has_more=true and the text includes a visible
+continuation hint. Grep has no cursor; narrow the query or raise the relevant limit.
 Directory search skips binary files (known extensions plus a NUL-byte content
 sniff), so databases like .codegraph.db no longer flood results with page
 fragments. UTF-16 and other encoded text is still searched. Passing a binary

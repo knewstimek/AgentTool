@@ -31,7 +31,7 @@ Claude Code, Codex CLI, Cursor, Windsurf, Cline, Gemini CLI 및 모든 MCP 호�
 | **Edit** | 스마트 들여쓰기 + 인코딩 보존 문자열 치환 (dry_run 지원) | ✅ |
 | **Read** | 인코딩 인식 파일 읽기 (offset: 정수, `"N-M"` 범위 문자열, `[N,M]` 배열 지원). 이미지 파일(PNG/JPG/GIF/BMP/WebP/TIFF/ICO)은 base64 ImageContent로 반환 | ✅ |
 | **Write** | 인코딩 인식 파일 생성/덮어쓰기 | ✅ |
-| **Grep** | 인코딩 인식 정규식 내용 검색 (output_mode: content/files_with_matches/count, context 옵션 -B/-A/-C). 큰 결과 수도 허용하면서 줄별·전체 출력 예산으로 컨텍스트 폭주 방지. 바이너리 파일 자동 제외 (확장자 + NUL 검사) | ✅ |
+| **Grep** | 인코딩 인식 정규식 내용 검색 (output_mode: content/files_with_matches/count, context 옵션 -B/-A/-C). 큰 결과 수도 허용하면서 줄별·전체 출력 예산으로 컨텍스트 폭주 방지. 정확한 `has_more` 메타데이터와 텍스트 안내로 미완료 결과 표시. 바이너리 파일 자동 제외 (확장자 + NUL 검사) | ✅ |
 | **Glob** | `**` 재귀 지원 파일 패턴 매칭 | ✅ |
 | **ListDir** | 출력 제한·페이징 디렉토리 목록. max_entries + continuation cursor, 디렉토리/파일 필터, 이름 glob 필터, counts-only, flat/tree 지원 | ✅ |
 | **Diff** | 두 파일 비교 (unified diff 출력, 인코딩 인식) | ✅ |

@@ -76,3 +76,59 @@ func TestSearchFileStopsBuildingContextAtOutputBudget(t *testing.T) {
 		t.Fatalf("search accumulated too much output: chars=%d lines=%d", result.displayChars, len(result.matches))
 	}
 }
+
+func TestHandleReportsExactHasMoreBoundaryToMCP(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		content string
+		hasMore bool
+	}{
+		{name: "exact limit", content: "match one\nmatch two\n", hasMore: false},
+		{name: "one beyond limit", content: "match one\nmatch two\nmatch three\n", hasMore: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "matches.txt")
+			if err := os.WriteFile(path, []byte(tc.content), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			result, out, err := Handle(context.Background(), nil, GrepInput{
+				Pattern: "match", Path: path, MaxResults: 2, MaxOutputChars: 10000,
+			})
+			if err != nil || result.IsError {
+				t.Fatalf("grep failed: err=%v result=%+v", err, result)
+			}
+			if out.HasMore != tc.hasMore || out.LimitReached != tc.hasMore {
+				t.Fatalf("has_more=%v limit_reached=%v, want %v", out.HasMore, out.LimitReached, tc.hasMore)
+			}
+			metadata, ok := result.StructuredContent.(map[string]any)
+			if !ok || metadata["has_more"] != tc.hasMore {
+				t.Fatalf("MCP structured metadata = %#v", result.StructuredContent)
+			}
+			text := result.Content[0].(*mcp.TextContent).Text
+			if strings.Contains(text, "More grep results") != tc.hasMore {
+				t.Fatalf("visible continuation marker mismatch: %q", text)
+			}
+		})
+	}
+}
+
+func TestDirectoryHasMoreLooksPastExactFileBoundary(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("match\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "b.txt"), []byte("match\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, out, err := Handle(context.Background(), nil, GrepInput{
+		Pattern: "match", Path: dir, MaxResults: 1, MaxOutputChars: 10000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !out.HasMore {
+		t.Fatal("expected directory look-ahead to find a match in the next file")
+	}
+}

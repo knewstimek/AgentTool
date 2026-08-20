@@ -56,6 +56,7 @@ type GrepOutput struct {
 	ReturnedLines int      `json:"returned_lines"`
 	Truncated     bool     `json:"truncated"`
 	LimitReached  bool     `json:"limit_reached"`
+	HasMore       bool     `json:"has_more"`
 }
 
 // searchOpts holds computed search options passed to search functions.
@@ -181,6 +182,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input GrepInput) (*mc
 	hasLowConfidence := false
 	skippedBinary := 0
 	searchOutputTruncated := false
+	hasMore := false
 
 	if fi.IsDir() {
 		var dirResult searchDirResult
@@ -190,6 +192,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input GrepInput) (*mc
 		hasLowConfidence = dirResult.lowConfidenceCount > 0
 		skippedBinary = dirResult.skippedBinary
 		searchOutputTruncated = dirResult.outputTruncated
+		hasMore = dirResult.hasMore
 	} else {
 		var fileResult searchFileResult
 		fileResult, err = searchFile(input.Path, re, maxResults, opts)
@@ -197,6 +200,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input GrepInput) (*mc
 		matchCount = fileResult.matchCount
 		hasLowConfidence = fileResult.lowConfidence
 		searchOutputTruncated = fileResult.outputTruncated
+		hasMore = fileResult.hasMore
 	}
 
 	if err != nil {
@@ -237,15 +241,27 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input GrepInput) (*mc
 			"Results may be incomplete. Consider setting fallback_encoding via set_config tool " +
 			"or adding 'charset' to .editorconfig."
 	}
+	if hasMore {
+		text += fmt.Sprintf("\n[More grep results are available. Narrow path/pattern/context or raise max_results/max_output_chars (maximums: %d/%d).]", hardMaxResults, hardMaxOutputChars)
+	}
 	if outputTruncated {
 		text += fmt.Sprintf("\n[Output truncated at %d characters after %d displayed lines. Narrow path/pattern/context or raise max_output_chars (max %d).]", maxOutputChars, len(displayedMatches), hardMaxOutputChars)
 	}
 	text, finalTruncated := common.TruncateRunes(text, maxOutputChars, "\n[Output truncated]")
 	outputTruncated = outputTruncated || finalTruncated
 
+	out := GrepOutput{
+		Matches: displayedMatches, Count: matchCount, ReturnedLines: len(displayedMatches),
+		Truncated: outputTruncated, LimitReached: hasMore, HasMore: hasMore,
+	}
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: text}},
-	}, GrepOutput{Matches: displayedMatches, Count: matchCount, ReturnedLines: len(displayedMatches), Truncated: outputTruncated, LimitReached: matchCount >= maxResults || searchOutputTruncated}, nil
+		// Keep structured metadata compact instead of duplicating every match.
+		StructuredContent: map[string]any{
+			"count": matchCount, "returned_lines": len(displayedMatches),
+			"truncated": outputTruncated, "limit_reached": hasMore, "has_more": hasMore,
+		},
+	}, out, nil
 }
 
 // searchFileResult is the return value of searchFile.
@@ -255,6 +271,7 @@ type searchFileResult struct {
 	lowConfidence   bool // file with low encoding detection confidence
 	displayChars    int
 	outputTruncated bool
+	hasMore         bool
 }
 
 func searchFile(path string, re *regexp.Regexp, maxResults int, opts searchOpts) (searchFileResult, error) {
@@ -284,7 +301,9 @@ func searchFile(path string, re *regexp.Regexp, maxResults int, opts searchOpts)
 		scanner := bufio.NewScanner(strings.NewReader(content))
 		for scanner.Scan() {
 			if re.MatchString(scanner.Text()) {
-				appendDisplay(path)
+				if !appendDisplay(path) {
+					result.hasMore = true
+				}
 				result.matchCount = 1
 				return result, nil
 			}
@@ -310,7 +329,9 @@ func searchFile(path string, re *regexp.Regexp, maxResults int, opts searchOpts)
 	// count mode: return "path:count"
 	if opts.outputMode == "count" {
 		if len(matchIndices) > 0 {
-			appendDisplay(fmt.Sprintf("%s:%d", path, len(matchIndices)))
+			if !appendDisplay(fmt.Sprintf("%s:%d", path, len(matchIndices))) {
+				result.hasMore = true
+			}
 			result.matchCount = 1 // 1 file entry
 		}
 		return result, nil
@@ -336,9 +357,11 @@ func searchFile(path string, re *regexp.Regexp, maxResults int, opts searchOpts)
 	if opts.before == 0 && opts.after == 0 {
 		for _, idx := range matchIndices {
 			if result.matchCount >= maxResults {
+				result.hasMore = true
 				break
 			}
 			if !appendDisplay(fmtMatch(idx+1, lines[idx])) {
+				result.hasMore = true
 				break
 			}
 			result.matchCount++
@@ -378,6 +401,7 @@ func searchFile(path string, re *regexp.Regexp, maxResults int, opts searchOpts)
 			ranges = append(ranges, lineRange{start, end})
 		}
 	}
+	result.hasMore = used < len(matchIndices)
 
 	// Format output: match lines use ":", context lines use "-" (grep convention)
 	for i, r := range ranges {
@@ -398,6 +422,7 @@ func searchFile(path string, re *regexp.Regexp, maxResults int, opts searchOpts)
 			}
 		}
 		if result.outputTruncated {
+			result.hasMore = true
 			break
 		}
 	}
@@ -413,6 +438,7 @@ type searchDirResult struct {
 	skippedBinary      int // binary files not searched
 	displayChars       int
 	outputTruncated    bool
+	hasMore            bool
 }
 
 func searchDir(dir, globPattern string, re *regexp.Regexp, maxResults int, opts searchOpts, recursive bool) (searchDirResult, error) {
@@ -454,13 +480,24 @@ func searchDir(dir, globPattern string, re *regexp.Regexp, maxResults int, opts 
 
 		remaining := maxResults - result.matchCount
 		if remaining <= 0 {
-			return errMaxResults
+			// The result cap is full, but keep walking until one additional
+			// match is found so has_more is exact at the boundary.
+			probeOpts := opts
+			probeOpts.before, probeOpts.after = 0, 0
+			probeOpts.maxOutputChars = hardMaxOutputChars
+			probe, probeErr := searchFile(path, re, 1, probeOpts)
+			if probeErr == nil && probe.matchCount > 0 {
+				result.hasMore = true
+				return errMaxResults
+			}
+			return nil
 		}
 
 		fileOpts := opts
 		fileOpts.maxOutputChars -= result.displayChars
 		if fileOpts.maxOutputChars <= 0 {
 			result.outputTruncated = true
+			result.hasMore = true
 			return errMaxOutput
 		}
 		fileResult, err := searchFile(path, re, remaining, fileOpts)
@@ -475,10 +512,11 @@ func searchDir(dir, globPattern string, re *regexp.Regexp, maxResults int, opts 
 		}
 		if fileResult.outputTruncated {
 			result.outputTruncated = true
+			result.hasMore = true
 			return errMaxOutput
 		}
-
-		if result.matchCount >= maxResults {
+		if fileResult.hasMore {
+			result.hasMore = true
 			return errMaxResults
 		}
 		return nil
@@ -499,7 +537,8 @@ Can search a single file or recursively search a directory.
 Output modes: content (default, matching lines), files_with_matches (paths only), count (match counts).
 Context: use before/after/context to include surrounding lines (like grep -B/-A/-C).
 Large result sets stay usable: max_results supports up to 100000, while max_line_chars
-and max_output_chars bound the text returned to the agent.
+and max_output_chars bound the text returned to the agent. has_more and a visible
+continuation hint report when additional grep output exists.
 Directory search skips binary files (extension list + NUL-byte sniff); pass a binary file
 directly as path to search it anyway.`,
 	}, Handle)
