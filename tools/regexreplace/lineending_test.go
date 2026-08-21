@@ -58,25 +58,39 @@ func TestHandleUsesPerMatchLineEndings(t *testing.T) {
 	}
 }
 
-// A file with no newline of its own still needs the replacement's newlines
-// converted -- to the default, not left as whatever the agent sent.
-func TestHandleNormalizesReplacementInNewlineFreeFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "oneline.txt")
-	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	result, _, err := Handle(context.Background(), nil, RegexReplaceInput{
-		Path: path, Pattern: "x", Replacement: "a\r\nb",
-	})
-	if err != nil || result.IsError {
-		t.Fatalf("Handle() failed: result=%+v err=%v", result, err)
-	}
-	got, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != "a\nb" {
-		t.Fatalf("file bytes = %q, want %q", got, "a\nb")
+// In a file with no newline of its own there is no region to follow, so a
+// replacement carrying the LF that JSON transport imposes is still converted to
+// the default. A replacement carrying an explicit CR is not: nobody types \r by
+// accident, and rewriting it would be the same overreach as the bug this whole
+// change fixes.
+func TestHandleReplacementInNewlineFreeFile(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		replacement string
+		want        string
+	}{
+		{"incidental LF is normalized", "a\nb", "a\nb"},
+		{"explicit CR is kept", "a\r\nb", "a\r\nb"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "oneline.txt")
+			if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			result, _, err := Handle(context.Background(), nil, RegexReplaceInput{
+				Path: path, Pattern: "x", Replacement: tc.replacement,
+			})
+			if err != nil || result.IsError {
+				t.Fatalf("Handle() failed: result=%+v err=%v", result, err)
+			}
+			got, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != tc.want {
+				t.Fatalf("file bytes = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -118,6 +132,50 @@ func TestHandleExplainsCRLFMissOnlyWhenCRLFWasSeen(t *testing.T) {
 			text := result.Content[0].(*mcp.TextContent).Text
 			if got := strings.Contains(text, "CRLF line endings"); got != tc.wantHint {
 				t.Fatalf("hint present=%v, want %v: %q", got, tc.wantHint, text)
+			}
+		})
+	}
+}
+
+// Converting line endings must not be undone by the region normalization that
+// exists for ordinary replacements -- otherwise the tool reports replacements
+// while leaving the file byte-identical.
+func TestHandleLineEndingConversionSurvives(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		pattern     string
+		replacement string
+		in          string
+		want        string
+	}{
+		{"CRLF to LF", `\r\n`, "\n", "a\r\nb\r\n", "a\nb\n"},
+		{"LF to CRLF", `\n`, "\r\n", "a\nb\n", "a\r\nb\r\n"},
+		{"CR to LF", `\r`, "\n", "a\rb\r", "a\nb\n"},
+		// The defensive forms this tool recommends for matching either style
+		// are NOT conversions: the replacement still follows the region.
+		{"optional CR keeps region", `x\r?\n`, "y\n", "A\r\nx\r\nB\n", "A\r\ny\r\nB\n"},
+		{"alternation keeps region", `x(?:\r\n|\n)`, "y\n", "A\r\nx\r\nB\n", "A\r\ny\r\nB\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "f.txt")
+			if err := os.WriteFile(path, []byte(tc.in), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			result, out, err := Handle(context.Background(), nil, RegexReplaceInput{
+				Path: path, Pattern: tc.pattern, Replacement: tc.replacement,
+			})
+			if err != nil || result.IsError {
+				t.Fatalf("Handle() failed: result=%+v err=%v", result, err)
+			}
+			if out.TotalReplacements == 0 {
+				t.Fatal("pattern did not match")
+			}
+			got, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != tc.want {
+				t.Fatalf("file bytes = %q, want %q", got, tc.want)
 			}
 		})
 	}

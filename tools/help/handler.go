@@ -470,8 +470,12 @@ Regex find-and-replace in files or across directories.
 Supports capture groups ($1, $2, ${name}) in replacement strings.
 Encoding-aware: preserves original file encoding.
 Replacement newlines follow the newline style of the region each match sits in,
-so mixed CRLF/LF files are not rewritten. The pattern side is matched against raw
-bytes: use \r?\n to match a line ending portably.
+so mixed CRLF/LF files are not rewritten. Converting line endings on purpose is
+the exception: a pattern that requires a CR ("\r\n") or a replacement containing
+one is written verbatim, so CRLF <-> LF conversion works.
+The pattern side is matched against decoded text with its newlines intact: use
+\r?\n for a line break and (?m) with \r?$ for end-of-line, or a CRLF file will
+not match. When nothing matches, the result says how many scanned files use CRLF.
 Skips binary files by extension and NUL-byte content sniff, so an on-disk
 index or compiled artifact is never rewritten.
 Atomic write for each modified file.

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"regexp/syntax"
 	"strings"
 
 	"agent-tool/common"
@@ -143,6 +144,60 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input RegexReplaceInp
 		}, nil
 }
 
+// deliberateLineEndingWork reports whether the caller is converting line
+// endings rather than editing text that happens to span lines. Those two need
+// opposite handling of the replacement: ordinary text must follow the region it
+// lands in, while a conversion must reach disk exactly as written -- normalizing
+// "\r\n" -> "\n" back to the region puts the CR straight back and reports
+// replacements that changed nothing.
+//
+// An explicit CR in the replacement states which bytes are wanted. In the
+// pattern only a MANDATORY CR counts: "\r\n" is a conversion, while the
+// defensive "\r?\n" and "(?:\r\n|\n)" forms recommended for matching either
+// style are not.
+func deliberateLineEndingWork(pattern, replacement string) bool {
+	if strings.ContainsRune(replacement, '\r') {
+		return true
+	}
+	parsed, err := syntax.Parse(pattern, syntax.Perl)
+	if err != nil {
+		return false
+	}
+	return requiresCR(parsed)
+}
+
+func requiresCR(re *syntax.Regexp) bool {
+	switch re.Op {
+	case syntax.OpLiteral:
+		for _, r := range re.Rune {
+			if r == '\r' {
+				return true
+			}
+		}
+		return false
+	case syntax.OpQuest, syntax.OpStar:
+		return false // optional, so the CR is not being targeted
+	case syntax.OpRepeat:
+		if re.Min == 0 {
+			return false
+		}
+	case syntax.OpAlternate:
+		// Every branch must require one, or the pattern is matching either style.
+		for _, sub := range re.Sub {
+			if !requiresCR(sub) {
+				return false
+			}
+		}
+		return true
+	}
+	for _, sub := range re.Sub {
+		if requiresCR(sub) {
+			return true
+		}
+	}
+	return false
+}
+
 // scanStats records what the scan saw, so a "no matches" answer can be
 // explained with evidence instead of a guess.
 type scanStats struct {
@@ -214,7 +269,12 @@ func processFile(path string, re *regexp.Regexp, replacement string, dryRun bool
 	// matches arrive in increasing order.
 	fixedRepl := replacement
 	var region *common.LineEndingCursor
-	if strings.ContainsAny(replacement, "\r\n") {
+	if deliberateLineEndingWork(re.String(), replacement) {
+		// Converting line endings is the one case where the replacement must
+		// reach disk exactly as written: normalizing it to the region would put
+		// back the very bytes the caller is replacing, reporting replacements
+		// that changed nothing.
+	} else if strings.ContainsAny(replacement, "\r\n") {
 		region = common.NewLineEndingCursor(content)
 		// A file with no newline of its own still needs the replacement
 		// converted -- to the default, which is what the cursor falls back to.
@@ -325,6 +385,7 @@ func Register(server *mcp.Server) {
 		Description: `Performs regex find-and-replace across files.
 Encoding-aware: preserves original file encoding.
 Replacement newlines follow the newline style of the region each match sits in, so mixed CRLF/LF files stay intact.
+Exception: converting line endings on purpose (pattern "\r\n" -> "\n", or a replacement containing \r) writes the replacement verbatim.
 The pattern is matched against decoded text WITHOUT newline normalization: use \r?\n for a line break and \r?$ with (?m) for end-of-line, or a CRLF file will not match.
 Supports single file or recursive directory mode with glob filtering.
 Supports capture group replacement ($1, $2, ${name}).
