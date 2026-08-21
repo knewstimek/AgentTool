@@ -178,11 +178,18 @@ func processFile(path string, re *regexp.Regexp, replacement string, dryRun bool
 	// file (a CRLF-era file with later LF-only edits) one dominant choice would
 	// push CRLF into the LF regions and vice versa.
 	dominant := common.DetectLineEnding(content)
+	// Nothing to convert when the replacement carries no newline, and nothing to
+	// look up when the file carries none either. Both checks keep a many-match
+	// run linear instead of scanning for a neighbouring newline per match.
+	perMatch := strings.ContainsAny(replacement, "\r\n") && strings.ContainsAny(content, "\r\n")
 	var sb strings.Builder
 	sb.Grow(len(content))
 	prev := 0
 	for i, mi := range matches {
-		local := common.NormalizeLineEndings(replacement, common.LineEndingAround(content, mi[0], mi[1], dominant))
+		local := replacement
+		if perMatch {
+			local = common.NormalizeLineEndings(replacement, common.LineEndingAround(content, mi[0], mi[1], dominant))
+		}
 		expanded := string(re.ExpandString(nil, local, content, mi))
 		if dryRun {
 			// Preview the first few matches exactly as they would be written.

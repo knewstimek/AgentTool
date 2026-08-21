@@ -1,6 +1,7 @@
 package edit
 
 import (
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -105,6 +106,51 @@ func TestReplaceIndentConversionOnCRLF(t *testing.T) {
 	}
 	if res.Content != "func f() {\r\n\t\tif y {\r\n\t\t\treturn 2\r\n\t\t}\r\n}\r\n" {
 		t.Fatalf("CRLF not preserved through indent conversion: %q", res.Content)
+	}
+}
+
+// An anchor covering one LF and one CRLF is a tie; the region the span starts
+// in wins, so the LF region is not converted to CRLF.
+func TestReplaceTieKeepsTheRegionTheSpanStartsIn(t *testing.T) {
+	res := Replace("a\nb\r\nc", "a\nb\n", "x\ny\n", false, tabStyle, false)
+	if !res.Applied {
+		t.Fatalf("not applied: %s", res.Message)
+	}
+	if res.Content != "x\ny\nc" {
+		t.Fatalf("tie resolved wrong: %q, want %q", res.Content, "x\ny\nc")
+	}
+}
+
+// A short old_string matching a large file must be rejected as ambiguous
+// without first materializing one offset per hit.
+func TestReplaceAmbiguousLargeFileStaysCheap(t *testing.T) {
+	content := strings.Repeat("a", 2_000_000)
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	res := Replace(content, "a", "b", false, tabStyle, false)
+	runtime.ReadMemStats(&after)
+	if res.Applied {
+		t.Fatal("2 million matches should be rejected as ambiguous")
+	}
+	if !strings.Contains(res.Message, "2000000 times") {
+		t.Fatalf("unexpected message: %s", res.Message)
+	}
+	// Collecting offsets first would allocate ~16 MB here.
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 4<<20 {
+		t.Fatalf("rejecting an ambiguous edit allocated %d bytes", allocated)
+	}
+}
+
+// A file with no newline at all must not be scanned for a neighbouring newline
+// on every match; that turns replace_all quadratic.
+func TestReplaceAllOnNewlineFreeFile(t *testing.T) {
+	const n = 300_000
+	res := Replace(strings.Repeat("x", n), "x", "y\nz", true, tabStyle, false)
+	if !res.Applied || res.MatchCount != n {
+		t.Fatalf("applied=%v count=%d msg=%s", res.Applied, res.MatchCount, res.Message)
+	}
+	if len(res.Content) != n*3 || !strings.HasPrefix(res.Content, "y\nzy\nz") {
+		t.Fatalf("unexpected content length %d", len(res.Content))
 	}
 }
 

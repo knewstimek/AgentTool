@@ -1,6 +1,9 @@
 package common
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestLineEndingMapOrigOffset(t *testing.T) {
 	content := "a\r\nbb\nccc\r\n"
@@ -60,6 +63,36 @@ func TestLineEndingMapLocalLineEnding(t *testing.T) {
 	}
 }
 
+func TestLineEndingMapOffsetQueriesGoingBackwards(t *testing.T) {
+	// The translation cursor only walks forward, so a lower query must restart
+	// it rather than return a stale offset.
+	content := "a\r\nbb\r\nccc\r\n"
+	m := NewLineEndingMap(content)
+	if got := m.OrigOffset(len(m.Norm)); got != len(content) {
+		t.Fatalf("end offset = %d, want %d", got, len(content))
+	}
+	if got := m.OrigOffset(0); got != 0 {
+		t.Fatalf("offset 0 after a forward walk = %d, want 0", got)
+	}
+	if got := m.OrigOffset(2); got != 3 {
+		t.Fatalf("offset 2 = %d, want 3", got)
+	}
+}
+
+func TestLineEndingAroundBoundedLookaround(t *testing.T) {
+	// No newline within the scan limit: the answer falls back instead of
+	// scanning the whole file, which is what keeps many-match runs linear.
+	content := strings.Repeat("x", localScanLimit*3) + "\r\n"
+	if got := LineEndingAround(content, 0, 1, "\n"); got != "\n" {
+		t.Fatalf("far-away newline should not be found, got %q", got)
+	}
+	// Within the limit it is still found.
+	near := strings.Repeat("x", 10) + "\r\n"
+	if got := LineEndingAround(near, 0, 1, "\n"); got != "\r\n" {
+		t.Fatalf("nearby CRLF not found, got %q", got)
+	}
+}
+
 func TestLineEndingAroundFallbacks(t *testing.T) {
 	if got := LineEndingAround("no newline here", 0, 5, "\r\n"); got != "\r\n" {
 		t.Fatalf("newline-free content should use the fallback, got %q", got)
@@ -73,7 +106,11 @@ func TestLineEndingAroundFallbacks(t *testing.T) {
 	if got := LineEndingAround("a\nb\nc\r\n", 0, 7, "\r\n"); got != "\n" {
 		t.Fatalf("majority LF span = %q, want LF", got)
 	}
+	// Ties go to the first ending seen, in either order.
 	if got := LineEndingAround("a\r\nb\n", 0, 5, "\n"); got != "\r\n" {
-		t.Fatalf("tie should keep the first ending seen, got %q", got)
+		t.Fatalf("CRLF-first tie = %q, want CRLF", got)
+	}
+	if got := LineEndingAround("a\nb\r\n", 0, 5, "\r\n"); got != "\n" {
+		t.Fatalf("LF-first tie = %q, want LF", got)
 	}
 }
