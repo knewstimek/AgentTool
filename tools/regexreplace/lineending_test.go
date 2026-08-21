@@ -4,7 +4,10 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func TestHandleNormalizesReplacementToCRLF(t *testing.T) {
@@ -74,6 +77,49 @@ func TestHandleNormalizesReplacementInNewlineFreeFile(t *testing.T) {
 	}
 	if string(got) != "a\nb" {
 		t.Fatalf("file bytes = %q, want %q", got, "a\nb")
+	}
+}
+
+// A miss caused by CRLF must be explained with evidence from the scan, and an
+// LF-only tree must NOT get the hint -- it would send the agent after a
+// line-ending theory that does not apply.
+func TestHandleExplainsCRLFMissOnlyWhenCRLFWasSeen(t *testing.T) {
+	dir := t.TempDir()
+	crlf := filepath.Join(dir, "crlf.txt")
+	lf := filepath.Join(dir, "lf.txt")
+	if err := os.WriteFile(crlf, []byte("foo\r\nbar\r\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lf, []byte("foo\nbar\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		path     string
+		pattern  string
+		wantHint bool
+	}{
+		{"CRLF file, end anchor", crlf, `(?m)^foo$`, true},
+		{"CRLF file, literal newline", crlf, `foo\nbar`, true},
+		{"LF file, end anchor", lf, `(?m)^nothing$`, false},
+		{"CRLF file, no newline construct", crlf, `zzz`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, out, err := Handle(context.Background(), nil, RegexReplaceInput{
+				Path: tc.path, Pattern: tc.pattern, Replacement: "X", DryRun: true,
+			})
+			if err != nil || result.IsError {
+				t.Fatalf("Handle() failed: result=%+v err=%v", result, err)
+			}
+			if out.TotalReplacements != 0 {
+				t.Fatalf("expected no matches, got %d", out.TotalReplacements)
+			}
+			text := result.Content[0].(*mcp.TextContent).Text
+			if got := strings.Contains(text, "CRLF line endings"); got != tc.wantHint {
+				t.Fatalf("hint present=%v, want %v: %q", got, tc.wantHint, text)
+			}
+		})
 	}
 }
 

@@ -76,11 +76,14 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input RegexReplaceInp
 	}
 
 	var results []fileResult
+	// Counted while scanning so a "no matches" answer can point at the real
+	// reason instead of guessing from the pattern text alone.
+	stats := &scanStats{}
 
 	if fi.IsDir() {
-		results, err = processDir(input.Path, input.Glob, re, input.Replacement, dryRun, maxFiles)
+		results, err = processDir(input.Path, input.Glob, re, input.Replacement, dryRun, maxFiles, stats)
 	} else {
-		result, singleErr := processFile(input.Path, re, input.Replacement, dryRun)
+		result, singleErr := processFile(input.Path, re, input.Replacement, dryRun, stats)
 		if singleErr != nil {
 			return errorResult(fmt.Sprintf("failed to process file: %v", singleErr))
 		}
@@ -118,17 +121,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input RegexReplaceInp
 
 	if filesChanged == 0 {
 		sb.WriteString("No matches found")
-		// The pattern side sees the decoded text with its newlines intact, so a
-		// literal \n never matches a CRLF ending and an end anchor lands before
-		// the CR, not after it. Say so rather than leaving the agent to guess
-		// why an obviously-present pattern missed.
-		multiline := strings.Contains(input.Pattern, "(?m)")
-		switch {
-		case strings.Contains(input.Pattern, `\n`) || strings.Contains(input.Pattern, "\n"):
-			sb.WriteString(". Note: a literal \\n does not match CRLF line endings -- use \\r?\\n if the file may be CRLF")
-		case multiline && strings.Contains(input.Pattern, "$"):
-			sb.WriteString(". Note: with (?m) the $ anchor sits before the CR of a CRLF ending -- use \\r?$ if the file may be CRLF")
-		}
+		sb.WriteString(crlfHint(input.Pattern, stats))
 	} else {
 		action := "Changed"
 		if dryRun {
@@ -150,6 +143,34 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input RegexReplaceInp
 		}, nil
 }
 
+// scanStats records what the scan saw, so a "no matches" answer can be
+// explained with evidence instead of a guess.
+type scanStats struct {
+	filesScanned int
+	crlfFiles    int
+}
+
+// crlfHint explains a miss that is really a line-ending mismatch. The pattern
+// is matched against decoded text with its newlines intact, so a literal \n
+// cannot match a CRLF ending and an end anchor lands before the CR, not after
+// it. Only emitted when a scanned file actually uses CRLF -- an agent should
+// not be sent chasing a line-ending theory on an LF-only tree.
+func crlfHint(pattern string, stats *scanStats) string {
+	if stats == nil || stats.crlfFiles == 0 {
+		return ""
+	}
+	where := fmt.Sprintf("%d of %d scanned file(s) use CRLF line endings", stats.crlfFiles, stats.filesScanned)
+	switch {
+	case strings.Contains(pattern, `\n`) || strings.Contains(pattern, "\n"):
+		return fmt.Sprintf(". %s, and a literal \\n does not match a CRLF ending -- use \\r?\\n", where)
+	case strings.Contains(pattern, "(?m)") && strings.Contains(pattern, "$"):
+		return fmt.Sprintf(". %s, and with (?m) the $ anchor sits before the CR -- use \\r?$", where)
+	case strings.Contains(pattern, "$"):
+		return fmt.Sprintf(". %s; note that $ matches at end of text, not end of line (add (?m)), and sits before the CR of a CRLF ending -- use \\r?$", where)
+	}
+	return ""
+}
+
 // fileResult holds the result of processing a single file.
 type fileResult struct {
 	path     string
@@ -159,11 +180,17 @@ type fileResult struct {
 
 // processFile applies regex replacement on a single file.
 // Returns nil result if no matches found.
-func processFile(path string, re *regexp.Regexp, replacement string, dryRun bool) (*fileResult, error) {
+func processFile(path string, re *regexp.Regexp, replacement string, dryRun bool, stats *scanStats) (*fileResult, error) {
 	hintCharset := edit.FindEditorConfigCharset(path)
 	content, encInfo, err := common.ReadFileWithEncoding(path, hintCharset)
 	if err != nil {
 		return nil, err
+	}
+	if stats != nil {
+		stats.filesScanned++
+		if strings.Contains(content, "\r\n") {
+			stats.crlfFiles++
+		}
 	}
 
 	// Submatch indices, not just match text: the replacement's line endings are
@@ -230,7 +257,7 @@ func processFile(path string, re *regexp.Regexp, replacement string, dryRun bool
 }
 
 // processDir walks a directory and applies regex replacement to matching files.
-func processDir(dir, globPattern string, re *regexp.Regexp, replacement string, dryRun bool, maxFiles int) ([]fileResult, error) {
+func processDir(dir, globPattern string, re *regexp.Regexp, replacement string, dryRun bool, maxFiles int, stats *scanStats) ([]fileResult, error) {
 	var results []fileResult
 	filesProcessed := 0
 
@@ -272,7 +299,7 @@ func processDir(dir, globPattern string, re *regexp.Regexp, replacement string, 
 			return nil
 		}
 
-		result, err := processFile(path, re, replacement, dryRun)
+		result, err := processFile(path, re, replacement, dryRun, stats)
 		if err != nil {
 			return nil // skip files that fail
 		}

@@ -80,14 +80,39 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input DiffInput) (*mc
 	diff := unifiedDiff(input.FileA, input.FileB, linesA, linesB, ctxLines)
 
 	// Lines are compared with their endings normalized, so files differing only
-	// in line endings produce an empty diff. Saying so beats handing back a
+	// in terminator bytes produce an empty diff. Saying so beats handing back a
 	// header with no hunks and letting the caller conclude nothing differs.
 	if !strings.Contains(diff, "@@") {
 		infoA := common.AnalyzeLineEndings(contentA)
 		infoB := common.AnalyzeLineEndings(contentB)
-		diff += fmt.Sprintf("\n(no content difference; line endings differ: file_a=%s (CRLF %d, LF %d, CR %d), file_b=%s (CRLF %d, LF %d, CR %d))",
-			infoA.Kind, infoA.CRLFCount, infoA.LFCount, infoA.CRCount,
-			infoB.Kind, infoB.CRLFCount, infoB.LFCount, infoB.CRCount)
+		var notes []string
+
+		// Kept separate from the newline form: this is what GNU diff prints as
+		// "\ No newline at end of file", and calling it a line-ending
+		// difference would point the caller at the wrong thing.
+		endsA := strings.HasSuffix(contentA, "\n")
+		endsB := strings.HasSuffix(contentB, "\n")
+		if endsA != endsB {
+			missing := "file_b"
+			if !endsA {
+				missing = "file_a"
+			}
+			notes = append(notes, missing+" has no newline at end of file")
+		}
+		// Only meaningful when both files have newlines at all: a file with
+		// none differs by the missing terminator above, not by its form.
+		bothHaveNewlines := infoA.CRLFCount+infoA.LFCount+infoA.CRCount > 0 &&
+			infoB.CRLFCount+infoB.LFCount+infoB.CRCount > 0
+		if bothHaveNewlines && (infoA.Kind != infoB.Kind ||
+			infoA.CRLFCount != infoB.CRLFCount || infoA.LFCount != infoB.LFCount || infoA.CRCount != infoB.CRCount) {
+			notes = append(notes, fmt.Sprintf("line endings differ: file_a=%s (CRLF %d, LF %d, CR %d), file_b=%s (CRLF %d, LF %d, CR %d)",
+				infoA.Kind, infoA.CRLFCount, infoA.LFCount, infoA.CRCount,
+				infoB.Kind, infoB.CRLFCount, infoB.LFCount, infoB.CRCount))
+		}
+		if len(notes) == 0 {
+			notes = append(notes, "the files differ only in bytes that do not form lines")
+		}
+		diff += "\n(no content difference; " + strings.Join(notes, "; ") + ")"
 	}
 
 	return &mcp.CallToolResult{

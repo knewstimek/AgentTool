@@ -257,7 +257,9 @@ Parameters: file_path, content
 ## grep
 Search file contents with regex. Encoding-aware.
 A CRLF line ending is treated as a terminator, not as content: "^foo$" matches
-in a CRLF file and displayed lines carry no stray CR.
+in a CRLF file and displayed lines carry no stray CR. A lone CR is NOT a line
+break (same as read and GNU grep), so a classic-Mac CR-only file is one line --
+use file_info to see which endings a file actually uses.
 Output modes: content (default, matching lines), files_with_matches (paths only), count (match counts).
 Context: use before/after/context to include surrounding lines (like grep -B/-A/-C).
 Defaults: max_results=100, max_line_chars=4000, max_output_chars=100000.
