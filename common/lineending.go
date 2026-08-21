@@ -102,10 +102,21 @@ func (c *LineEndingCursor) spanMajority(start, end int) string {
 				cr++
 			}
 		case '\n':
-			if lf == 0 {
-				lfAt = i
+			// A span starting on the LF half of a CRLF still sits in a CRLF
+			// region. Reaching here with a CR behind means that CR is outside
+			// the span -- one inside would have been consumed by the case above,
+			// which skips its LF.
+			if i > 0 && c.content[i-1] == '\r' {
+				if crlf == 0 {
+					crlfAt = i - 1
+				}
+				crlf++
+			} else {
+				if lf == 0 {
+					lfAt = i
+				}
+				lf++
 			}
-			lf++
 		}
 	}
 	if lf+crlf+cr == 0 {
@@ -137,9 +148,11 @@ func (c *LineEndingCursor) terminator(end int) string {
 	if c.foundPos == -1 {
 		return "" // an earlier scan already reached EOF without a newline
 	}
-	if c.foundPos >= end {
-		// The cached hit is the first newline at or after an earlier, smaller
-		// end, so nothing can sit between end and it.
+	// The cached hit is the first newline at or after an earlier, smaller end,
+	// so nothing can sit between end and it. Comparing against the scan
+	// position rather than the hit position also covers an empty span landing
+	// between a CR and its LF -- that newline still terminates the span.
+	if c.foundPos >= 0 && c.scan > end {
 		return c.foundKind
 	}
 	i := end

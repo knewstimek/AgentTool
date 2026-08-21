@@ -124,6 +124,32 @@ func TestLineEndingCursorSequentialQueries(t *testing.T) {
 	}
 }
 
+// A span can start on the LF half of a CRLF -- regexreplace matches raw offsets,
+// so a pattern like `\nb` lands exactly there. That LF is not a lone LF.
+func TestLineEndingAroundSpanStartingInsideCRLF(t *testing.T) {
+	content := "a\r\nb"
+	if got := LineEndingAround(content, 2, 3, "\n"); got != "\r\n" {
+		t.Fatalf("span on the LF half of a CRLF = %q, want CRLF", got)
+	}
+	// The CR half alone is still CRLF, via the forward pair check.
+	if got := LineEndingAround(content, 1, 2, "\n"); got != "\r\n" {
+		t.Fatalf("span on the CR half of a CRLF = %q, want CRLF", got)
+	}
+}
+
+// The terminator cache must key off the scan position, not the hit position, or
+// an empty span between a CR and its LF skips to the next newline -- a different
+// form here.
+func TestLineEndingCursorEmptySpanInsideCRLF(t *testing.T) {
+	c := NewLineEndingCursor("a\r\nb\nc")
+	if got := c.At(1, 1); got != "\r\n" {
+		t.Fatalf("empty span at the CR = %q, want CRLF", got)
+	}
+	if got := c.At(2, 2); got != "\r\n" {
+		t.Fatalf("empty span at the LF = %q, want CRLF", got)
+	}
+}
+
 // Ties are resolved by first appearance among the tied forms -- not by the
 // first newline in the span, which may belong to a losing form.
 func TestLineEndingAroundTieAmongMajorityForms(t *testing.T) {
