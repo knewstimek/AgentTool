@@ -118,11 +118,16 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input RegexReplaceInp
 
 	if filesChanged == 0 {
 		sb.WriteString("No matches found")
-		// The pattern side is matched against raw bytes, so a literal \n never
-		// matches a CRLF line ending. Say so rather than leaving the agent to
-		// guess why an obviously-present pattern missed.
-		if strings.Contains(input.Pattern, `\n`) || strings.Contains(input.Pattern, "\n") {
+		// The pattern side sees the decoded text with its newlines intact, so a
+		// literal \n never matches a CRLF ending and an end anchor lands before
+		// the CR, not after it. Say so rather than leaving the agent to guess
+		// why an obviously-present pattern missed.
+		multiline := strings.Contains(input.Pattern, "(?m)")
+		switch {
+		case strings.Contains(input.Pattern, `\n`) || strings.Contains(input.Pattern, "\n"):
 			sb.WriteString(". Note: a literal \\n does not match CRLF line endings -- use \\r?\\n if the file may be CRLF")
+		case multiline && strings.Contains(input.Pattern, "$"):
+			sb.WriteString(". Note: with (?m) the $ anchor sits before the CR of a CRLF ending -- use \\r?$ if the file may be CRLF")
 		}
 	} else {
 		action := "Changed"
@@ -292,7 +297,8 @@ func Register(server *mcp.Server) {
 		Name: "regexreplace",
 		Description: `Performs regex find-and-replace across files.
 Encoding-aware: preserves original file encoding.
-Converts replacement newlines to each file's dominant newline style.
+Replacement newlines follow the newline style of the region each match sits in, so mixed CRLF/LF files stay intact.
+The pattern is matched against decoded text WITHOUT newline normalization: use \r?\n for a line break and \r?$ with (?m) for end-of-line, or a CRLF file will not match.
 Supports single file or recursive directory mode with glob filtering.
 Supports capture group replacement ($1, $2, ${name}).
 Skips binary files. Use dry_run=true to preview changes.`,

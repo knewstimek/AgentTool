@@ -78,19 +78,14 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input PatchInput) (*m
 		return errorResult(fmt.Sprintf("failed to read file: %v", err))
 	}
 
-	// Normalize CRLF to LF
-	lineEnding := "\n"
-	if strings.Contains(content, "\r\n") {
-		lineEnding = "\r\n"
-		content = strings.ReplaceAll(content, "\r\n", "\n")
-	}
-
-	// Split into lines
-	lines := strings.Split(content, "\n")
-	// Handle trailing empty line
-	if len(lines) > 0 && lines[len(lines)-1] == "" {
-		lines = lines[:len(lines)-1]
-	}
+	// Each line keeps the exact bytes that terminated it instead of the file
+	// being normalized to one form and rebuilt. A file mixing CRLF and LF -- a
+	// CRLF-era file with later LF-only edits -- would otherwise have every line
+	// outside the hunks silently rewritten.
+	lines := splitKeepingTerminators(content)
+	origLineCount := len(lines)
+	dominant := common.DetectLineEnding(content)
+	endsWithNewline := strings.HasSuffix(content, "\n") || content == ""
 
 	// Apply hunks in reverse order — applying from the end prevents line number shifts
 	for i := len(hunks) - 1; i >= 0; i-- {
@@ -113,7 +108,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input PatchInput) (*m
 				if srcIdx >= len(lines) {
 					return errorResult(fmt.Sprintf("hunk %d: context mismatch at line %d (file has only %d lines)", i+1, srcIdx+1, len(lines)))
 				}
-				if hl.text != lines[srcIdx] {
+				if hl.text != lines[srcIdx].text {
 					return errorResult(fmt.Sprintf("hunk %d: context mismatch at line %d:\n  expected: %q\n  actual:   %q", i+1, srcIdx+1, hl.text, lines[srcIdx]))
 				}
 				srcIdx++
@@ -121,9 +116,12 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input PatchInput) (*m
 			}
 		}
 
-		// Apply substitution
-		var newLines []string
+		// Apply substitution. A line the patch introduces takes the ending of
+		// the line it replaces, falling back to the line it will precede and
+		// then to the file's dominant form -- never a file-wide rewrite.
+		var newLines []srcLine
 		srcIdx = startIdx
+		replacedTerm := ""
 		for _, hl := range h.lines {
 			switch hl.op {
 			case ' ':
@@ -132,38 +130,58 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input PatchInput) (*m
 				}
 				newLines = append(newLines, lines[srcIdx])
 				srcIdx++
+				replacedTerm = ""
 			case '-':
 				if srcIdx >= len(lines) {
 					return errorResult(fmt.Sprintf("hunk %d: index out of range at line %d during apply", i+1, srcIdx+1))
 				}
-				srcIdx++ // delete — skip
+				replacedTerm = lines[srcIdx].term
+				srcIdx++ // delete -- skip
 			case '+':
-				newLines = append(newLines, hl.text)
+				term := replacedTerm
+				if term == "" && srcIdx < len(lines) {
+					term = lines[srcIdx].term
+				}
+				if term == "" && srcIdx > 0 {
+					term = lines[srcIdx-1].term
+				}
+				if term == "" {
+					term = dominant
+				}
+				newLines = append(newLines, srcLine{text: hl.text, term: term})
 			}
 		}
 
 		// Replace lines (using actual consumed line count, not the header's srcCount)
-		result := make([]string, 0, len(lines)-srcConsumed+len(newLines))
+		result := make([]srcLine, 0, len(lines)-srcConsumed+len(newLines))
 		result = append(result, lines[:startIdx]...)
 		result = append(result, newLines...)
 		result = append(result, lines[startIdx+srcConsumed:]...)
 		lines = result
 	}
 
-	// Combine result
-	output := strings.Join(lines, "\n")
-	if output != "" {
-		output += "\n" // restore trailing newline
+	// Combine result, each line with the ending it came in with. Whether the
+	// file ends with a newline is a property of the original and is preserved:
+	// the old code appended one unconditionally.
+	var sb strings.Builder
+	sb.Grow(len(content))
+	for i, l := range lines {
+		sb.WriteString(l.text)
+		last := i == len(lines)-1
+		switch {
+		case last && !endsWithNewline:
+		case l.term != "":
+			sb.WriteString(l.term)
+		default:
+			// An unterminated line that is no longer last would otherwise
+			// swallow the line now following it.
+			sb.WriteString(dominant)
+		}
 	}
-
-	// Restore original line endings
-	if lineEnding == "\r\n" {
-		output = strings.ReplaceAll(output, "\n", "\r\n")
-	}
+	output := sb.String()
 
 	if common.FlexBool(input.DryRun) {
 		// Calculate line count change
-		origLineCount := len(strings.Split(content, "\n"))
 		newLineCount := len(lines)
 		delta := newLineCount - origLineCount
 		sign := "+"
@@ -191,6 +209,35 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input PatchInput) (*m
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: msg}},
 	}, PatchOutput{Result: msg}, nil
+}
+
+// srcLine is one line of the file plus the exact bytes that terminated it. The
+// last line carries an empty terminator when the file does not end with one.
+type srcLine struct {
+	text string
+	term string
+}
+
+// splitKeepingTerminators splits on LF while recording each line's own ending,
+// so lines outside the patched hunks are written back byte-identical.
+func splitKeepingTerminators(content string) []srcLine {
+	var out []srcLine
+	start := 0
+	for i := 0; i < len(content); i++ {
+		if content[i] != '\n' {
+			continue
+		}
+		text, term := content[start:i], "\n"
+		if i > start && content[i-1] == '\r' {
+			text, term = content[start:i-1], "\r\n"
+		}
+		out = append(out, srcLine{text: text, term: term})
+		start = i + 1
+	}
+	if start < len(content) {
+		out = append(out, srcLine{text: content[start:]})
+	}
+	return out
 }
 
 // addedLines extracts the "+" lines of a unified diff -- the text the patch

@@ -316,6 +316,14 @@ func searchFile(path string, re *regexp.Regexp, maxResults int, opts searchOpts)
 	if len(lines) > 0 && lines[len(lines)-1] == "" {
 		lines = lines[:len(lines)-1]
 	}
+	// Drop the CR of a CRLF line ending. It is a terminator, not content: left
+	// in, an end-anchored pattern ("^foo$") never matches a CRLF file, and the
+	// stray CR would garble the displayed line. files_with_matches uses
+	// bufio.ScanLines, which already strips it -- without this the two modes
+	// disagree about the same file.
+	for i, line := range lines {
+		lines[i] = strings.TrimSuffix(line, "\r")
+	}
 
 	// Find all matching line indices
 	var matchIndices []int

@@ -234,6 +234,13 @@ you can check them: a string composed as \uXXXX escapes hides its own typos
 the only way to spot that. U+FFFD in the input is reported as corruption.
 Parameters: file_path, old_string, new_string, replace_all, dry_run, indent_style
 
+## multiedit
+Apply several old_string -> new_string replacements to one file in a single call.
+Edits run in order, each seeing the previous result, and the whole batch is
+atomic: if one edit fails the file is left untouched. Matching, indentation and
+line-ending behavior are identical to edit.
+Parameters: file_path, edits (array of old_string/new_string/replace_all), dry_run
+
 ## read
 Read a file with encoding auto-detection. Returns content with line numbers.
 Image files (PNG, JPG, GIF, BMP, WebP, TIFF, ICO) are returned as base64 ImageContent.
@@ -249,6 +256,8 @@ Parameters: file_path, content
 
 ## grep
 Search file contents with regex. Encoding-aware.
+A CRLF line ending is treated as a terminator, not as content: "^foo$" matches
+in a CRLF file and displayed lines carry no stray CR.
 Output modes: content (default, matching lines), files_with_matches (paths only), count (match counts).
 Context: use before/after/context to include surrounding lines (like grep -B/-A/-C).
 Defaults: max_results=100, max_line_chars=4000, max_output_chars=100000.
@@ -316,10 +325,15 @@ Parameters: file_path
 
 ## diff
 Compare two files and output unified diff. Encoding-aware.
+Lines are compared with their endings normalized, so files differing only in
+line endings report that explicitly instead of an empty diff.
 Parameters: file_a, file_b, context_lines (default 3)
 
 ## patch
 Apply unified diff patch to a file. Verifies context lines before applying.
+Each line keeps its own ending, so a file mixing CRLF and LF is not rewritten,
+and a file without a trailing newline does not gain one. Lines the patch adds
+take the ending of the line they replace.
 Parameters: file_path, patch, dry_run
 
 ## delete

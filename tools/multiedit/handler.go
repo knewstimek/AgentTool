@@ -143,7 +143,7 @@ func Register(server *mcp.Server) {
 Edits are applied sequentially in order; each edit sees the result of the previous one.
 Atomic: if any edit fails, the file is not modified at all.
 Encoding-aware: preserves original file encoding (UTF-8, EUC-KR, Shift-JIS, etc.).
-Converts inserted newlines to the file's dominant newline style.
+Line-ending aware: old_string matches whether the file uses CRLF or LF, and inserted newlines follow the region being edited (mixed-newline files stay intact).
 Accepts "path" as alias for "file_path".
 Use dry_run=true to preview all changes without modifying the file.`,
 	}, Handle)

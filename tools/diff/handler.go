@@ -79,6 +79,17 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input DiffInput) (*mc
 
 	diff := unifiedDiff(input.FileA, input.FileB, linesA, linesB, ctxLines)
 
+	// Lines are compared with their endings normalized, so files differing only
+	// in line endings produce an empty diff. Saying so beats handing back a
+	// header with no hunks and letting the caller conclude nothing differs.
+	if !strings.Contains(diff, "@@") {
+		infoA := common.AnalyzeLineEndings(contentA)
+		infoB := common.AnalyzeLineEndings(contentB)
+		diff += fmt.Sprintf("\n(no content difference; line endings differ: file_a=%s (CRLF %d, LF %d, CR %d), file_b=%s (CRLF %d, LF %d, CR %d))",
+			infoA.Kind, infoA.CRLFCount, infoA.LFCount, infoA.CRCount,
+			infoB.Kind, infoB.CRLFCount, infoB.LFCount, infoB.CRCount)
+	}
+
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: diff}},
 	}, DiffOutput{Result: diff}, nil
