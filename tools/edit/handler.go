@@ -147,7 +147,7 @@ func Register(server *mcp.Server) {
 		Description: `Replaces old_string with new_string in the specified file.
 Smart indentation: auto-converts between tabs and spaces to match the file's style.
 Encoding-aware: preserves original file encoding (UTF-8, EUC-KR, Shift-JIS, UTF-8 BOM, etc.).
-Converts new_string newlines to the file's dominant newline style.
+Line-ending aware: matches old_string regardless of CRLF/LF, and inserted lines follow the newline style of the region being edited (mixed-newline files stay intact).
 Reads .editorconfig for indentation settings.
 Use dry_run=true to preview changes without modifying the file.`,
 	}, Handle)
@@ -180,11 +180,23 @@ func parseIndentStyleOption(s string) (IndentStyle, error) {
 	return IndentStyle{}, fmt.Errorf("expected 'tabs', 'spaces', or 'spaces-N' (e.g. spaces-4), got '%s'", s)
 }
 
+// splitDisplayLines splits on LF and strips a trailing CR so CRLF and LF files
+// render identically in a preview.
+func splitDisplayLines(s string) []string {
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimSuffix(line, "\r")
+	}
+	return lines
+}
+
 // dryRunPreview shows the diff between before and after in a simple diff format.
 // Includes 3 lines of context around changed lines.
 func dryRunPreview(before, after, filePath string) string {
-	oldLines := strings.Split(before, "\n")
-	newLines := strings.Split(after, "\n")
+	// Split on LF and drop the CR: a preview line still carrying its CR makes
+	// the terminal overwrite the diff marker of the next line.
+	oldLines := splitDisplayLines(before)
+	newLines := splitDisplayLines(after)
 
 	// Find changed range (remove common prefix and suffix)
 	prefixLen := 0

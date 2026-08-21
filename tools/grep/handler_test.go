@@ -101,11 +101,15 @@ func TestHandleReportsExactHasMoreBoundaryToMCP(t *testing.T) {
 			if out.HasMore != tc.hasMore || out.LimitReached != tc.hasMore {
 				t.Fatalf("has_more=%v limit_reached=%v, want %v", out.HasMore, out.LimitReached, tc.hasMore)
 			}
-			metadata, ok := result.StructuredContent.(map[string]any)
-			if !ok || metadata["has_more"] != tc.hasMore {
-				t.Fatalf("MCP structured metadata = %#v", result.StructuredContent)
+			// Structured output would be rendered instead of the text by clients
+			// that support it, hiding every matching line.
+			if result.StructuredContent != nil {
+				t.Fatalf("grep must return text only, got structured %#v", result.StructuredContent)
 			}
 			text := result.Content[0].(*mcp.TextContent).Text
+			if !strings.Contains(text, "match one") {
+				t.Fatalf("matching lines missing from the text the agent sees: %q", text)
+			}
 			if strings.Contains(text, "More grep results") != tc.hasMore {
 				t.Fatalf("visible continuation marker mismatch: %q", text)
 			}

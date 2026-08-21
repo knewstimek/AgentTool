@@ -118,6 +118,12 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input RegexReplaceInp
 
 	if filesChanged == 0 {
 		sb.WriteString("No matches found")
+		// The pattern side is matched against raw bytes, so a literal \n never
+		// matches a CRLF line ending. Say so rather than leaving the agent to
+		// guess why an obviously-present pattern missed.
+		if strings.Contains(input.Pattern, `\n`) || strings.Contains(input.Pattern, "\n") {
+			sb.WriteString(". Note: a literal \\n does not match CRLF line endings -- use \\r?\\n if the file may be CRLF")
+		}
 	} else {
 		action := "Changed"
 		if dryRun {
@@ -155,8 +161,9 @@ func processFile(path string, re *regexp.Regexp, replacement string, dryRun bool
 		return nil, err
 	}
 
-	// Count matches first
-	matches := re.FindAllStringIndex(content, -1)
+	// Submatch indices, not just match text: the replacement's line endings are
+	// decided per match position, and $1 expansion needs the capture offsets.
+	matches := re.FindAllStringSubmatchIndex(content, -1)
 	if len(matches) == 0 {
 		return nil, nil
 	}
@@ -166,24 +173,35 @@ func processFile(path string, re *regexp.Regexp, replacement string, dryRun bool
 		count: len(matches),
 	}
 
-	if dryRun {
-		// Build previews: show matched text → replacement for first few matches
-		allMatches := re.FindAllString(content, 5)
-		for _, m := range allMatches {
-			replaced := re.ReplaceAllString(m, replacement)
-			result.previews = append(result.previews, fmt.Sprintf("%q → %q", m, replaced))
+	// MCP/JSON strings normally carry LF newlines, so the replacement's newlines
+	// are converted to the file's. Per match rather than per file: in a mixed
+	// file (a CRLF-era file with later LF-only edits) one dominant choice would
+	// push CRLF into the LF regions and vice versa.
+	dominant := common.DetectLineEnding(content)
+	var sb strings.Builder
+	sb.Grow(len(content))
+	prev := 0
+	for i, mi := range matches {
+		local := common.NormalizeLineEndings(replacement, common.LineEndingAround(content, mi[0], mi[1], dominant))
+		expanded := string(re.ExpandString(nil, local, content, mi))
+		if dryRun {
+			// Preview the first few matches exactly as they would be written.
+			if i < 5 {
+				result.previews = append(result.previews, fmt.Sprintf("%q -> %q", content[mi[0]:mi[1]], expanded))
+			}
+			continue
 		}
+		sb.WriteString(content[prev:mi[0]])
+		sb.WriteString(expanded)
+		prev = mi[1]
+	}
+	if dryRun {
 		return result, nil
 	}
-
-	// MCP/JSON strings normally carry LF newlines. Normalize only the replacement
-	// so untouched bytes remain unchanged while inserted lines follow the file's
-	// dominant style (including CRLF files).
-	replacement = common.NormalizeLineEndings(replacement, common.DetectLineEnding(content))
-	newContent := re.ReplaceAllString(content, replacement)
+	sb.WriteString(content[prev:])
 
 	// Write back with original encoding (atomic write via common.WriteFileWithEncoding)
-	if err := common.WriteFileWithEncoding(path, newContent, encInfo); err != nil {
+	if err := common.WriteFileWithEncoding(path, sb.String(), encInfo); err != nil {
 		return nil, fmt.Errorf("failed to write %s: %w", path, err)
 	}
 

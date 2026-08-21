@@ -64,7 +64,7 @@ Claude Code, Codex CLI, Cursor, Windsurf, Cline, Gemini CLI 및 모든 MCP 호�
 | **Copy** | 파일/디렉토리 복사. 원자적 쓰기 + 권한 보존. 재귀 디렉토리 복사. Windows 잠긴 파일 폴백 (실행 중인 exe/DLL 이름 변경 후 교체). dry_run 미리보기 | ✅ |
 | **Mkdir** | 디렉토리 생성. 8진수 권한 모드 지정 가능 (예: 0755). 기본 재귀 생성 (mkdir -p). dry_run 미리보기 | ✅ |
 | **MultiRead** | 여러 파일을 한 번에 읽기 (API 왕복 절약). 인코딩 인식, offset/limit 지원. 최대 50개 | ✅ |
-| **RegexReplace** | 파일/디렉토리 전체 정규식 찾기-바꾸기. 인코딩과 dominant 줄바꿈 보존, 캡처 그룹 ($1, $2) 지원. 바이너리 파일 자동 제외. dry_run 미리보기 | ✅ |
+| **RegexReplace** | 파일/디렉토리 전체 정규식 찾기-바꾸기. 인코딩과 줄바꿈 보존, 캡처 그룹 ($1, $2) 지원. 바이너리 파일 자동 제외. dry_run 미리보기 | ✅ |
 | **TLSCheck** | TLS 인증서 상세 조회 — 주체, 발급자, 만료일, SAN, TLS 버전, 암호화 스위트 | ✅ |
 | **DNSLookup** | DNS 레코드 조회 (A/AAAA/MX/CNAME/TXT/NS/SOA). DoH(DNS over HTTPS) 기본 활성 | ✅ |
 | **MySQL** | MySQL/MariaDB SQL 쿼리 실행. SELECT 결과의 행·열·셀·전체 출력 제한을 각각 설정 가능하고 DML은 영향 행 수 반환. 페이징은 SQL LIMIT/OFFSET 사용 | ✅ |
@@ -96,7 +96,7 @@ UTF-8로 강제 변환하지 않고, 원본 파일 인코딩을 유지합니다.
 - **감지 우선순위**: BOM → `.editorconfig` charset → BOM 없는 UTF-16 → 유효한 UTF-8 → chardet 자동 감지 → 폴백 인코딩
 - **지원 인코딩**: UTF-8, UTF-8 BOM, EUC-KR, Shift-JIS, ISO-8859-1, UTF-16 (LE/BE, BOM 유무 무관) 등
 - **ASCII 오탐 경고 없음**: 유효한 UTF-8 은 직접 검증하므로 순수 ASCII 파일에 신뢰도 경고가 뜨지 않음
-- **줄바꿈**: LF, CRLF, CR, 혼합 파일을 구분하고 edit/regexreplace로 삽입되는 문자열은 파일의 dominant 줄바꿈을 사용
+- **줄바꿈**: LF, CRLF, CR, 혼합 파일을 구분. `edit`은 CRLF/LF 어느 쪽이든 여러 줄 `old_string`을 매칭하며(둘이 섞인 파일 포함), `edit`/`regexreplace`로 삽입되는 문자열은 해당 위치 구역의 줄바꿈을 따라가므로 나머지 바이트는 그대로 유지됨
 
 ### 토큰을 보호하는 디렉토리 목록
 `listdir`는 기본적으로 페이지당 500개까지만 반환하고, 항목이 더 있으면

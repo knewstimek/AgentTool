@@ -19,12 +19,17 @@ type ReplaceResult struct {
 // Attempts automatic conversion to match the file's indentation style.
 // If forceStyle is true, newStr's indentation is force-converted to fileStyle even on direct match.
 func Replace(content, oldStr, newStr string, replaceAll bool, fileStyle IndentStyle, forceStyle bool) ReplaceResult {
-	// Line ending normalization: convert \n in old_string to match the file's line endings
-	lineEnding := common.DetectLineEnding(content)
-
-	// Match line endings of old_string/new_string to the file
-	normalizedOld := normalizeLineEnding(oldStr, lineEnding)
-	normalizedNew := normalizeLineEnding(newStr, lineEnding)
+	// Search runs on an LF-normalized view of the file, never on raw bytes.
+	// old_string arrives from JSON with LF newlines, while a file can hold CRLF
+	// in one region and LF in another (a CRLF-era file with later LF-only
+	// edits). Converting the needle to the file's *dominant* newline made every
+	// minority-newline region permanently unmatchable for multi-line anchors.
+	// Matching the normalized view and mapping the hit back to an exact byte
+	// span keeps untouched newlines byte-identical.
+	m := common.NewLineEndingMap(content)
+	norm := m.Norm
+	normalizedOld := common.NormalizeLineEndings(oldStr, "\n")
+	normalizedNew := common.NormalizeLineEndings(newStr, "\n")
 
 	// 1st pass: direct match with original string.
 	// When old_string has leading whitespace, require line-boundary alignment
@@ -35,9 +40,9 @@ func Replace(content, oldStr, newStr string, replaceAll bool, fileStyle IndentSt
 	// new_string where only the first line would inherit the surrounding tabs.
 	var count int
 	if hasLeadingWhitespace(normalizedOld) {
-		count = lineStartCount(content, normalizedOld)
+		count = lineStartCount(norm, normalizedOld)
 	} else {
-		count = strings.Count(content, normalizedOld)
+		count = strings.Count(norm, normalizedOld)
 	}
 	if count > 0 {
 		finalNew := normalizedNew
@@ -49,9 +54,9 @@ func Replace(content, oldStr, newStr string, replaceAll bool, fileStyle IndentSt
 			}
 		}
 		if hasLeadingWhitespace(normalizedOld) {
-			return applyLineStartReplace(content, normalizedOld, finalNew, count, replaceAll)
+			return applyLineStartReplace(m, normalizedOld, finalNew, replaceAll)
 		}
-		return applyReplace(content, normalizedOld, finalNew, count, replaceAll)
+		return applyReplace(m, normalizedOld, finalNew, replaceAll)
 	}
 
 	// 2nd pass: match after indent conversion (spaces -> tabs or tabs -> spaces)
@@ -60,9 +65,8 @@ func Replace(content, oldStr, newStr string, replaceAll bool, fileStyle IndentSt
 		convertedOld := ConvertIndent(normalizedOld, srcStyle, fileStyle)
 		convertedNew := ConvertIndent(normalizedNew, srcStyle, fileStyle)
 
-		count = strings.Count(content, convertedOld)
-		if count > 0 {
-			return applyReplace(content, convertedOld, convertedNew, count, replaceAll)
+		if strings.Count(norm, convertedOld) > 0 {
+			return applyReplace(m, convertedOld, convertedNew, replaceAll)
 		}
 	}
 
@@ -71,9 +75,8 @@ func Replace(content, oldStr, newStr string, replaceAll bool, fileStyle IndentSt
 		convertedOld := SpacesToTabs(normalizedOld, fileStyle.IndentSize)
 		convertedNew := SpacesToTabs(normalizedNew, fileStyle.IndentSize)
 
-		count = strings.Count(content, convertedOld)
-		if count > 0 {
-			return applyReplace(content, convertedOld, convertedNew, count, replaceAll)
+		if strings.Count(norm, convertedOld) > 0 {
+			return applyReplace(m, convertedOld, convertedNew, replaceAll)
 		}
 	}
 
@@ -86,22 +89,20 @@ func Replace(content, oldStr, newStr string, replaceAll bool, fileStyle IndentSt
 			if convertedOld == normalizedOld {
 				continue // no change, skip
 			}
-			count = strings.Count(content, convertedOld)
-			if count > 0 {
+			if strings.Count(norm, convertedOld) > 0 {
 				convertedNew := SpacesToTabs(normalizedNew, trySize)
-				return applyReplace(content, convertedOld, convertedNew, count, replaceAll)
+				return applyReplace(m, convertedOld, convertedNew, replaceAll)
 			}
 		}
 	}
 
-	// 5th pass: reverse — file uses spaces but old_string has tabs
+	// 5th pass: reverse -- file uses spaces but old_string has tabs
 	if !fileStyle.UseTabs && hasLeadingTabs(normalizedOld) {
 		for _, trySize := range []int{2, 3, 4, 5, 6, 7, 8} {
 			convertedOld := TabsToSpaces(normalizedOld, trySize)
-			count = strings.Count(content, convertedOld)
-			if count > 0 {
+			if strings.Count(norm, convertedOld) > 0 {
 				convertedNew := TabsToSpaces(normalizedNew, trySize)
-				return applyReplace(content, convertedOld, convertedNew, count, replaceAll)
+				return applyReplace(m, convertedOld, convertedNew, replaceAll)
 			}
 		}
 	}
@@ -135,7 +136,7 @@ func Replace(content, oldStr, newStr string, replaceAll bool, fileStyle IndentSt
 				continue // already tried this exact depth in pass 1
 			}
 			shiftedOld := shiftTabs(strippedOld, baseTabs)
-			cnt := strings.Count(content, shiftedOld)
+			cnt := strings.Count(norm, shiftedOld)
 			if cnt > 0 {
 				candidates = append(candidates, candidate{baseTabs, cnt})
 			}
@@ -170,7 +171,7 @@ func Replace(content, oldStr, newStr string, replaceAll bool, fileStyle IndentSt
 				newDepth = 0
 			}
 			shiftedNew := shiftTabs(strippedNew, newDepth)
-			return applyReplace(content, shiftedOld, shiftedNew, best.count, replaceAll)
+			return applyReplace(m, shiftedOld, shiftedNew, replaceAll)
 		}
 	}
 
@@ -178,7 +179,7 @@ func Replace(content, oldStr, newStr string, replaceAll bool, fileStyle IndentSt
 	// and check whether the content exists with different indentation.
 	// Covers remaining cases (e.g. spaces in old_string, tabs in file) not caught
 	// by passes 2-6. Does NOT auto-fix -- gives an actionable error message instead.
-	normContent := normalizeIndent(content)
+	normContent := normalizeIndent(norm)
 	normOld := normalizeIndent(normalizedOld)
 	if normOld != "" && strings.Contains(normContent, normOld) {
 		return ReplaceResult{
@@ -251,24 +252,43 @@ func normalizeIndent(s string) string {
 }
 
 // applyReplace performs the actual replacement.
-// If count > 1 and replaceAll is false, returns an error without replacing.
-func applyReplace(content, oldStr, newStr string, count int, replaceAll bool) ReplaceResult {
+// If the match count is > 1 and replaceAll is false, returns an error without replacing.
+func applyReplace(m *common.LineEndingMap, oldStr, newStr string, replaceAll bool) ReplaceResult {
+	return applySpans(m, occurrences(m.Norm, oldStr, false), len(oldStr), newStr, replaceAll)
+}
+
+// applySpans splices newStr over each hit. Offsets come from the normalized
+// view and are translated back to original byte offsets, so every byte outside
+// the replaced spans survives unchanged. newStr takes the newline form of the
+// region it lands in rather than the file's dominant one -- otherwise an edit
+// inside a minority-newline region would silently convert it.
+func applySpans(m *common.LineEndingMap, indices []int, oldLen int, newStr string, replaceAll bool) ReplaceResult {
+	count := len(indices)
+	if count == 0 {
+		return ReplaceResult{Applied: false, Message: "old_string not found in file"}
+	}
 	if !replaceAll && count > 1 {
 		return ReplaceResult{
 			Applied: false,
 			Message: fmt.Sprintf("old_string found %d times. Use replace_all=true or provide more context to make it unique", count),
 		}
 	}
-
-	var result string
-	if replaceAll {
-		result = strings.ReplaceAll(content, oldStr, newStr)
-	} else {
-		result = strings.Replace(content, oldStr, newStr, 1)
+	if !replaceAll {
+		indices = indices[:1]
 	}
 
+	var sb strings.Builder
+	sb.Grow(len(m.Original))
+	prev := 0
+	for _, idx := range indices {
+		sb.WriteString(m.Original[prev:m.OrigOffset(idx)])
+		sb.WriteString(common.NormalizeLineEndings(newStr, m.LocalLineEnding(idx, idx+oldLen)))
+		prev = m.OrigOffset(idx + oldLen)
+	}
+	sb.WriteString(m.Original[prev:])
+
 	return ReplaceResult{
-		Content:    result,
+		Content:    sb.String(),
 		MatchCount: count,
 		Applied:    true,
 		Message:    fmt.Sprintf("replaced %d occurrence(s)", count),
@@ -281,17 +301,21 @@ func hasLeadingWhitespace(s string) bool {
 	return len(s) > 0 && (s[0] == '\t' || s[0] == ' ')
 }
 
-// lineStartIndices returns the start positions of all occurrences of sub in s
-// that begin at a line boundary (position 0 or immediately after '\n').
-func lineStartIndices(s, sub string) []int {
+// occurrences returns the start offsets of sub in s, scanning left to right
+// without overlap (same counting as strings.Count). When lineStart is set, only
+// hits beginning at a line boundary (offset 0 or right after '\n') are kept.
+func occurrences(s, sub string, lineStart bool) []int {
+	if sub == "" {
+		return nil
+	}
 	var out []int
-	for i := 0; i <= len(s)-len(sub); {
+	for i := 0; i+len(sub) <= len(s); {
 		idx := strings.Index(s[i:], sub)
 		if idx < 0 {
 			break
 		}
 		pos := i + idx
-		if pos == 0 || s[pos-1] == '\n' {
+		if !lineStart || pos == 0 || s[pos-1] == '\n' {
 			out = append(out, pos)
 		}
 		i = pos + len(sub)
@@ -301,36 +325,13 @@ func lineStartIndices(s, sub string) []int {
 
 // lineStartCount counts occurrences of sub in s that start at a line boundary.
 func lineStartCount(s, sub string) int {
-	return len(lineStartIndices(s, sub))
+	return len(occurrences(s, sub, true))
 }
 
 // applyLineStartReplace is like applyReplace but only replaces occurrences
-// of oldStr that start at a line boundary. count must equal lineStartCount(content, oldStr).
-func applyLineStartReplace(content, oldStr, newStr string, count int, replaceAll bool) ReplaceResult {
-	if !replaceAll && count > 1 {
-		return ReplaceResult{
-			Applied: false,
-			Message: fmt.Sprintf("old_string found %d times. Use replace_all=true or provide more context to make it unique", count),
-		}
-	}
-	indices := lineStartIndices(content, oldStr)
-	if !replaceAll {
-		indices = indices[:1]
-	}
-	var result strings.Builder
-	prev := 0
-	for _, idx := range indices {
-		result.WriteString(content[prev:idx])
-		result.WriteString(newStr)
-		prev = idx + len(oldStr)
-	}
-	result.WriteString(content[prev:])
-	return ReplaceResult{
-		Content:    result.String(),
-		MatchCount: count,
-		Applied:    true,
-		Message:    fmt.Sprintf("replaced %d occurrence(s)", count),
-	}
+// of oldStr that start at a line boundary.
+func applyLineStartReplace(m *common.LineEndingMap, oldStr, newStr string, replaceAll bool) ReplaceResult {
+	return applySpans(m, occurrences(m.Norm, oldStr, true), len(oldStr), newStr, replaceAll)
 }
 
 // hasLeadingTabs returns true if any line in text starts with a tab.
@@ -341,8 +342,4 @@ func hasLeadingTabs(text string) bool {
 		}
 	}
 	return false
-}
-
-func normalizeLineEnding(s, target string) string {
-	return common.NormalizeLineEndings(s, target)
 }

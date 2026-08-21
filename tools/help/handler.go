@@ -224,7 +224,10 @@ func helpTools() string {
 
 ## edit
 Replace text in a file with smart indentation and encoding preservation.
-Newlines in new_string are converted to the file's dominant newline style.
+Line-ending aware: old_string matches whether the file uses CRLF or LF, and the
+newlines in new_string follow the region being edited. Files mixing CRLF and LF
+(a CRLF-era file with later LF-only edits) match in either region and keep the
+bytes outside the edit unchanged.
 When new_string contains non-ASCII text, the result echoes those words back so
 you can check them: a string composed as \uXXXX escapes hides its own typos
 (one wrong hex digit is still a valid character), and rendering it as text is
@@ -450,7 +453,9 @@ Parameters: file_paths (array, max 50), offset (1-based, or negative for end-rel
 Regex find-and-replace in files or across directories.
 Supports capture groups ($1, $2, ${name}) in replacement strings.
 Encoding-aware: preserves original file encoding.
-Replacement newlines are converted to each file's dominant newline style.
+Replacement newlines follow the newline style of the region each match sits in,
+so mixed CRLF/LF files are not rewritten. The pattern side is matched against raw
+bytes: use \r?\n to match a line ending portably.
 Skips binary files by extension and NUL-byte content sniff, so an on-disk
 index or compiled artifact is never rewritten.
 Atomic write for each modified file.
@@ -1237,8 +1242,9 @@ Solutions:
 ## old_string not found
 Cause: The text you're trying to match doesn't exist exactly in the file.
 Common reasons:
-- Indentation differs (tabs vs spaces) — agent-tool handles this automatically
-- Line endings differ (CRLF vs LF) — agent-tool normalizes these
+- Indentation differs (tabs vs spaces) -- agent-tool handles this automatically
+- Line endings differ (CRLF vs LF) -- agent-tool matches either, including files
+  that mix both
 - Invisible characters or encoding differences
 - The text was already changed
 

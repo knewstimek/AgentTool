@@ -433,10 +433,13 @@ Skips hidden entries and common build/vendor directories during recursion.`,
 	}, Handle)
 }
 
+// successResult returns text only. Clients that understand structured output
+// render it instead of the text, so attaching ListDirOutput here shipped the
+// same listing twice and showed the agent the JSON-escaped copy. The cursor
+// hint and the counts are already in the text.
 func successResult(text string, out ListDirOutput) (*mcp.CallToolResult, ListDirOutput, error) {
 	return &mcp.CallToolResult{
-		Content:           []mcp.Content{&mcp.TextContent{Text: text}},
-		StructuredContent: out,
+		Content: []mcp.Content{&mcp.TextContent{Text: text}},
 	}, out, nil
 }
 

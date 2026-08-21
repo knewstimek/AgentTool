@@ -254,13 +254,12 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input GrepInput) (*mc
 		Matches: displayedMatches, Count: matchCount, ReturnedLines: len(displayedMatches),
 		Truncated: outputTruncated, LimitReached: hasMore, HasMore: hasMore,
 	}
+	// Text only, no StructuredContent: clients that understand structured output
+	// render it *instead of* the text, so a compact metadata-only payload hid
+	// every matching line from the agent. The counts and the continuation hint
+	// are part of the text above, so nothing is lost by leaving it out.
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: text}},
-		// Keep structured metadata compact instead of duplicating every match.
-		StructuredContent: map[string]any{
-			"count": matchCount, "returned_lines": len(displayedMatches),
-			"truncated": outputTruncated, "limit_reached": hasMore, "has_more": hasMore,
-		},
 	}, out, nil
 }
 

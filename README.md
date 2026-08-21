@@ -64,7 +64,7 @@ Claude Code, Codex CLI, Cursor, Windsurf, Cline, Gemini CLI, and any MCP-compati
 | **Copy** | Copy files/directories with atomic write and permission preservation. Recursive directory copy. Windows locked-file fallback (renames running exe/DLL aside). dry_run preview | ✅ |
 | **Mkdir** | Create directories with optional permission mode (octal, e.g. 0755). Recursive by default (mkdir -p). dry_run preview | ✅ |
 | **MultiRead** | Read multiple files in a single call to reduce API round-trips. Encoding-aware, offset/limit support. Max 50 files | ✅ |
-| **RegexReplace** | Regex find-and-replace across files/directories. Encoding and dominant newline preserving, capture groups ($1, $2). Skips binary files. dry_run preview | ✅ |
+| **RegexReplace** | Regex find-and-replace across files/directories. Encoding and line-ending preserving, capture groups ($1, $2). Skips binary files. dry_run preview | ✅ |
 | **TLSCheck** | Check TLS certificate details — subject, issuer, expiry, SANs, TLS version, cipher suite | ✅ |
 | **DNSLookup** | DNS record lookup (A/AAAA/MX/CNAME/TXT/NS/SOA). DNS over HTTPS (DoH) by default for privacy | ✅ |
 | **MySQL** | Execute SQL queries on MySQL/MariaDB. Table-formatted SELECT results with configurable row/column/cell/total-output limits; affected rows for DML. Use SQL LIMIT/OFFSET for paging | ✅ |
@@ -96,7 +96,7 @@ Edits preserve the original file encoding instead of forcing UTF-8.
 - **Detection priority**: BOM → `.editorconfig` charset → BOM-less UTF-16 → valid UTF-8 → chardet auto-detection → fallback encoding
 - **Supported**: UTF-8, UTF-8 BOM, EUC-KR, Shift-JIS, ISO-8859-1, UTF-16 (LE/BE, with or without BOM), and more
 - **No false warnings on ASCII**: valid UTF-8 is verified directly, so plain ASCII files never raise a low-confidence warning
-- **Line endings**: Detects LF, CRLF, CR, and mixed files; inserted edit/regexreplace text follows the file's dominant newline
+- **Line endings**: Detects LF, CRLF, CR, and mixed files. `edit` matches a multi-line `old_string` whether the file uses CRLF or LF, including files that mix both, and text inserted by `edit`/`regexreplace` follows the newline style of the region it lands in, so the rest of the file is left byte-identical
 
 ### Token-safe directory listings
 `listdir` defaults to 500 entries per page and returns `next_cursor` when more

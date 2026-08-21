@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func boolPointer(v bool) *bool { return &v }
@@ -70,9 +72,16 @@ func TestHandleExactLimitDoesNotClaimAnotherPage(t *testing.T) {
 	if out.HasMore || out.Truncated || out.NextCursor != "" {
 		t.Fatalf("exact-limit page incorrectly marked incomplete: %+v", out)
 	}
-	structured, ok := result.StructuredContent.(ListDirOutput)
-	if !ok || structured.ReturnedFiles != 2 {
-		t.Fatalf("missing structured MCP output: %#v", result.StructuredContent)
+	if out.ReturnedFiles != 2 {
+		t.Fatalf("returned_files = %d, want 2", out.ReturnedFiles)
+	}
+	// Structured output would be rendered instead of the text by clients that
+	// support it, so the listing must live in the text.
+	if result.StructuredContent != nil {
+		t.Fatalf("listdir must return text only, got structured %#v", result.StructuredContent)
+	}
+	if text := result.Content[0].(*mcp.TextContent).Text; !strings.Contains(text, "A.txt") {
+		t.Fatalf("listing missing from the text the agent sees: %q", text)
 	}
 }
 
