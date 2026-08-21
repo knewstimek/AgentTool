@@ -55,6 +55,28 @@ func TestHandleUsesPerMatchLineEndings(t *testing.T) {
 	}
 }
 
+// A file with no newline of its own still needs the replacement's newlines
+// converted -- to the default, not left as whatever the agent sent.
+func TestHandleNormalizesReplacementInNewlineFreeFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "oneline.txt")
+	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result, _, err := Handle(context.Background(), nil, RegexReplaceInput{
+		Path: path, Pattern: "x", Replacement: "a\r\nb",
+	})
+	if err != nil || result.IsError {
+		t.Fatalf("Handle() failed: result=%+v err=%v", result, err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "a\nb" {
+		t.Fatalf("file bytes = %q, want %q", got, "a\nb")
+	}
+}
+
 func TestHandleCapturesSurviveLineEndingConversion(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "captures.txt")
 	if err := os.WriteFile(path, []byte("key=value\r\n"), 0o644); err != nil {

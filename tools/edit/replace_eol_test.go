@@ -4,6 +4,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 var tabStyle = IndentStyle{UseTabs: true, IndentSize: 4}
@@ -145,12 +146,48 @@ func TestReplaceAmbiguousLargeFileStaysCheap(t *testing.T) {
 // on every match; that turns replace_all quadratic.
 func TestReplaceAllOnNewlineFreeFile(t *testing.T) {
 	const n = 300_000
+	start := time.Now()
 	res := Replace(strings.Repeat("x", n), "x", "y\nz", true, tabStyle, false)
+	elapsed := time.Since(start)
 	if !res.Applied || res.MatchCount != n {
 		t.Fatalf("applied=%v count=%d msg=%s", res.Applied, res.MatchCount, res.Message)
 	}
 	if len(res.Content) != n*3 || !strings.HasPrefix(res.Content, "y\nzy\nz") {
 		t.Fatalf("unexpected content length %d", len(res.Content))
+	}
+	// Scanning per match would be ~9e10 byte reads here; the bound is loose
+	// enough for a slow machine and still orders of magnitude below that.
+	if elapsed > 10*time.Second {
+		t.Fatalf("replace_all on a newline-free file took %s", elapsed)
+	}
+}
+
+// A three-way tie inside the span goes to the form that appears first among the
+// tied ones. The first newline overall (LF here) belongs to a losing form.
+func TestReplaceTieAmongMajorityForms(t *testing.T) {
+	res := Replace("a\nb\rc\r\nd\re\r\n", "a\nb\nc\nd\ne\n", "x\ny\n", false, tabStyle, false)
+	if !res.Applied {
+		t.Fatalf("not applied: %s", res.Message)
+	}
+	if res.Content != "x\ry\r" {
+		t.Fatalf("tied majority resolved wrong: %q, want %q", res.Content, "x\ry\r")
+	}
+}
+
+// Offset translation must not index every CRLF: that allocation dwarfs the file
+// on a CRLF-dense one.
+func TestReplaceOnCRLFDenseFileStaysCheap(t *testing.T) {
+	content := strings.Repeat("\r\n", 400_000) + "MARK\r\n"
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	res := Replace(content, "MARK", "DONE", false, tabStyle, false)
+	runtime.ReadMemStats(&after)
+	if !res.Applied || !strings.HasSuffix(res.Content, "DONE\r\n") {
+		t.Fatalf("applied=%v msg=%s", res.Applied, res.Message)
+	}
+	// One int per CRLF would add 3.2 MB on its own here.
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 3<<20 {
+		t.Fatalf("editing a CRLF-dense file allocated %d bytes", allocated)
 	}
 }
 

@@ -2,121 +2,201 @@ package common
 
 import "strings"
 
-// localScanLimit bounds how far LineEndingAround looks for a neighbouring
-// newline before falling back. 8 KiB covers any real source line.
-const localScanLimit = 8 << 10
-
-// LineEndingAround reports which newline form the region covering [start,end)
-// of content uses. Newlines inside the span decide by majority (ties go to the
-// first one seen); a span with none inherits the newline that terminates its
-// line, then the one that started it, and finally fallback.
+// LineEndingCursor reports which newline form a byte span of a file belongs to.
 //
 // Files with a single newline form answer the same for every span, so callers
-// can use this unconditionally. It exists for mixed files: a CVS-era CRLF file
-// with a later LF-only edit has regions of both, and inserting the file's
-// dominant form into the minority region silently rewrites its newlines.
-func LineEndingAround(content string, start, end int, fallback string) string {
+// can use this unconditionally. It exists for mixed files: a CRLF-era file with
+// a later LF-only edit has regions of both, and inserting the file's dominant
+// form into the minority region silently rewrites its newlines.
+//
+// Spans are expected in increasing order, which is how a splice walks a file.
+// The lookahead for a line terminator then never rescans, so a whole edit costs
+// one pass over the content no matter how many spans are queried. A span that
+// moves backwards restarts the walk, which stays correct but pays for the
+// rewind. Not safe for concurrent use.
+type LineEndingCursor struct {
+	content  string
+	fallback string
+	hasNL    bool
+
+	// Terminator lookahead state. foundPos is the newline the last lookahead
+	// stopped on, -1 once the scan proved there is none before EOF, and -2
+	// before the first lookahead.
+	scan      int
+	foundPos  int
+	foundKind string
+	lastEnd   int
+
+	// Newline ending the last terminated line, resolved on demand.
+	finalKind string
+	finalDone bool
+}
+
+// NewLineEndingCursor prepares a cursor over content.
+func NewLineEndingCursor(content string) *LineEndingCursor {
+	return &LineEndingCursor{
+		content:  content,
+		fallback: DetectLineEnding(content),
+		hasNL:    strings.ContainsAny(content, "\r\n"),
+		foundPos: -2,
+	}
+}
+
+// At reports the newline form to use for text replacing content[start:end).
+// Newlines inside the span decide by majority; a span with none inherits the
+// newline that terminates its line, then the one that started it, and finally
+// the fallback.
+func (c *LineEndingCursor) At(start, end int) string {
+	if !c.hasNL {
+		return c.fallback
+	}
 	if start < 0 {
 		start = 0
 	}
-	if end > len(content) {
-		end = len(content)
+	if end > len(c.content) {
+		end = len(c.content)
 	}
 	if end < start {
 		end = start
 	}
+	if end < c.lastEnd {
+		c.scan, c.foundPos, c.foundKind = 0, -2, ""
+	}
+	c.lastEnd = end
 
+	if kind := c.spanMajority(start, end); kind != "" {
+		return kind
+	}
+	if kind := c.terminator(end); kind != "" {
+		return kind
+	}
+	// No newline inside the span and none after it, so the span sits on the
+	// last, unterminated line -- and the file's final newline is the one that
+	// opened it.
+	if kind := c.final(); kind != "" {
+		return kind
+	}
+	return c.fallback
+}
+
+// spanMajority returns the dominant newline form inside [start,end), or "" when
+// the span holds none.
+func (c *LineEndingCursor) spanMajority(start, end int) string {
 	var lf, crlf, cr int
-	first := ""
+	lfAt, crlfAt, crAt := 0, 0, 0
 	for i := start; i < end; i++ {
-		switch content[i] {
+		switch c.content[i] {
 		case '\r':
 			// Pair check runs against the whole content, not the span: a span
 			// ending between CR and LF still sits in a CRLF region.
-			if i+1 < len(content) && content[i+1] == '\n' {
+			if i+1 < len(c.content) && c.content[i+1] == '\n' {
+				if crlf == 0 {
+					crlfAt = i
+				}
 				crlf++
 				i++
-				if first == "" {
-					first = "\r\n"
-				}
 			} else {
-				cr++
-				if first == "" {
-					first = "\r"
+				if cr == 0 {
+					crAt = i
 				}
+				cr++
 			}
 		case '\n':
+			if lf == 0 {
+				lfAt = i
+			}
 			lf++
-			if first == "" {
-				first = "\n"
-			}
 		}
 	}
-	if lf+crlf+cr > 0 {
-		// Seeded with the first ending seen and its own count, so an exact tie
-		// keeps it -- the span starts in that region. Seeding the count at 0
-		// instead would hand every tie to whichever candidate is checked first.
-		best := first
-		var bestCount int
-		switch first {
-		case "\r\n":
-			bestCount = crlf
-		case "\n":
-			bestCount = lf
-		case "\r":
-			bestCount = cr
-		}
-		for _, c := range []struct {
-			ending string
-			count  int
-		}{{"\r\n", crlf}, {"\n", lf}, {"\r", cr}} {
-			if c.count > bestCount {
-				best, bestCount = c.ending, c.count
-			}
-		}
-		return best
+	if lf+crlf+cr == 0 {
+		return ""
 	}
 
-	// Newline that terminates the span's line. Landing on the '\n' of a CRLF
-	// still reports CRLF thanks to the look-back. The lookaround is bounded:
-	// past this distance "the local region" means nothing, and an unbounded
-	// scan turns a many-match run on a minified file quadratic.
-	forward := end + localScanLimit
-	if forward > len(content) {
-		forward = len(content)
-	}
-	for i := end; i < forward; i++ {
-		if content[i] == '\n' {
-			if i > 0 && content[i-1] == '\r' {
-				return "\r\n"
-			}
-			return "\n"
+	// Highest count wins. A tie goes to whichever tied form appears first, so
+	// the region the span opens in keeps its own form -- seeding from the very
+	// first newline instead would mis-resolve a tie that form is not part of.
+	best, bestCount, bestAt := "", 0, 0
+	for _, f := range []struct {
+		ending string
+		count  int
+		at     int
+	}{{"\r\n", crlf, crlfAt}, {"\n", lf, lfAt}, {"\r", cr, crAt}} {
+		if f.count == 0 {
+			continue
 		}
-		if content[i] == '\r' {
-			if i+1 < len(content) && content[i+1] == '\n' {
-				return "\r\n"
-			}
-			return "\r"
+		if f.count > bestCount || (f.count == bestCount && f.at < bestAt) {
+			best, bestCount, bestAt = f.ending, f.count, f.at
 		}
 	}
+	return best
+}
 
-	backward := start - localScanLimit
-	if backward < 0 {
-		backward = 0
+// terminator returns the form of the first newline at or after end, or "" when
+// none remains. The scan only moves forward across calls.
+func (c *LineEndingCursor) terminator(end int) string {
+	if c.foundPos == -1 {
+		return "" // an earlier scan already reached EOF without a newline
 	}
-	for i := start - 1; i >= backward; i-- {
-		if content[i] == '\n' {
-			if i > 0 && content[i-1] == '\r' {
-				return "\r\n"
+	if c.foundPos >= end {
+		// The cached hit is the first newline at or after an earlier, smaller
+		// end, so nothing can sit between end and it.
+		return c.foundKind
+	}
+	i := end
+	if c.scan > i {
+		i = c.scan
+	}
+	for ; i < len(c.content); i++ {
+		switch c.content[i] {
+		case '\n':
+			c.foundPos, c.foundKind, c.scan = i, "\n", i+1
+			// Landing on the '\n' of a CRLF still reports CRLF.
+			if i > 0 && c.content[i-1] == '\r' {
+				c.foundKind = "\r\n"
 			}
-			return "\n"
-		}
-		if content[i] == '\r' {
-			return "\r"
+			return c.foundKind
+		case '\r':
+			c.foundPos = i
+			if i+1 < len(c.content) && c.content[i+1] == '\n' {
+				c.foundKind, c.scan = "\r\n", i+2
+			} else {
+				c.foundKind, c.scan = "\r", i+1
+			}
+			return c.foundKind
 		}
 	}
+	c.foundPos, c.foundKind, c.scan = -1, "", len(c.content)
+	return ""
+}
 
-	return fallback
+// final returns the form of the last newline in the content, resolved once.
+func (c *LineEndingCursor) final() string {
+	if c.finalDone {
+		return c.finalKind
+	}
+	c.finalDone = true
+	for i := len(c.content) - 1; i >= 0; i-- {
+		if c.content[i] == '\n' {
+			c.finalKind = "\n"
+			if i > 0 && c.content[i-1] == '\r' {
+				c.finalKind = "\r\n"
+			}
+			break
+		}
+		if c.content[i] == '\r' {
+			c.finalKind = "\r"
+			break
+		}
+	}
+	return c.finalKind
+}
+
+// LineEndingAround is the one-shot form of LineEndingCursor.At for callers with
+// a single span to resolve.
+func LineEndingAround(content string, start, end int, fallback string) string {
+	c := NewLineEndingCursor(content)
+	c.fallback = fallback
+	return c.At(start, end)
 }
 
 // LineEndingMap is an LF-normalized view of content plus the offset map back to
@@ -127,14 +207,15 @@ func LineEndingAround(content string, start, end int, fallback string) string {
 // file's dominant form makes every minority-newline region unmatchable. Search
 // the normalized view instead, then map the hit back to an exact byte span so
 // untouched bytes -- newlines included -- are never rewritten.
-// A LineEndingMap is not safe for concurrent use: offset translation keeps a
-// cursor. Build one per edit.
+//
+// Not safe for concurrent use: offset translation keeps a cursor. Build one per
+// edit.
 type LineEndingMap struct {
 	Original string // content as read
 	Norm     string // Original with every CRLF and lone CR collapsed to LF
 	Dominant string // dominant newline of the whole content
 
-	hasNewline bool
+	region *LineEndingCursor
 	// Offset translation walks Original forward instead of indexing every
 	// newline: one int per CRLF costs hundreds of MB on a large CRLF file.
 	// Splicing queries offsets in increasing order, so the walk is O(len)
@@ -145,10 +226,10 @@ type LineEndingMap struct {
 // NewLineEndingMap builds the normalized view of content.
 func NewLineEndingMap(content string) *LineEndingMap {
 	m := &LineEndingMap{
-		Original:   content,
-		Norm:       content,
-		Dominant:   DetectLineEnding(content),
-		hasNewline: strings.ContainsAny(content, "\r\n"),
+		Original: content,
+		Norm:     content,
+		Dominant: DetectLineEnding(content),
+		region:   NewLineEndingCursor(content),
 	}
 	// No CR means Norm is already the content and offsets map one to one --
 	// the common case, kept allocation-free.
@@ -204,10 +285,5 @@ func (m *LineEndingMap) OrigOffset(norm int) int {
 // [start,end) of Norm, so an edit inside a minority-newline region keeps that
 // region's form instead of the file's dominant one.
 func (m *LineEndingMap) LocalLineEnding(start, end int) string {
-	// A file without a single newline has no regions to respect, and scanning
-	// one for every match is what makes minified files pathological.
-	if !m.hasNewline {
-		return m.Dominant
-	}
-	return LineEndingAround(m.Original, m.OrigOffset(start), m.OrigOffset(end), m.Dominant)
+	return m.region.At(m.OrigOffset(start), m.OrigOffset(end))
 }

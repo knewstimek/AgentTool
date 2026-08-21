@@ -79,17 +79,57 @@ func TestLineEndingMapOffsetQueriesGoingBackwards(t *testing.T) {
 	}
 }
 
-func TestLineEndingAroundBoundedLookaround(t *testing.T) {
-	// No newline within the scan limit: the answer falls back instead of
-	// scanning the whole file, which is what keeps many-match runs linear.
-	content := strings.Repeat("x", localScanLimit*3) + "\r\n"
-	if got := LineEndingAround(content, 0, 1, "\n"); got != "\n" {
-		t.Fatalf("far-away newline should not be found, got %q", got)
+// A long line must resolve to its own terminator no matter how far away it is.
+// A bounded lookaround gets this wrong: the file is CRLF-dominant, so the edit
+// would take CRLF while sitting on an LF-terminated line.
+func TestLineEndingAroundResolvesLongLinesExactly(t *testing.T) {
+	const far = 40000
+	content := "# h1\r\n# h2\r\n# h3\r\n" +
+		strings.Repeat(" ", far) + "MARK" + strings.Repeat(" ", far) + "\n"
+	markAt := strings.Index(content, "MARK")
+	if got := LineEndingAround(content, markAt, markAt+4, "\r\n"); got != "\n" {
+		t.Fatalf("long LF-terminated line resolved as %q, want LF", got)
 	}
-	// Within the limit it is still found.
-	near := strings.Repeat("x", 10) + "\r\n"
-	if got := LineEndingAround(near, 0, 1, "\n"); got != "\r\n" {
-		t.Fatalf("nearby CRLF not found, got %q", got)
+	// Same shape, CRLF-terminated long line inside an LF-dominant file.
+	content2 := "a\nb\nc\n" + strings.Repeat(" ", far) + "MARK" + strings.Repeat(" ", far) + "\r\n"
+	markAt2 := strings.Index(content2, "MARK")
+	if got := LineEndingAround(content2, markAt2, markAt2+4, "\n"); got != "\r\n" {
+		t.Fatalf("long CRLF-terminated line resolved as %q, want CRLF", got)
+	}
+}
+
+// Queries arrive in increasing order during a splice; the cursor must answer
+// each one exactly while only ever moving forward.
+func TestLineEndingCursorSequentialQueries(t *testing.T) {
+	content := "AAA\r\nBBB\nCCC\nDDD\rEEE"
+	c := NewLineEndingCursor(content)
+	for _, tc := range []struct {
+		needle string
+		want   string
+	}{
+		{"AAA", "\r\n"},
+		{"BBB", "\n"},
+		{"CCC", "\n"},
+		{"DDD", "\r"},
+		{"EEE", "\r"}, // unterminated last line inherits the newline that opened it
+	} {
+		at := strings.Index(content, tc.needle)
+		if got := c.At(at, at+len(tc.needle)); got != tc.want {
+			t.Fatalf("At(%q) = %q, want %q", tc.needle, got, tc.want)
+		}
+	}
+	// A backwards query restarts the walk instead of reusing a stale hit.
+	if got := c.At(0, 3); got != "\r\n" {
+		t.Fatalf("backwards query = %q, want CRLF", got)
+	}
+}
+
+// Ties are resolved by first appearance among the tied forms -- not by the
+// first newline in the span, which may belong to a losing form.
+func TestLineEndingAroundTieAmongMajorityForms(t *testing.T) {
+	content := "a\nb\rc\r\nd\re\r\n" // LF=1, CR=2, CRLF=2; first CR precedes first CRLF
+	if got := LineEndingAround(content, 0, len(content), "\n"); got != "\r" {
+		t.Fatalf("tied majority resolved as %q, want CR", got)
 	}
 }
 
