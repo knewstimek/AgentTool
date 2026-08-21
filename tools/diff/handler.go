@@ -125,6 +125,7 @@ func Register(server *mcp.Server) {
 		Name: "diff",
 		Description: `Compares two files and outputs a unified diff.
 Encoding-aware: auto-detects file encoding before comparison.
+Lines are compared with their endings normalized; files differing only in line endings or a trailing newline say so explicitly instead of returning an empty diff.
 Max 50,000 lines per file.`,
 	}, Handle)
 }

@@ -31,11 +31,11 @@ Claude Code, Codex CLI, Cursor, Windsurf, Cline, Gemini CLI, and any MCP-compati
 | **Edit** | String replacement with smart indentation and encoding preservation (supports dry_run) | ✅ |
 | **Read** | Encoding-aware file reading with flexible offset (integer, `"N-M"` range, `[N,M]` array). Image files (PNG/JPG/GIF/BMP/WebP/TIFF/ICO) returned as base64 ImageContent | ✅ |
 | **Write** | Encoding-aware file creation/overwrite | ✅ |
-| **Grep** | Encoding-aware regex content search with output modes (content/files_with_matches/count) and context lines (-B/-A/-C). Large result limits are supported while per-line and total output budgets prevent context floods; exact `has_more` metadata and a visible hint report incomplete results. Skips binary files (extension + NUL sniff) | ✅ |
+| **Grep** | Encoding-aware regex content search with output modes (content/files_with_matches/count) and context lines (-B/-A/-C). Large result limits are supported while per-line and total output budgets prevent context floods; exact `has_more` metadata and a visible hint report incomplete results. Skips binary files (extension + NUL sniff). A CRLF ending is a terminator, so `^foo$` matches in a CRLF file | ✅ |
 | **Glob** | File pattern matching with `**` recursive support | ✅ |
 | **ListDir** | Bounded/pageable directory listing. max_entries + continuation cursor, directory/file filters, entry-name glob filters, counts-only mode, flat/tree output | ✅ |
-| **Diff** | Compare two files with unified diff output (encoding-aware) | ✅ |
-| **Patch** | Apply unified diff patch to a file (supports dry_run) | ✅ |
+| **Diff** | Compare two files with unified diff output (encoding-aware). Files differing only in line endings or a trailing newline say so instead of returning an empty diff | ✅ |
+| **Patch** | Apply unified diff patch to a file (supports dry_run). Each line keeps its own ending, so a mixed CRLF/LF file is not rewritten | ✅ |
 | **Checksum** | Compute file hash (md5, sha1, sha256) | ✅ |
 | **FileInfo** | File metadata (size, encoding, mixed line-ending counts, indentation, line count) | ✅ |
 | **Compress** | Create zip / tar.gz archives | ✅ |

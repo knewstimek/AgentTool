@@ -542,6 +542,7 @@ func Register(server *mcp.Server) {
 Encoding-aware: auto-detects file encoding.
 Can search a single file or recursively search a directory.
 Output modes: content (default, matching lines), files_with_matches (paths only), count (match counts).
+A CRLF ending is a terminator, not content: "^foo$" matches in a CRLF file and returned lines carry no stray CR. A lone CR is not a line break (same as read), so a CR-only file is one line.
 Context: use before/after/context to include surrounding lines (like grep -B/-A/-C).
 Large result sets stay usable: max_results supports up to 100000, while max_line_chars
 and max_output_chars bound the text returned to the agent. has_more and a visible

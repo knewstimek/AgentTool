@@ -259,6 +259,7 @@ func Register(server *mcp.Server) {
 		Description: `Applies a unified diff patch to a file.
 Parses @@ hunk headers, verifies context lines, and applies changes.
 Encoding-aware: preserves original file encoding.
+Line-ending aware: each line keeps its own ending (a mixed CRLF/LF file is not rewritten) and a file without a trailing newline does not gain one.
 Use dry_run=true to preview without modifying the file.`,
 	}, Handle)
 }
