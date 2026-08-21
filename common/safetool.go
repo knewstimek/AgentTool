@@ -59,6 +59,10 @@ func SafeAddTool[In, Out any](s *mcp.Server, t *mcp.Tool, h mcp.ToolHandlerFor[I
 	strArrProps := collectStringArrayProperties(schema)
 
 	rawHandler := func(ctx context.Context, req *mcp.CallToolRequest) (result *mcp.CallToolResult, err error) {
+		// Every tool call passes through here, which makes it the one place the
+		// idle watcher can learn the server is still in use.
+		MarkActivity()
+
 		defer func() {
 			if r := recover(); r != nil {
 				stack := debug.Stack()

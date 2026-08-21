@@ -104,6 +104,16 @@ entries are available. Narrow results with `directories_only`, `files_only`,
 `name_pattern` (for example `A*`), or multiple OR patterns in `include`.
 Use `counts_only=true` when only matching file/directory counts are needed.
 
+### Idle memory release
+After 30 minutes with no tool call, the server returns its heap to the OS. A
+stdio MCP server cannot tell an abandoned client from a quiet one -- the process
+that spawned it may be alive, finished with it, and still holding the pipe open,
+so no EOF ever arrives -- and exiting on that guess would break a session that
+merely paused. Releasing the memory is the safe half of that trade: an instance
+that once read a 50MB file settles back to its ~20MB baseline instead of holding
+200MB for the rest of the machine's uptime. Open shell and ssh sessions survive,
+and nothing the client can observe changes.
+
 ## Quick Start
 
 1. Download the binary for your OS from [Releases](https://github.com/knewstimek/agent-tool/releases/latest)

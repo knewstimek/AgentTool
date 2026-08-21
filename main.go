@@ -65,7 +65,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-const Version = "v0.9.3"
+const Version = "v0.9.4"
 
 func main() {
 	args := os.Args[1:]
@@ -221,6 +221,13 @@ Tool groups: file | system (bash, procexec, proclist, prockill, sysinfo, envvar,
 	// When the parent (IDE/CLI) is killed, stdin pipe may not close properly
 	// (especially on Windows), leaving this process alive consuming memory.
 	go monitorParent()
+
+	// Neither watchdog fires when the client is alive but finished with us: a
+	// "cmd /c agent-tool" wrapper waits for us while we wait for it, and the
+	// client above them holds the pipe open, so no EOF and no parent death ever
+	// arrive. Exiting on that guess would kill a session that merely paused, so
+	// the server gives its memory back instead.
+	common.StartIdleMemoryRelease(common.IdleReleaseAfter)
 
 	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
 		log.Fatal(err)
