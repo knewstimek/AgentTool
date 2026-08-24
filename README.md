@@ -91,7 +91,7 @@ Local relative paths resolve against an explicit workspace, then the MCP client 
 | **Memtool** | CheatEngine-style process memory tool — search/filter/read/write memory values, read_chain (resolve base+offset pointer chains, batched in one call), live disassembly (x86/x64/ARM/ARM64), undo, struct pattern search, pointer scan, memory diff. Disk-backed snapshots for large scans. Session management with idle timeout. Windows (ReadProcessMemory) and Linux (/proc/pid/mem). Windows auto-enables SeDebugPrivilege when elevated; opt-in `force_dacl` bypasses a same-user process's self-hardened DACL (original restored after) | ✅ |
 | **IPC** | Inter-process communication between AI agent sessions over TCP. 1:1 message passing with blocking receive. Protocol: [2-byte type][4-byte length][payload]. Operations: send, receive (blocking with timeout), ping. Works across machines. Max 1MB message, 300s timeout | ✅ |
 | **Wintool** | Windows GUI automation — find/enumerate windows and child controls, capture screenshots (ImageContent PNG via PrintWindow), read clipboard images, read/set text, click, type, send raw messages, show/hide/minimize/maximize, move/resize, close, focus. screenshot/clipboard return ImageContent by default (save_path option for file output). Enables AI agents to "see" and interact with GUI applications. Windows only | ✅ |
-| **CodeGraph** | AST-based code indexing with tree-sitter (WASM). 11 operations; large symbols/callees results support offset paging and total-output limits. Supports C/C++, Python, Go, C#, Rust, Java. Respects .gitignore (nested), skips venv/vendor/third_party. No LLM calls, zero token cost | ✅ |
+| **CodeGraph** | Fully embedded semantic code graph: Go standard-library AST plus lazy compressed tree-sitter WASM for C/C++, Python, C#, Rust, and Java. Adds declaration/definition identity, return-chain and generic/alias propagation, transitive includes, calibrated overload evidence, virtual/interface dispatch, macro/callback edges, build-condition provenance, and multi-root workspaces. No compiler, language server, external binary, LLM call, or token cost | ✅ |
 | **SetConfig** | Change runtime settings (encoding, file size limit, symlinks, workspace, etc.) | ✅ |
 | **Help** | Built-in usage guide for agents (encoding, indentation, troubleshooting) | ✅ |
 
@@ -148,6 +148,7 @@ After installing, agents will have access to agent-tool but may still default to
 
 ```
 At the start of a session, run codegraph(op="index", path="<project_root>") to build a code index.
+For several repositories sharing one graph, use codegraph(op="index", path="<db_root>", roots=["<source_root_1>", "<source_root_2>"]). Source-root provenance prevents unrelated projects with the same symbol names from contaminating candidates while explicit/transitive includes can still cross roots.
 Then use codegraph for structural queries (find, callers, callees, methods, inherits) instead of grep.
 ```
 
@@ -324,14 +325,14 @@ Agents can change settings at runtime via `set_config` without restarting:
 ## Build
 
 ```bash
-go build -o agent-tool .
+go build -trimpath -ldflags="-s -w" -o agent-tool .
 ```
 
 Cross-compile:
 ```bash
-GOOS=linux GOARCH=amd64 go build -o agent-tool .
-GOOS=darwin GOARCH=arm64 go build -o agent-tool .
-GOOS=windows GOARCH=amd64 go build -o agent-tool.exe .
+GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o agent-tool .
+GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o agent-tool .
+GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o agent-tool.exe .
 ```
 
 ## Troubleshooting

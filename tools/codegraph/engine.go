@@ -1,9 +1,12 @@
 package codegraph
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	_ "embed"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 
@@ -12,23 +15,25 @@ import (
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 )
 
-//go:embed wasm/tree-sitter-cpp.wasm
-var cppWasm []byte
+// The grammars are stored compressed and inflated only when that language is
+// first analyzed. Go uses go/parser and therefore needs no embedded grammar.
+//
+//go:embed wasm/tree-sitter-cpp.wasm.gz
+var cppWasmGzip []byte
 
-//go:embed wasm/tree-sitter-python.wasm
-var pythonWasm []byte
+//go:embed wasm/tree-sitter-python.wasm.gz
+var pythonWasmGzip []byte
 
-//go:embed wasm/tree-sitter-go.wasm
-var goWasm []byte
+//go:embed wasm/tree-sitter-c_sharp.wasm.gz
+var csharpWasmGzip []byte
 
-//go:embed wasm/tree-sitter-c_sharp.wasm
-var csharpWasm []byte
+//go:embed wasm/tree-sitter-rust.wasm.gz
+var rustWasmGzip []byte
 
-//go:embed wasm/tree-sitter-rust.wasm
-var rustWasm []byte
+//go:embed wasm/tree-sitter-java.wasm.gz
+var javaWasmGzip []byte
 
-//go:embed wasm/tree-sitter-java.wasm
-var javaWasm []byte
+var inflatedWASM sync.Map
 
 // maxParsesPerEngine is the number of Parse calls before an engine is recycled.
 // WASM linear memory only grows (never shrinks), so recycling periodically
@@ -120,7 +125,11 @@ func putEngine(e *engine) {
 }
 
 func newEngine(lang string) (*engine, error) {
-	wasmBytes, queries, err := langConfig(lang)
+	compressedWASM, queries, err := langConfig(lang)
+	if err != nil {
+		return nil, err
+	}
+	wasmBytes, err := inflateWASM(lang, compressedWASM)
 	if err != nil {
 		return nil, err
 	}
@@ -185,46 +194,59 @@ func newEngine(lang string) (*engine, error) {
 	return e, nil
 }
 
+func inflateWASM(lang string, compressed []byte) ([]byte, error) {
+	if cached, ok := inflatedWASM.Load(lang); ok {
+		return cached.([]byte), nil
+	}
+	reader, err := gzip.NewReader(bytes.NewReader(compressed))
+	if err != nil {
+		return nil, fmt.Errorf("open compressed tree-sitter WASM (%s): %w", lang, err)
+	}
+	wasmBytes, readErr := io.ReadAll(reader)
+	closeErr := reader.Close()
+	if readErr != nil {
+		return nil, fmt.Errorf("inflate tree-sitter WASM (%s): %w", lang, readErr)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("close compressed tree-sitter WASM (%s): %w", lang, closeErr)
+	}
+	actual, _ := inflatedWASM.LoadOrStore(lang, wasmBytes)
+	return actual.([]byte), nil
+}
+
 // langConfig returns WASM bytes and query patterns for a language.
 func langConfig(lang string) ([]byte, langQueries, error) {
 	switch lang {
 	case "cpp":
-		return cppWasm, langQueries{
+		return cppWasmGzip, langQueries{
 			classes:   queryCPPClasses,
 			functions: queryCPPFunctions,
 			calls:     queryCPPCalls,
 			imports:   queryCPPIncludes,
 		}, nil
 	case "python":
-		return pythonWasm, langQueries{
+		return pythonWasmGzip, langQueries{
 			classes:   queryPythonClasses,
 			functions: queryPythonFunctions,
 			calls:     queryPythonCalls,
 			imports:   queryPythonImports,
 		}, nil
-	case "go":
-		return goWasm, langQueries{
-			classes:   queryGoTypes,
-			functions: queryGoFunctions,
-			calls:     queryGoCalls,
-			imports:   queryGoImports,
-		}, nil
 	case "csharp":
-		return csharpWasm, langQueries{
+		return csharpWasmGzip, langQueries{
 			classes:   queryCSharpClasses,
 			functions: queryCSharpFunctions,
 			calls:     queryCSharpCalls,
 			imports:   queryCSharpUsings,
 		}, nil
 	case "rust":
-		return rustWasm, langQueries{
+		return rustWasmGzip, langQueries{
 			classes:   queryRustTypes,
 			functions: queryRustFunctions,
 			calls:     queryRustCalls,
 			imports:   queryRustUses,
 		}, nil
 	case "java":
-		return javaWasm, langQueries{
+		return javaWasmGzip, langQueries{
 			classes:   queryJavaClasses,
 			functions: queryJavaFunctions,
 			calls:     queryJavaCalls,
@@ -237,19 +259,78 @@ func langConfig(lang string) ([]byte, langQueries, error) {
 
 // Symbol represents an extracted code symbol.
 type Symbol struct {
-	Capture  string
-	NodeType string
-	Name     string
-	Line     int
-	Col      int
-	Parent   string
-	Scope    string
+	Capture             string
+	NodeType            string
+	Name                string
+	QualifiedName       string
+	Kind                string
+	Signature           string
+	RawText             string
+	Receiver            string
+	Resolution          string
+	Confidence          float64
+	Arity               int
+	ArgumentTypes       string
+	ArgumentExpressions string
+	ParameterTypes      string
+	ReturnType          string
+	SemanticKey         string
+	Modifiers           string
+	Condition           string
+	ReceiverType        string
+	TargetKind          string
+	Line                int
+	EndLine             int
+	Col                 int
+	Parent              string
+	Scope               string
+}
+
+// VariableFact records a source-level type binding. Kind is one of global,
+// field, local, parameter, alias, or callback. Owner is a qualified type or
+// function name when the binding is not global.
+type VariableFact struct {
+	Name          string
+	QualifiedName string
+	TypeName      string
+	Owner         string
+	Kind          string
+	Target        string
+	TypeArguments string
+	Condition     string
+	Line          int
+}
+
+// MacroFact records a preprocessor definition separately from runtime calls.
+type MacroFact struct {
+	Name          string
+	QualifiedName string
+	Body          string
+	FunctionLike  bool
+	Arity         int
+	Condition     string
+	Line          int
+}
+
+// TypeAliasFact records source-level type indirection without requiring a
+// compiler. Target may retain generic arguments; the resolver normalizes them
+// according to the use site (for example unique_ptr<T> -> T for operator->).
+type TypeAliasFact struct {
+	Name           string
+	QualifiedName  string
+	Target         string
+	Owner          string
+	Kind           string
+	TypeParameters string
+	Condition      string
+	Line           int
 }
 
 // Inheritance represents a class -> parent relationship.
 type Inheritance struct {
 	ClassName  string
 	ParentName string
+	Kind       string
 	Line       int
 }
 
@@ -260,6 +341,9 @@ type ParseResult struct {
 	Calls       []Symbol
 	Imports     []Symbol
 	Inheritance []Inheritance
+	Variables   []VariableFact
+	Macros      []MacroFact
+	Aliases     []TypeAliasFact
 }
 
 // ---- Tree-sitter query patterns per language ----
@@ -278,12 +362,24 @@ const queryCPPFunctions = `
 (function_definition) @function
 (declaration
   declarator: (function_declarator)) @function
+(field_declaration
+  declarator: (function_declarator)) @function
+(field_declaration
+  declarator: (pointer_declarator
+    (function_declarator))) @function
+(field_declaration
+  declarator: (reference_declarator
+    (function_declarator))) @function
 (template_declaration (function_definition)) @function
+(template_declaration
+  (declaration declarator: (function_declarator))) @function
 `
 
 const queryCPPCalls = `
 (call_expression
   function: (_) @callee) @call
+(new_expression
+  type: (_) @callee) @call
 `
 
 // Python query patterns
@@ -301,21 +397,6 @@ const queryPythonCalls = `
   function: (_) @callee) @call
 `
 
-// Go query patterns
-const queryGoTypes = `
-(type_declaration (type_spec)) @class
-`
-
-const queryGoFunctions = `
-(function_declaration) @function
-(method_declaration) @function
-`
-
-const queryGoCalls = `
-(call_expression
-  function: (_) @callee) @call
-`
-
 // C# query patterns
 const queryCSharpClasses = `
 (class_declaration) @class
@@ -327,11 +408,18 @@ const queryCSharpClasses = `
 const queryCSharpFunctions = `
 (method_declaration) @function
 (constructor_declaration) @function
+(destructor_declaration) @function
+(operator_declaration) @function
+(conversion_operator_declaration) @function
+(property_declaration) @function
 `
 
 const queryCSharpCalls = `
 (invocation_expression
   function: (_) @callee) @call
+(object_creation_expression) @call
+(object_creation_expression
+  type: (_) @callee)
 `
 
 // C/C++ include
@@ -343,11 +431,6 @@ const queryCPPIncludes = `
 const queryPythonImports = `
 (import_statement) @import
 (import_from_statement) @import
-`
-
-// Go imports
-const queryGoImports = `
-(import_declaration) @import
 `
 
 // C# usings
@@ -398,6 +481,7 @@ const queryJavaClasses = `
 const queryJavaFunctions = `
 (method_declaration) @function
 (constructor_declaration) @function
+(compact_constructor_declaration) @function
 `
 
 const queryJavaCalls = `
@@ -415,7 +499,6 @@ func (e *engine) Parse(source string) (*ParseResult, error) {
 		return nil, fmt.Errorf("source too large (%d bytes, max %d)", len(source), maxSourceSize)
 	}
 	e.parseCount++
-
 	ctx := context.Background()
 	mem := e.mod.Memory()
 
@@ -427,6 +510,22 @@ func (e *engine) Parse(source string) (*ParseResult, error) {
 
 	// Fallback: individual calls (should not happen with current WASM builds)
 	return e.parseSlow(ctx, mem, source)
+}
+
+func parseSource(lang, source string) (*ParseResult, error) {
+	if lang == "go" {
+		return parseGoSource(source)
+	}
+	eng, err := getEngine(lang)
+	if err != nil {
+		return nil, err
+	}
+	result, parseErr := eng.Parse(source)
+	putEngine(eng)
+	if parseErr != nil {
+		return nil, parseErr
+	}
+	return enhanceParseResult(lang, source, result), nil
 }
 
 // parseFast uses parse_and_extract_all for minimal WASM boundary crossings.
@@ -598,13 +697,21 @@ func (e *engine) parseSlow(ctx context.Context, mem api.Memory, source string) (
 
 	result := &ParseResult{}
 	result.Classes, err = runQuery(e.queries.classes)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	result.Functions, err = runQuery(e.queries.functions)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	result.Calls, err = runQuery(e.queries.calls)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	result.Imports, err = runQuery(e.queries.imports)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	return result, nil
 }
 

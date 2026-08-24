@@ -18,7 +18,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version-file: go.mod
 
       - name: Verify version matches tag
         run: |
@@ -32,11 +32,11 @@ jobs:
       - name: Cross-compile
         run: |
           mkdir -p dist
-          GOOS=linux   GOARCH=amd64 go build -o dist/agent-tool-linux-amd64 .
-          GOOS=linux   GOARCH=arm64 go build -o dist/agent-tool-linux-arm64 .
-          GOOS=darwin  GOARCH=amd64 go build -o dist/agent-tool-darwin-amd64 .
-          GOOS=darwin  GOARCH=arm64 go build -o dist/agent-tool-darwin-arm64 .
-          GOOS=windows GOARCH=amd64 go build -o dist/agent-tool-windows-amd64.exe .
+          GOOS=linux   GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/agent-tool-linux-amd64 .
+          GOOS=linux   GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o dist/agent-tool-linux-arm64 .
+          GOOS=darwin  GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/agent-tool-darwin-amd64 .
+          GOOS=darwin  GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o dist/agent-tool-darwin-arm64 .
+          GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/agent-tool-windows-amd64.exe .
 
       - name: Build mcpb
         run: |

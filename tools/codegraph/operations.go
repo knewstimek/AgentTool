@@ -38,80 +38,147 @@ func opIndex(input CodeGraphInput) (string, error) {
 	if !fi.IsDir() {
 		return "", fmt.Errorf("path must be a directory")
 	}
+	scanRoots := []string{root}
+	if len(input.Roots) > 0 {
+		scanRoots = nil
+		seenRoots := make(map[string]bool)
+		for index, sourceRoot := range input.Roots {
+			sourceRoot = filepath.Clean(sourceRoot)
+			if !filepath.IsAbs(sourceRoot) {
+				return "", fmt.Errorf("roots[%d] must be absolute", index)
+			}
+			if err := validateCodeGraphRoot(sourceRoot); err != nil {
+				return "", fmt.Errorf("roots[%d]: %w", index, err)
+			}
+			key := strings.ToLower(sourceRoot)
+			if !seenRoots[key] {
+				seenRoots[key] = true
+				scanRoots = append(scanRoots, sourceRoot)
+			}
+		}
+	}
 
+	existingDB, existingDBErr := os.Stat(filepath.Join(root, dbFileName))
+	compactRefresh := existingDBErr == nil && existingDB.Size() >= 32*1024*1024
 	db, err := openDB(root)
 	if err != nil {
 		return "", fmt.Errorf("db: %w", err)
 	}
 	defer db.Close()
+	fullRefresh, err := prepareExtractorVersion(db)
+	if err != nil {
+		return "", fmt.Errorf("prepare extractor version: %w", err)
+	}
 
-	var indexed, skipped int
+	var indexed, skipped, removed int
 	var indexedAtomic, skippedAtomic, errorsAtomic int64
+	var errorMu sync.Mutex
+	var errorDetails []string
+	var scanElapsed, parseStoreElapsed, semanticElapsed time.Duration
+	addError := func(path string, err error) {
+		atomic.AddInt64(&errorsAtomic, 1)
+		errorMu.Lock()
+		defer errorMu.Unlock()
+		if len(errorDetails) >= 10 {
+			return
+		}
+		if path == "" {
+			errorDetails = append(errorDetails, err.Error())
+			return
+		}
+		errorDetails = append(errorDetails, fmt.Sprintf("%s: %v", path, err))
+	}
 	t0 := time.Now()
-
-	// Load .gitignore patterns for filtering
-	gitIgnore := loadGitignore(root)
 
 	// Phase 1: collect files to index
 	type fileEntry struct {
 		path string
 		lang string
+		root string
 	}
 	var files []fileEntry
+	seenFiles := make(map[string]struct{})
+	walkHadErrors := false
 
-	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil
-		}
-		if !common.GetAllowSymlinks() {
-			if lfi, lerr := os.Lstat(path); lerr == nil && lfi.Mode()&os.ModeSymlink != 0 {
-				if info.IsDir() {
+	for _, scanRoot := range scanRoots {
+		gitIgnore := loadGitignore(scanRoot)
+		walkErr := filepath.Walk(scanRoot, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				walkHadErrors = true
+				addError(path, err)
+				return nil
+			}
+			if !common.GetAllowSymlinks() {
+				if lfi, lerr := os.Lstat(path); lerr == nil && lfi.Mode()&os.ModeSymlink != 0 {
+					if info.IsDir() {
+						return filepath.SkipDir
+					}
+					return nil
+				}
+			}
+			if info.IsDir() {
+				base := filepath.Base(path)
+				if isSkippedDir(base) {
 					return filepath.SkipDir
+				}
+				// Check .gitignore patterns
+				if gitIgnore != nil {
+					rel, err := filepath.Rel(scanRoot, path)
+					if err == nil && gitIgnore.match(rel, true) {
+						return filepath.SkipDir
+					}
 				}
 				return nil
 			}
-		}
-		if info.IsDir() {
-			base := filepath.Base(path)
-			if isSkippedDir(base) {
-				return filepath.SkipDir
+			if info.Size() > 10*1024*1024 {
+				return nil
 			}
-			// Check .gitignore patterns
+			lang := detectLanguage(path, input.Language)
+			if lang == "" {
+				return nil
+			}
+			// Check .gitignore patterns for files
 			if gitIgnore != nil {
-				rel, err := filepath.Rel(root, path)
-				if err == nil && gitIgnore.match(rel, true) {
-					return filepath.SkipDir
+				rel, err := filepath.Rel(scanRoot, path)
+				if err == nil && gitIgnore.match(rel, false) {
+					return nil
 				}
 			}
-			return nil
-		}
-		if info.Size() > 10*1024*1024 {
-			return nil
-		}
-		lang := detectLanguage(path, input.Language)
-		if lang == "" {
-			return nil
-		}
-		// Check .gitignore patterns for files
-		if gitIgnore != nil {
-			rel, err := filepath.Rel(root, path)
-			if err == nil && gitIgnore.match(rel, false) {
+			seenFiles[path] = struct{}{}
+			changed, changeErr := isFileChanged(db, path)
+			if changeErr != nil {
+				addError(path, fmt.Errorf("change detection: %w", changeErr))
+				changed = true
+			}
+			if !changed {
+				atomic.AddInt64(&skippedAtomic, 1)
 				return nil
 			}
-		}
-		changed, _ := isFileChanged(db, path)
-		if !changed {
-			atomic.AddInt64(&skippedAtomic, 1)
+			files = append(files, fileEntry{path: path, lang: lang, root: scanRoot})
 			return nil
+		})
+		if walkErr != nil {
+			walkHadErrors = true
+			addError(scanRoot, fmt.Errorf("walk: %w", walkErr))
 		}
-		files = append(files, fileEntry{path, lang})
-		return nil
-	})
+	}
+
+	// Reconcile the index with the current source set. Skip this after an
+	// incomplete walk so a transient permission error cannot purge valid data.
+	if !walkHadErrors {
+		removed, err = purgeStaleFiles(db, seenFiles)
+		if err != nil {
+			addError(root, fmt.Errorf("purge stale files: %w", err))
+		}
+	}
+	scanElapsed = time.Since(t0)
 
 	// Phase 2: parallel parse + sequential DB store
 	type parseJob struct {
 		path   string
 		lang   string
+		root   string
+		hash   string
 		result *ParseResult
 	}
 
@@ -145,21 +212,15 @@ func opIndex(input CodeGraphInput) (string, error) {
 			for f := range fileCh {
 				data, err := os.ReadFile(f.path)
 				if err != nil {
-					atomic.AddInt64(&errorsAtomic, 1)
+					addError(f.path, fmt.Errorf("read: %w", err))
 					continue
 				}
-				eng, err := getEngine(f.lang)
+				result, err := parseSource(f.lang, string(data))
 				if err != nil {
-					atomic.AddInt64(&errorsAtomic, 1)
+					addError(f.path, fmt.Errorf("parse: %w", err))
 					continue
 				}
-				result, err := eng.Parse(string(data))
-				putEngine(eng)
-				if err != nil {
-					atomic.AddInt64(&errorsAtomic, 1)
-					continue
-				}
-				resultsCh <- parseJob{f.path, f.lang, result}
+				resultsCh <- parseJob{path: f.path, lang: f.lang, root: f.root, hash: contentHash(data), result: result}
 			}
 		}()
 	}
@@ -174,6 +235,7 @@ func opIndex(input CodeGraphInput) (string, error) {
 	// SQLite is much faster when multiple inserts are in one transaction
 	batchSize := 100
 	batch := make([]parseJob, 0, batchSize)
+	conditionCache := make(map[string]any)
 
 	flushBatch := func() {
 		if len(batch) == 0 {
@@ -181,22 +243,28 @@ func opIndex(input CodeGraphInput) (string, error) {
 		}
 		tx, err := db.Begin()
 		if err != nil {
-			atomic.AddInt64(&errorsAtomic, int64(len(batch)))
+			for _, job := range batch {
+				addError(job.path, fmt.Errorf("begin index transaction: %w", err))
+			}
 			batch = batch[:0]
 			return
 		}
-		defer tx.Rollback() // no-op after successful Commit
 		var committed int64
-		for _, job := range batch {
-			if err := storeParseResultTx(tx, job.path, job.lang, job.result); err != nil {
-				atomic.AddInt64(&errorsAtomic, 1)
+		for i, job := range batch {
+			savepoint := fmt.Sprintf("codegraph_file_%d", i)
+			if err := storeParseResultTxAtomicHashWithWorkspace(tx, savepoint, job.path, job.lang, job.hash, job.root, job.result, conditionCache); err != nil {
+				addError(job.path, fmt.Errorf("store index: %w", err))
 				continue
 			}
 			committed++
 		}
 		if err := tx.Commit(); err != nil {
 			// Commit failed = all rolled back, count all as errors
-			atomic.AddInt64(&errorsAtomic, committed)
+			for _, job := range batch {
+				addError(job.path, fmt.Errorf("commit index transaction: %w", err))
+			}
+			_ = tx.Rollback()
+			conditionCache = make(map[string]any)
 		} else {
 			atomic.AddInt64(&indexedAtomic, committed)
 		}
@@ -210,14 +278,121 @@ func opIndex(input CodeGraphInput) (string, error) {
 		}
 	}
 	flushBatch() // flush remaining
+	parseStoreElapsed = time.Since(t0) - scanElapsed
+	graphChanged := fullRefresh || removed > 0 || atomic.LoadInt64(&indexedAtomic) > 0
+	if graphChanged {
+		semanticStart := time.Now()
+		if err := resolveSymbolKinds(db); err != nil {
+			addError(root, fmt.Errorf("resolve symbol kinds: %w", err))
+		}
+		if err := resolveCallCandidates(db); err != nil {
+			addError(root, fmt.Errorf("resolve call candidates: %w", err))
+		}
+		if fullRefresh && compactRefresh {
+			if _, err := db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+				addError(root, fmt.Errorf("checkpoint refreshed index: %w", err))
+			}
+			if _, err := db.Exec("VACUUM"); err != nil {
+				addError(root, fmt.Errorf("compact refreshed index: %w", err))
+			}
+		}
+		_, _ = db.Exec("PRAGMA optimize")
+		semanticElapsed = time.Since(semanticStart)
+	}
 
 	indexed = int(indexedAtomic)
 	skipped = int(skippedAtomic)
 	errors := int(errorsAtomic)
 
 	elapsed := time.Since(t0)
-	return fmt.Sprintf("Index complete: %d files indexed, %d unchanged (skipped), %d errors\nTime: %s\nDB: %s",
-		indexed, skipped, errors, elapsed.Round(time.Millisecond), filepath.Join(root, dbFileName)), nil
+	result := fmt.Sprintf("Index complete: %d files indexed, %d unchanged (skipped), %d removed, %d errors\nTime: %s\nDB: %s",
+		indexed, skipped, removed, errors, elapsed.Round(time.Millisecond), filepath.Join(root, dbFileName))
+	if fullRefresh {
+		result += "\nExtractor: v" + extractorVersion + " (full structural refresh)"
+	}
+	if graphChanged {
+		result += fmt.Sprintf("\nPhases: scan %s, parse/store %s, semantic %s", scanElapsed.Round(time.Millisecond), parseStoreElapsed.Round(time.Millisecond), semanticElapsed.Round(time.Millisecond))
+	}
+	if len(errorDetails) > 0 {
+		result += "\nErrors:\n  " + strings.Join(errorDetails, "\n  ")
+		if errors > len(errorDetails) {
+			result += fmt.Sprintf("\n  ... and %d more", errors-len(errorDetails))
+		}
+	}
+	return result, nil
+}
+
+func validateCodeGraphRoot(root string) error {
+	if err := common.CheckDangerousPath(root); err != nil {
+		return err
+	}
+	if !common.GetAllowSymlinks() {
+		if info, err := os.Lstat(root); err == nil && info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("symlinks are not allowed (see set_config allow_symlinks)")
+		}
+	}
+	info, err := os.Stat(root)
+	if err != nil {
+		return fmt.Errorf("cannot access path: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("path must be a directory")
+	}
+	return nil
+}
+
+// purgeStaleFiles removes indexed files that are no longer part of the current
+// source walk. Foreign-key cascades remove their symbols and relationships.
+func purgeStaleFiles(db *sql.DB, seen map[string]struct{}) (int, error) {
+	rows, err := db.Query("SELECT id, path FROM files")
+	if err != nil {
+		return 0, err
+	}
+	var staleIDs []int64
+	for rows.Next() {
+		var id int64
+		var path string
+		if err := rows.Scan(&id, &path); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		if _, ok := seen[path]; !ok {
+			staleIDs = append(staleIDs, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	rows.Close()
+	if len(staleIDs) == 0 {
+		return 0, nil
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	stmt, err := tx.Prepare("DELETE FROM files WHERE id = ?")
+	if err != nil {
+		tx.Rollback()
+		return 0, err
+	}
+	for _, id := range staleIDs {
+		if _, err := stmt.Exec(id); err != nil {
+			stmt.Close()
+			tx.Rollback()
+			return 0, err
+		}
+	}
+	if err := stmt.Close(); err != nil {
+		tx.Rollback()
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return len(staleIDs), nil
 }
 
 // opFind searches for symbol definitions by name.
@@ -239,8 +414,8 @@ func opFind(input CodeGraphInput) (string, error) {
 		// Fuzzy mode: convert glob '*' to SQL LIKE '%'
 		likePattern := strings.ReplaceAll(escapeLike(strings.ReplaceAll(input.Name, "*", "\x00")), "\x00", "%")
 		rows, err = db.Query(`
-			SELECT s.name, s.qualified_name, s.kind, f.path, s.line, s.scope
-			FROM symbols s JOIN files f ON s.file_id = f.id
+			SELECT s.name, s.qualified_name, s.kind, f.path, s.line, s.end_line, s.scope, s.signature, s.return_type, COALESCE(cond.expression,s.condition)
+			FROM symbols s JOIN files f ON s.file_id = f.id LEFT JOIN conditions cond ON cond.id=s.condition_id
 			WHERE s.name LIKE ? ESCAPE '\' OR s.qualified_name LIKE ? ESCAPE '\'
 			ORDER BY s.kind, f.path, s.line
 			LIMIT 50
@@ -249,8 +424,8 @@ func opFind(input CodeGraphInput) (string, error) {
 		// Exact mode (existing behavior)
 		escaped := escapeLike(input.Name)
 		rows, err = db.Query(`
-			SELECT s.name, s.qualified_name, s.kind, f.path, s.line, s.scope
-			FROM symbols s JOIN files f ON s.file_id = f.id
+			SELECT s.name, s.qualified_name, s.kind, f.path, s.line, s.end_line, s.scope, s.signature, s.return_type, COALESCE(cond.expression,s.condition)
+			FROM symbols s JOIN files f ON s.file_id = f.id LEFT JOIN conditions cond ON cond.id=s.condition_id
 			WHERE s.name = ? OR s.qualified_name = ? OR s.qualified_name LIKE ? ESCAPE '\'
 			ORDER BY s.kind, f.path, s.line
 			LIMIT 50
@@ -264,14 +439,23 @@ func opFind(input CodeGraphInput) (string, error) {
 	var sb strings.Builder
 	count := 0
 	for rows.Next() {
-		var name, qn, kind, path, scope string
-		var line int
-		if err := rows.Scan(&name, &qn, &kind, &path, &line, &scope); err != nil {
+		var name, qn, kind, path, scope, signature, returnType, condition string
+		var line, endLine int
+		if err := rows.Scan(&name, &qn, &kind, &path, &line, &endLine, &scope, &signature, &returnType, &condition); err != nil {
 			continue
 		}
-		sb.WriteString(fmt.Sprintf("[%s] %s  %s:%d", kind, qn, path, line))
+		sb.WriteString(fmt.Sprintf("[%s] %s  %s:%d-%d", kind, qn, path, line, max(line, endLine)))
 		if scope != "" {
 			sb.WriteString(fmt.Sprintf("  (scope: %s)", scope))
+		}
+		if signature != "" {
+			sb.WriteString(fmt.Sprintf("  %s", signature))
+		}
+		if returnType != "" {
+			sb.WriteString(fmt.Sprintf("  (returns: %s)", returnType))
+		}
+		if condition != "" {
+			sb.WriteString(fmt.Sprintf("  [if %s]", condition))
 		}
 		sb.WriteString("\n")
 		count++
@@ -301,12 +485,21 @@ func opCallers(input CodeGraphInput) (string, error) {
 	// Exact match only for callers - LIKE '%name%' causes false positives
 	// (e.g. "SetDead" matching "WIN_ResetDeadKeys")
 	rows, err := db.Query(`
-		SELECT c.callee_name, f.path, c.caller_line, c.scope
+		SELECT COALESCE(NULLIF(c.raw_text, ''), c.callee_name), f.path, c.caller_line,
+		       COALESCE(NULLIF(c.caller_qualified_name, ''), c.scope), c.resolution, c.confidence, c.target_kind
 		FROM calls c JOIN files f ON c.caller_file_id = f.id
-		WHERE c.callee_name = ?
+		WHERE c.callee_name = ? OR c.callee_qualified_name = ? OR c.raw_text = ?
+		   OR EXISTS (
+		       SELECT 1 FROM call_candidates cc JOIN symbols target ON target.id = cc.symbol_id
+		       WHERE cc.call_id = c.id AND (target.name = ? OR target.qualified_name = ?)
+		   )
+		   OR EXISTS (
+		       SELECT 1 FROM dispatch_edges d JOIN semantic_symbols target ON target.id=d.semantic_id
+		       WHERE d.call_id=c.id AND (target.name=? OR target.qualified_name=?)
+		   )
 		ORDER BY f.path, c.caller_line
 		LIMIT 100
-	`, input.Name)
+	`, input.Name, input.Name, input.Name, input.Name, input.Name, input.Name, input.Name)
 	if err != nil {
 		return "", err
 	}
@@ -315,12 +508,17 @@ func opCallers(input CodeGraphInput) (string, error) {
 	var sb strings.Builder
 	count := 0
 	for rows.Next() {
-		var callee, path, scope string
+		var callee, path, scope, resolution, targetKind string
 		var line int
-		if err := rows.Scan(&callee, &path, &line, &scope); err != nil {
+		var confidence float64
+		if err := rows.Scan(&callee, &path, &line, &scope, &resolution, &confidence, &targetKind); err != nil {
 			continue
 		}
-		sb.WriteString(fmt.Sprintf("  %s:%d  calls %s", path, line, callee))
+		label := resolution
+		if targetKind != "" && targetKind != "internal" && targetKind != "unresolved" {
+			label = targetKind + "/" + resolution
+		}
+		sb.WriteString(fmt.Sprintf("  %s:%d  calls %s [%s %.2f]", path, line, callee, label, confidence))
 		if scope != "" {
 			sb.WriteString(fmt.Sprintf("  (in: %s)", scope))
 		}
@@ -355,10 +553,10 @@ func opCallees(input CodeGraphInput) (string, error) {
 
 	escaped := escapeLike(input.Name)
 	err = db.QueryRow(`
-		SELECT s.file_id, s.line, COALESCE(
+		SELECT s.file_id, s.line, CASE WHEN s.end_line >= s.line THEN s.end_line ELSE COALESCE(
 			(SELECT MIN(s2.line) - 1 FROM symbols s2 WHERE s2.file_id = s.file_id AND s2.line > s.line AND s2.kind IN ('function','method')),
 			s.line + 1000
-		)
+		) END
 		FROM symbols s
 		WHERE (s.name = ? OR s.qualified_name = ? OR s.qualified_name LIKE ? ESCAPE '\') AND s.kind IN ('function','method')
 		LIMIT 1
@@ -368,7 +566,8 @@ func opCallees(input CodeGraphInput) (string, error) {
 	}
 
 	rows, err := db.Query(`
-		SELECT c.callee_name, c.caller_line
+		SELECT COALESCE(NULLIF(c.raw_text, ''), c.callee_name), c.caller_line, c.resolution, c.confidence, c.target_kind,
+		       (SELECT COUNT(*) FROM dispatch_edges d WHERE d.call_id=c.id)
 		FROM calls c
 		WHERE c.caller_file_id = ? AND c.caller_line >= ? AND c.caller_line <= ?
 		ORDER BY c.caller_line
@@ -385,16 +584,24 @@ func opCallees(input CodeGraphInput) (string, error) {
 	count := 0
 	hasMore := false
 	for rows.Next() {
-		var callee string
-		var line int
-		if err := rows.Scan(&callee, &line); err != nil {
+		var callee, resolution, targetKind string
+		var line, dispatchTargets int
+		var confidence float64
+		if err := rows.Scan(&callee, &line, &resolution, &confidence, &targetKind, &dispatchTargets); err != nil {
 			continue
 		}
 		if count >= input.MaxResults {
 			hasMore = true
 			break
 		}
-		entry, _ := common.TruncateRunes(fmt.Sprintf("  line:%d  %s\n", line, callee), min(input.MaxOutputChars/2, 10000), "…\n")
+		label := resolution
+		if targetKind != "" && targetKind != "internal" && targetKind != "unresolved" {
+			label = targetKind + "/" + resolution
+		}
+		if dispatchTargets > 0 {
+			label += fmt.Sprintf(" dynamic:1+%d", dispatchTargets)
+		}
+		entry, _ := common.TruncateRunes(fmt.Sprintf("  line:%d  %s [%s %.2f]\n", line, callee, label, confidence), min(input.MaxOutputChars/2, 10000), "…\n")
 		if !common.AppendWithinRuneBudget(&sb, &usedChars, entry, input.MaxOutputChars) {
 			hasMore = true
 			break
@@ -437,13 +644,7 @@ func opSymbols(input CodeGraphInput) (string, error) {
 		return "", fmt.Errorf("file too large (%d bytes, max 10MB)", len(data))
 	}
 
-	eng, err := getEngine(lang)
-	if err != nil {
-		return "", fmt.Errorf("engine init: %w", err)
-	}
-
-	result, err := eng.Parse(string(data))
-	putEngine(eng)
+	result, err := parseSource(lang, string(data))
 	if err != nil {
 		return "", fmt.Errorf("parse failed: %w", err)
 	}
@@ -460,7 +661,11 @@ func opSymbols(input CodeGraphInput) (string, error) {
 			if s.Scope != "" {
 				scope = fmt.Sprintf(" (scope: %s)", s.Scope)
 			}
-			entries = append(entries, outputEntry{"Classes", fmt.Sprintf("  %s %s  line:%d%s\n", s.NodeType, s.Name, s.Line, scope)})
+			kind := s.Kind
+			if kind == "" {
+				kind = s.NodeType
+			}
+			entries = append(entries, outputEntry{"Types", fmt.Sprintf("  %s %s  line:%d%s%s\n", kind, s.Name, s.Line, scope, conditionAnnotation(s.Condition))})
 		}
 	}
 
@@ -474,36 +679,47 @@ func opSymbols(input CodeGraphInput) (string, error) {
 			if s.Parent == "field_declaration_list" {
 				parent = " [inline]"
 			}
-			entries = append(entries, outputEntry{"Functions/Methods", fmt.Sprintf("  %s  line:%d%s%s\n", cleanSymbolName(s.Name), s.Line, scope, parent)})
+			name := cleanSymbolName(s.Name)
+			if s.QualifiedName != "" {
+				name = s.QualifiedName
+			}
+			returns := ""
+			if s.ReturnType != "" {
+				returns = " -> " + s.ReturnType
+			}
+			entries = append(entries, outputEntry{"Functions/Methods", fmt.Sprintf("  %s%s  line:%d-%d%s%s%s\n", name, returns, s.Line, max(s.Line, s.EndLine), scope, parent, conditionAnnotation(s.Condition))})
 		}
 	}
 
 	if len(result.Imports) > 0 {
 		for _, s := range result.Imports {
-			entries = append(entries, outputEntry{"Imports/Includes", fmt.Sprintf("  %s  line:%d\n", s.Name, s.Line)})
+			entries = append(entries, outputEntry{"Imports/Includes", fmt.Sprintf("  %s  line:%d%s\n", s.Name, s.Line, conditionAnnotation(s.Condition))})
 		}
 	}
 
 	if len(result.Inheritance) > 0 {
 		for _, inh := range result.Inheritance {
-			entries = append(entries, outputEntry{"Inheritance", fmt.Sprintf("  %s -> %s  line:%d\n", inh.ClassName, inh.ParentName, inh.Line)})
+			kind := inh.Kind
+			if kind == "" {
+				kind = "inherits"
+			}
+			entries = append(entries, outputEntry{"Relations", fmt.Sprintf("  %s -[%s]-> %s  line:%d\n", inh.ClassName, kind, inh.ParentName, inh.Line)})
 		}
 	}
 
 	if len(result.Calls) > 0 {
-		callCount := 0
-		for _, s := range result.Calls {
-			if s.Capture == "call" {
-				callCount++
-			}
-		}
+		callCount := len(result.Calls)
 		for _, s := range result.Calls {
 			if s.Capture == "callee" {
 				scope := ""
 				if s.Scope != "" {
 					scope = fmt.Sprintf(" (in: %s)", s.Scope)
 				}
-				entries = append(entries, outputEntry{fmt.Sprintf("Calls (%d)", callCount), fmt.Sprintf("  %s  line:%d%s\n", cleanSymbolName(s.Name), s.Line, scope)})
+				callee := s.RawText
+				if callee == "" {
+					callee = cleanSymbolName(s.Name)
+				}
+				entries = append(entries, outputEntry{fmt.Sprintf("Calls (%d)", callCount), fmt.Sprintf("  %s  line:%d%s [%s %.2f]%s\n", callee, s.Line, scope, s.Resolution, s.Confidence, conditionAnnotation(s.Condition))})
 			}
 		}
 	}
@@ -541,6 +757,13 @@ func opSymbols(input CodeGraphInput) (string, error) {
 	return resultText, nil
 }
 
+func conditionAnnotation(condition string) string {
+	if condition == "" {
+		return ""
+	}
+	return " [if " + condition + "]"
+}
+
 // opMethods lists all methods of a class.
 func opMethods(input CodeGraphInput) (string, error) {
 	if input.Name == "" {
@@ -555,9 +778,9 @@ func opMethods(input CodeGraphInput) (string, error) {
 
 	escaped := escapeLike(input.Name)
 	rows, err := db.Query(`
-		SELECT s.name, s.qualified_name, f.path, s.line
+		SELECT s.name, s.qualified_name, f.path, s.line, s.end_line, s.signature
 		FROM symbols s JOIN files f ON s.file_id = f.id
-		WHERE s.kind = 'method' AND (s.scope = ? OR s.qualified_name LIKE ? ESCAPE '\')
+		WHERE s.kind IN ('method','property') AND (s.scope = ? OR s.qualified_name LIKE ? ESCAPE '\')
 		ORDER BY f.path, s.line
 		LIMIT 100
 	`, input.Name, escaped+"::%")
@@ -569,12 +792,16 @@ func opMethods(input CodeGraphInput) (string, error) {
 	var sb strings.Builder
 	count := 0
 	for rows.Next() {
-		var name, qn, path string
-		var line int
-		if err := rows.Scan(&name, &qn, &path, &line); err != nil {
+		var name, qn, path, signature string
+		var line, endLine int
+		if err := rows.Scan(&name, &qn, &path, &line, &endLine, &signature); err != nil {
 			continue
 		}
-		sb.WriteString(fmt.Sprintf("  %s  %s:%d\n", qn, path, line))
+		sb.WriteString(fmt.Sprintf("  %s  %s:%d-%d", qn, path, line, max(line, endLine)))
+		if signature != "" {
+			sb.WriteString("  " + signature)
+		}
+		sb.WriteString("\n")
 		count++
 	}
 	if err := rows.Err(); err != nil {
@@ -603,7 +830,7 @@ func opInherits(input CodeGraphInput) (string, error) {
 
 	// Parents (what does this class extend/implement?)
 	rows, err := db.Query(`
-		SELECT i.parent_name, f.path, i.line
+		SELECT i.parent_name, i.relation_kind, f.path, i.line
 		FROM inheritance i JOIN files f ON i.file_id = f.id
 		WHERE i.class_name = ?
 		ORDER BY f.path, i.line
@@ -616,12 +843,12 @@ func opInherits(input CodeGraphInput) (string, error) {
 	sb.WriteString("Parents (extends/implements):\n")
 	parentCount := 0
 	for rows.Next() {
-		var parent, path string
+		var parent, relation, path string
 		var line int
-		if err := rows.Scan(&parent, &path, &line); err != nil {
+		if err := rows.Scan(&parent, &relation, &path, &line); err != nil {
 			continue
 		}
-		sb.WriteString(fmt.Sprintf("  %s  (%s:%d)\n", parent, path, line))
+		sb.WriteString(fmt.Sprintf("  [%s] %s  (%s:%d)\n", relation, parent, path, line))
 		parentCount++
 	}
 	if err := rows.Err(); err != nil {
@@ -635,7 +862,7 @@ func opInherits(input CodeGraphInput) (string, error) {
 
 	// Children (what classes extend this one?)
 	rows2, err := db.Query(`
-		SELECT i.class_name, f.path, i.line
+		SELECT i.class_name, i.relation_kind, f.path, i.line
 		FROM inheritance i JOIN files f ON i.file_id = f.id
 		WHERE i.parent_name = ?
 		ORDER BY f.path, i.line
@@ -647,12 +874,12 @@ func opInherits(input CodeGraphInput) (string, error) {
 	sb.WriteString("\nChildren (extended by):\n")
 	childCount := 0
 	for rows2.Next() {
-		var child, path string
+		var child, relation, path string
 		var line int
-		if err := rows2.Scan(&child, &path, &line); err != nil {
+		if err := rows2.Scan(&child, &relation, &path, &line); err != nil {
 			continue
 		}
-		sb.WriteString(fmt.Sprintf("  %s  (%s:%d)\n", child, path, line))
+		sb.WriteString(fmt.Sprintf("  [%s] %s  (%s:%d)\n", relation, child, path, line))
 		childCount++
 	}
 	if err := rows2.Err(); err != nil {
@@ -950,14 +1177,30 @@ func opStats(input CodeGraphInput) (string, error) {
 	}
 	defer db.Close()
 
-	var files, classes, functions, methods, calls, includes, inheritance int
+	var files, types, functions, methods, calls, candidates, includes, inheritance, variables, macros int
+	var semanticSymbols, aliases, transitiveIncludes, dispatchEdges, conditionalFacts int
+	var internalExact, internalCandidate, externalCalls, macroCalls, callbackCalls, unresolvedCalls int
 	db.QueryRow("SELECT COUNT(*) FROM files").Scan(&files)
-	db.QueryRow("SELECT COUNT(*) FROM symbols WHERE kind='class'").Scan(&classes)
+	db.QueryRow("SELECT COUNT(*) FROM symbols WHERE kind IN ('class','struct','interface','trait','enum','union','record','type','alias','impl')").Scan(&types)
 	db.QueryRow("SELECT COUNT(*) FROM symbols WHERE kind='function'").Scan(&functions)
 	db.QueryRow("SELECT COUNT(*) FROM symbols WHERE kind='method'").Scan(&methods)
 	db.QueryRow("SELECT COUNT(*) FROM calls").Scan(&calls)
+	db.QueryRow("SELECT COUNT(*) FROM call_candidates").Scan(&candidates)
 	db.QueryRow("SELECT COUNT(*) FROM includes").Scan(&includes)
 	db.QueryRow("SELECT COUNT(*) FROM inheritance").Scan(&inheritance)
+	db.QueryRow("SELECT COUNT(*) FROM variables").Scan(&variables)
+	db.QueryRow("SELECT COUNT(*) FROM macros").Scan(&macros)
+	db.QueryRow("SELECT COUNT(*) FROM semantic_symbols").Scan(&semanticSymbols)
+	db.QueryRow("SELECT COUNT(*) FROM type_aliases").Scan(&aliases)
+	db.QueryRow("SELECT COUNT(*) FROM include_edges WHERE distance>1").Scan(&transitiveIncludes)
+	db.QueryRow("SELECT COUNT(*) FROM dispatch_edges").Scan(&dispatchEdges)
+	db.QueryRow("SELECT (SELECT COUNT(*) FROM symbols WHERE condition<>'' OR condition_id IS NOT NULL) + (SELECT COUNT(*) FROM calls WHERE condition<>'' OR condition_id IS NOT NULL) + (SELECT COUNT(*) FROM includes WHERE condition<>'' OR condition_id IS NOT NULL)").Scan(&conditionalFacts)
+	db.QueryRow("SELECT COUNT(*) FROM calls WHERE target_kind='internal' AND resolution='exact'").Scan(&internalExact)
+	db.QueryRow("SELECT COUNT(*) FROM calls WHERE target_kind='internal' AND resolution<>'exact'").Scan(&internalCandidate)
+	db.QueryRow("SELECT COUNT(*) FROM calls WHERE target_kind='external'").Scan(&externalCalls)
+	db.QueryRow("SELECT COUNT(*) FROM calls WHERE target_kind='macro'").Scan(&macroCalls)
+	db.QueryRow("SELECT COUNT(*) FROM calls WHERE target_kind='callback'").Scan(&callbackCalls)
+	db.QueryRow("SELECT COUNT(*) FROM calls WHERE target_kind='unresolved'").Scan(&unresolvedCalls)
 
 	// Language breakdown
 	langRows, err := db.Query("SELECT language, COUNT(*) FROM files GROUP BY language ORDER BY COUNT(*) DESC")
@@ -979,8 +1222,13 @@ func opStats(input CodeGraphInput) (string, error) {
 		return "", fmt.Errorf("query error: %w", err)
 	}
 
-	return fmt.Sprintf("Project Index Stats:\n  Files: %d\n  Classes/Structs: %d\n  Functions: %d\n  Methods: %d\n  Call sites: %d\n  Imports/Includes: %d\n  Inheritance relations: %d\n\nLanguages:\n%s",
-		files, classes, functions, methods, calls, includes, inheritance, langBreakdown.String()), nil
+	unresolvedRate := 0.0
+	if calls > 0 {
+		unresolvedRate = float64(unresolvedCalls) * 100 / float64(calls)
+	}
+	return fmt.Sprintf("Project Index Stats:\n  Files: %d\n  Types: %d\n  Semantic symbols: %d\n  Functions: %d\n  Methods: %d\n  Variables/Fields: %d\n  Type aliases: %d\n  Macros: %d\n  Call sites: %d\n  Candidate edges: %d\n  Dynamic dispatch edges: %d\n  Imports/Includes: %d (transitive: %d)\n  Type relations: %d\n  Conditional facts: %d\n\nCall Classification:\n  Internal exact: %d\n  Internal candidate: %d\n  External: %d\n  Macro use: %d\n  Callback: %d\n  Truly unresolved: %d (%.2f%%)\n\nLanguages:\n%s",
+		files, types, semanticSymbols, functions, methods, variables, aliases, macros, calls, candidates, dispatchEdges, includes, transitiveIncludes, inheritance, conditionalFacts,
+		internalExact, internalCandidate, externalCalls, macroCalls, callbackCalls, unresolvedCalls, unresolvedRate, langBreakdown.String()), nil
 }
 
 // opImporters finds files that import/include a given file.
@@ -1037,14 +1285,17 @@ func opUnused(input CodeGraphInput) (string, error) {
 	}
 	defer db.Close()
 
-	// Find functions/methods that have no matching call site.
-	// Uses LEFT JOIN: symbols with no calls entry are "unused".
+	// A symbol is considered used by either a direct qualified edge or any
+	// conservative candidate edge. This avoids false "unused" reports when a
+	// short call name is ambiguous.
 	rows, err := db.Query(`
 		SELECT s.name, s.qualified_name, s.kind, f.path, s.line, s.scope
 		FROM symbols s
 		JOIN files f ON s.file_id = f.id
-		LEFT JOIN calls c ON c.callee_name = s.name
-		WHERE s.kind IN ('function', 'method') AND c.id IS NULL
+		WHERE s.kind IN ('function', 'method')
+		  AND NOT EXISTS (SELECT 1 FROM calls c WHERE c.resolution = 'exact' AND c.callee_qualified_name = s.qualified_name)
+		  AND NOT EXISTS (SELECT 1 FROM call_candidates cc WHERE cc.symbol_id = s.id)
+		  AND NOT EXISTS (SELECT 1 FROM symbol_occurrences so JOIN dispatch_edges d ON d.semantic_id=so.semantic_id WHERE so.symbol_id=s.id)
 		ORDER BY f.path, s.line
 		LIMIT 200
 	`)
@@ -1146,21 +1397,29 @@ func buildCallTree(db *sql.DB, sb *strings.Builder, name, direction string, dept
 	if direction == "up" {
 		// Find callers of this function
 		rows, err = db.Query(`
-			SELECT DISTINCT c.scope, f.path, c.caller_line
+			SELECT DISTINCT COALESCE(NULLIF(c.caller_qualified_name, ''), c.scope), f.path, c.caller_line
 			FROM calls c JOIN files f ON c.caller_file_id = f.id
-			WHERE c.callee_name = ?
+			WHERE c.callee_name = ? OR c.callee_qualified_name = ? OR c.raw_text = ?
+			   OR EXISTS (
+			       SELECT 1 FROM call_candidates cc JOIN symbols target ON target.id = cc.symbol_id
+			       WHERE cc.call_id = c.id AND (target.name = ? OR target.qualified_name = ?)
+			   )
+			   OR EXISTS (
+			       SELECT 1 FROM dispatch_edges d JOIN semantic_symbols target ON target.id=d.semantic_id
+			       WHERE d.call_id=c.id AND (target.name=? OR target.qualified_name=?)
+			   )
 			ORDER BY f.path, c.caller_line
 			LIMIT 50
-		`, name)
+		`, name, name, name, name, name, name, name)
 	} else {
 		// Find callees: first find this function's file and line range
 		var fileID, startLine, endLine int
 		escaped := escapeLike(name)
 		err = db.QueryRow(`
-			SELECT s.file_id, s.line, COALESCE(
+			SELECT s.file_id, s.line, CASE WHEN s.end_line >= s.line THEN s.end_line ELSE COALESCE(
 				(SELECT MIN(s2.line) - 1 FROM symbols s2 WHERE s2.file_id = s.file_id AND s2.line > s.line AND s2.kind IN ('function','method')),
 				s.line + 1000
-			)
+			) END
 			FROM symbols s
 			WHERE (s.name = ? OR s.qualified_name = ? OR s.qualified_name LIKE ? ESCAPE '\') AND s.kind IN ('function','method')
 			LIMIT 1
@@ -1169,7 +1428,7 @@ func buildCallTree(db *sql.DB, sb *strings.Builder, name, direction string, dept
 			return
 		}
 		rows, err = db.Query(`
-			SELECT DISTINCT c.callee_name, f.path, c.caller_line
+			SELECT DISTINCT COALESCE(NULLIF(c.raw_text, ''), c.callee_name), f.path, c.caller_line
 			FROM calls c JOIN files f ON c.caller_file_id = f.id
 			WHERE c.caller_file_id = ? AND c.caller_line >= ? AND c.caller_line <= ?
 			ORDER BY c.caller_line

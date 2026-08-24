@@ -91,7 +91,7 @@ Claude Code, Codex CLI, Cursor, Windsurf, Cline, Gemini CLI 및 모든 MCP 호�
 | **Memtool** | CheatEngine 스타일 프로세스 메모리 도구 — 메모리 값 검색/필터/읽기/쓰기, read_chain(base+offset 포인터 체인을 한 콜에 배치로 해소), 라이브 디스어셈블리(x86/x64/ARM/ARM64), 실행 취소, 구조체 패턴 검색, 포인터 스캔, 메모리 diff. 대용량 스캔을 위한 디스크 기반 스냅샷. 세션 관리 (유휴 타임아웃). Windows (ReadProcessMemory), Linux (/proc/pid/mem). Windows는 elevated 시 SeDebugPrivilege 자동 활성화, opt-in `force_dacl`로 같은 유저의 self-harden DACL 프로세스 우회(원본 DACL 원복) | ✅ |
 | **IPC** | AI 에이전트 세션 간 TCP 기반 프로세스 간 통신. 1:1 메시지 전달 (블로킹 수신). 프로토콜: [2바이트 타입][4바이트 길이][페이로드]. 작업: send, receive (타임아웃 블로킹), ping. 다른 PC 간 통신 가능. 최대 1MB 메시지, 300초 타임아웃 | ✅ |
 | **Wintool** | Windows GUI 자동화 -- 창/자식 컨트롤 검색/열거, 스크린샷 캡처(ImageContent PNG, PrintWindow), 클립보드 이미지 읽기, 텍스트 읽기/쓰기, 클릭, 타이핑, 원시 메시지 전송, 표시/숨기기/최소화/최대화, 이동/크기 변경, 닫기, 포커스. screenshot/clipboard 기본 ImageContent 반환 (save_path 옵션으로 파일 저장). AI 에이전트가 GUI 앱을 "보고" 조작할 수 있게 함. Windows 전용 | ✅ |
-| **CodeGraph** | tree-sitter(WASM) 기반 AST 코드 인덱싱. 11개 operation, 대형 symbols/callees 결과의 offset 페이징과 전체 출력 제한 지원. C/C++, Python, Go, C#, Rust, Java 지원. .gitignore 존중(중첩), venv/vendor/third_party 자동 스킵. LLM 호출 없음, 토큰 비용 0 | ✅ |
+| **CodeGraph** | 완전 내장 시맨틱 코드 그래프. Go 표준 라이브러리 AST와 C/C++·Python·C#·Rust·Java용 지연 압축 tree-sitter WASM에 선언/정의 통합, 반환 체인·generic·alias 전파, 전이 include, 보정 가능한 overload 증거 점수, virtual/interface dispatch, macro/callback 간선, 빌드 조건 provenance, multi-root workspace를 더함. 컴파일러·언어 서버·외부 바이너리·LLM 호출·토큰 비용 없음 | ✅ |
 | **SetConfig** | 런타임 설정 변경 (인코딩, 파일 크기 제한, symlink, workspace 등) | ✅ |
 | **Help** | 에이전트용 사용법 안내 (인코딩, 들여쓰기, 트러블슈팅) | ✅ |
 
@@ -146,6 +146,7 @@ Claude Code, Codex 등 AI 코딩 에이전트가 다운로드 → 설치 → 재
 
 ```
 At the start of a session, run codegraph(op="index", path="<project_root>") to build a code index.
+여러 저장소를 하나의 그래프로 만들 때는 codegraph(op="index", path="<db_root>", roots=["<source_root_1>", "<source_root_2>"])를 사용하세요. source-root provenance가 다른 프로젝트의 동명 심볼 오염을 막고, 명시적·전이 include는 root 사이에서도 연결합니다.
 Then use codegraph for structural queries (find, callers, callees, methods, inherits) instead of grep.
 ```
 
@@ -321,14 +322,14 @@ export AGENT_TOOL_PROFILE=coding
 ## 빌드
 
 ```bash
-go build -o agent-tool .
+go build -trimpath -ldflags="-s -w" -o agent-tool .
 ```
 
 크로스 컴파일:
 ```bash
-GOOS=linux GOARCH=amd64 go build -o agent-tool .
-GOOS=darwin GOARCH=arm64 go build -o agent-tool .
-GOOS=windows GOARCH=amd64 go build -o agent-tool.exe .
+GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o agent-tool .
+GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o agent-tool .
+GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o agent-tool.exe .
 ```
 
 ## 트러블슈팅

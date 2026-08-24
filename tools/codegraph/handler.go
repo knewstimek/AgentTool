@@ -21,6 +21,7 @@ const (
 type CodeGraphInput struct {
 	Operation      string      `json:"operation" jsonschema:"Operation: index, find, callers, callees, symbols, methods, inherits, stats, importers, unused, call_tree,required"`
 	Path           string      `json:"path,omitempty" jsonschema:"Project/file path. Relative paths use workspace/MCP root"`
+	Roots          []string    `json:"roots,omitempty" jsonschema:"Optional source roots for one workspace index. When set, path stores the shared .codegraph.db and only these roots are scanned"`
 	Name           string      `json:"name,omitempty" jsonschema:"Symbol name to search for (for find, callers, callees, methods, inherits, call_tree)"`
 	Language       string      `json:"language,omitempty" jsonschema:"Language hint: cpp, python, go, csharp, rust, java. Default: auto-detect from file extension"`
 	Workers        interface{} `json:"workers,omitempty" jsonschema:"Number of parallel parse workers for index operation. Default: 4. Higher = faster but more memory (~7MB per worker)"`
@@ -69,6 +70,13 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input CodeGraphInput)
 			return errorResult(fmt.Sprintf("cannot resolve path: %v", err))
 		}
 		input.Path = resolvedPath
+	}
+	for index, root := range input.Roots {
+		resolvedRoot, err := common.ResolveRequestPath(ctx, req, root)
+		if err != nil {
+			return errorResult(fmt.Sprintf("cannot resolve roots[%d]: %v", index, err))
+		}
+		input.Roots[index] = resolvedRoot
 	}
 
 	var result string
@@ -131,11 +139,14 @@ func normalizeCodeGraphLimits(input *CodeGraphInput) error {
 func Register(server *mcp.Server) {
 	common.SafeAddTool(server, &mcp.Tool{
 		Name: "codegraph",
-		Description: `AST-based code indexing and symbol lookup tool.
-Parses source code with tree-sitter (via WASM, no external dependencies) and stores
-symbols/relationships in a local SQLite index (.codegraph.db).
+		Description: `Fully embedded semantic code graph and symbol lookup tool.
+Parses Go with the standard library AST and other languages with lazy compressed
+tree-sitter WASM. No compiler, language server, or external binary is required.
+Stores stable declaration/definition identities, return/receiver data flow,
+aliases, transitive includes, build conditions, calibrated candidate evidence,
+dynamic dispatch, and calls in a local SQLite index (.codegraph.db).
 Operations:
-  index(path) - Build or update the code index for a project directory.
+  index(path, roots?) - Build/update one project or a multi-root workspace index.
   find(name) - Find symbol definitions by name (function, class, method).
   callers(name) - Find all callers of a function/method.
   callees(name) - Find all functions/methods called by a function.
@@ -153,7 +164,7 @@ No LLM calls, no embeddings -- pure data lookup, zero token cost.
 Tip: Run index once at the start of a session, then use find/callers/call_tree to navigate.
 Large symbols/callees results are bounded by max_output_chars and include the next offset.
 Re-run index after bulk edits to update changed files (incremental, fast).
-Powered by tree-sitter (MIT) via wazero (pure Go WASM runtime).`,
+Powered by Go's standard parser and tree-sitter (MIT) via wazero.`,
 	}, Handle)
 }
 
