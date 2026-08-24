@@ -60,7 +60,7 @@ reasonable alternatives and is not a failed resolution.
 - A checked-in ground-truth suite and reproducible metric report exist.
 - Confidence bins are calibrated and exact false-positive regressions are blocked in CI.
 - Every supported language has focused regression coverage.
-- Large C++ codebase and Dependent C++ component are rerun standalone and as a scoped workspace, with
+- The benchmark codebases are rerun standalone and as a scoped workspace, with
   accuracy, coverage, performance, database size, and binary size compared to v0.9.5.
 - User-facing behavior and release notes are updated.
 

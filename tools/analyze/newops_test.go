@@ -6,12 +6,15 @@ import (
 	"testing"
 )
 
-// Integration tests using the crackme.exe (x86 32-bit PE, private fixture).
-// Skipped if the test binary is not available.
-const testCrackme = `testdata\private_fixture_x86.exe`
+// Integration tests using an optional x86 32-bit PE fixture.
+// Set AGENT_TOOL_TEST_CRACKME to enable them; otherwise they are skipped.
+var testCrackme = os.Getenv("AGENT_TOOL_TEST_CRACKME")
 
 func skipIfNoCrackme(t *testing.T) {
 	t.Helper()
+	if testCrackme == "" {
+		t.Skip("AGENT_TOOL_TEST_CRACKME is not set")
+	}
 	if _, err := os.Stat(testCrackme); err != nil {
 		t.Skipf("test binary not available: %s", testCrackme)
 	}
@@ -415,10 +418,13 @@ func TestStructLayout_MaxLength(t *testing.T) {
 
 // --- x64 RTTI tests ---
 
-const testCrackmeX64 = `testdata\private_fixture_x64.exe`
+var testCrackmeX64 = os.Getenv("AGENT_TOOL_TEST_CRACKME_X64")
 
 func skipIfNoCrackmeX64(t *testing.T) {
 	t.Helper()
+	if testCrackmeX64 == "" {
+		t.Skip("AGENT_TOOL_TEST_CRACKME_X64 is not set")
+	}
 	if _, err := os.Stat(testCrackmeX64); err != nil {
 		t.Skipf("x64 test binary not available: %s", testCrackmeX64)
 	}
