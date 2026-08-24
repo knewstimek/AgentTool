@@ -3,14 +3,42 @@ package analyze
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// Local-only test: requires a pre-built PE binary at this path.
-// These tests are not meant for CI — they validate against the local build output.
-const testBinary = `C:\agent-tool-test\agent-tool.exe`
+var testBinary string
+
+func TestMain(m *testing.M) {
+	tmp, err := os.MkdirTemp("", "agent-tool-analyze-test-*")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "create analyze test directory:", err)
+		os.Exit(1)
+	}
+
+	sourcePath := filepath.Join(tmp, "fixture.go")
+	source := []byte("package main\n\nimport \"fmt\"\n\nfunc main() { fmt.Println(\"agent-tool analyze fixture\") }\n")
+	if err := os.WriteFile(sourcePath, source, 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, "write analyze test fixture:", err)
+		_ = os.RemoveAll(tmp)
+		os.Exit(1)
+	}
+
+	testBinary = filepath.Join(tmp, "fixture.exe")
+	cmd := exec.Command("go", "build", "-o", testBinary, sourcePath)
+	cmd.Env = append(os.Environ(), "GOOS=windows", "GOARCH=amd64", "CGO_ENABLED=0")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		fmt.Fprintf(os.Stderr, "build analyze test fixture: %v\n%s", err, output)
+		_ = os.RemoveAll(tmp)
+		os.Exit(1)
+	}
+
+	code := m.Run()
+	_ = os.RemoveAll(tmp)
+	os.Exit(code)
+}
 
 func TestPEInfo(t *testing.T) {
 	input := AnalyzeInput{
