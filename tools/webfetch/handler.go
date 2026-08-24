@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	defaultMaxLength  = 100000  // 100K characters
+	defaultMaxLength  = common.DefaultOutputChars
 	defaultTimeoutSec = 30
 	maxTimeoutSec     = 120
 	maxResponseBytes  = 10 * 1024 * 1024 // 10 MB raw download limit
@@ -24,7 +24,7 @@ const (
 type WebFetchInput struct {
 	URL        string            `json:"url" jsonschema:"URL to fetch content from (http/https),required"`
 	Headers    map[string]string `json:"headers,omitempty" jsonschema:"Custom HTTP headers (e.g. User-Agent, Accept, Authorization, Referer)"`
-	MaxLength  interface{}       `json:"max_length,omitempty" jsonschema:"Maximum response length in characters. Default: 100000"`
+	MaxLength  interface{}       `json:"max_length,omitempty" jsonschema:"Maximum response length in characters. Default: 32768, Max: 131072"`
 	TimeoutSec interface{}       `json:"timeout_sec,omitempty" jsonschema:"Request timeout in seconds. Default: 30, Max: 120"`
 	ProxyURL   string            `json:"proxy_url,omitempty" jsonschema:"HTTP or SOCKS5 proxy URL (e.g. http://proxy:8080, socks5://proxy:1080)"`
 	NoDoH      interface{}       `json:"no_doh,omitempty" jsonschema:"Disable DNS over HTTPS: true or false. Default: false (DoH enabled)"`
@@ -68,6 +68,9 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input WebFetchInput) 
 	}
 	if maxLength <= 0 {
 		maxLength = defaultMaxLength
+	}
+	if maxLength > common.HardOutputChars {
+		return errorResult(fmt.Sprintf("max_length exceeds maximum (%d)", common.HardOutputChars))
 	}
 	if timeoutSec <= 0 {
 		timeoutSec = defaultTimeoutSec

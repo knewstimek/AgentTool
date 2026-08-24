@@ -14,25 +14,36 @@ Built-in tools in AI coding agents (Claude Code, Cursor, Codex, etc.) have known
 
 - **Tab indentation breaks**: LLMs output spaces, but your project uses tabs. The built-in Edit tool writes spaces as-is, corrupting your indentation style.
 - **Encoding corruption**: Editing EUC-KR, Shift-JIS, or GB18030 files silently converts them to UTF-8, breaking legacy projects.
-- **Too many separate tools**: Making the agent find, install, and configure Redis CLI, MySQL client, SSH client, etc. is tedious and error-prone. agent-tool bundles 50 tools into a single binary -- one install, everything works.
+- **Too many separate tools**: Making the agent find, install, and configure Redis CLI, MySQL client, SSH client, etc. is tedious and error-prone. agent-tool bundles 54 tools into one binary and exposes them on demand through compact profiles.
 - **No reverse engineering support**: Built-in tools can't disassemble binaries, inspect PE/ELF headers, find function boundaries, or search cross-references. agent-tool includes static binary analysis (disassembly, xref, function detection), a DAP debugger, and CheatEngine-style memory tools -- giving your agent full reverse engineering capabilities.
 - **Network censorship**: In some countries, government-level web filtering breaks plain `curl`/`wget` requests. agent-tool uses ECH (Encrypted Client Hello) and DoH (DNS over HTTPS) by default to work around these restrictions.
 
-**agent-tool** solves these by providing drop-in replacement tools that respect your project's conventions.
+**agent-tool** solves these with agent-oriented tools that preserve project conventions while keeping model context bounded.
 
 ## Supported Agents
 
 Claude Code, Codex CLI, Cursor, Windsurf, Cline, Gemini CLI, and any MCP-compatible agent.
+
+## LLM-efficient by default
+
+The default `core` profile exposes only 11 schemas (including `toolbox`) instead of
+all 54. In a protocol-level measurement this reduced the serialized tool list from
+about 83 KB (`full`) to 17 KB. Call `toolbox` to list or enable a group only when a
+task needs it, or start with `--profile coding|remote|analysis|full`.
+
+Potentially large text responses default to 32K characters with a 128K hard ceiling.
+Truncation is always visible and pageable tools return `next_offset` or `next_cursor`.
+Local relative paths resolve against an explicit workspace, then the MCP client root.
 
 ## Features
 
 | Tool | Description | Status |
 |------|-------------|--------|
 | **Edit** | String replacement with smart indentation and encoding preservation (supports dry_run) | ✅ |
-| **Read** | Encoding-aware file reading with flexible offset (integer, `"N-M"` range, `[N,M]` array). Image files (PNG/JPG/GIF/BMP/WebP/TIFF/ICO) returned as base64 ImageContent | ✅ |
+| **Read** | Encoding-aware, line-numbered reading. Defaults to 400 lines/32K chars, reports truncation and exact `next_offset`, safely handles very long lines, optional SHA-256. Flexible offset and MCP ImageContent support | ✅ |
 | **Write** | Encoding-aware file creation/overwrite | ✅ |
-| **Grep** | Encoding-aware regex content search with output modes (content/files_with_matches/count) and context lines (-B/-A/-C). Large result limits are supported while per-line and total output budgets prevent context floods; exact `has_more` metadata and a visible hint report incomplete results. Skips binary files (extension + NUL sniff). A CRLF ending is a terminator, so `^foo$` matches in a CRLF file | ✅ |
-| **Glob** | File pattern matching with `**` recursive support | ✅ |
+| **Grep** | Encoding-aware regex search with 32K output budget, compact file-grouped output, relative paths, `.gitignore`/generated-directory filtering, binary detection, output modes/context, and deterministic `next_cursor` paging without repeated matches | ✅ |
+| **Glob** | Sorted, bounded file matching with `**`, relative paths, generated-directory filtering, explicit `has_more`, and deterministic cursor paging | ✅ |
 | **ListDir** | Bounded/pageable directory listing. max_entries + continuation cursor, directory/file filters, entry-name glob filters, counts-only mode, flat/tree output | ✅ |
 | **Diff** | Compare two files with unified diff output (encoding-aware). Files differing only in line endings or a trailing newline say so instead of returning an empty diff | ✅ |
 | **Patch** | Apply unified diff patch to a file (supports dry_run). Each line keeps its own ending, so a mixed CRLF/LF file is not rewritten | ✅ |
@@ -51,10 +62,10 @@ Claude Code, Codex CLI, Cursor, Windsurf, Cline, Gemini CLI, and any MCP-compati
 | **ProcExec** | Execute commands as new processes. Foreground/background/suspended start (Windows: CREATE_SUSPENDED, Linux: SIGSTOP). Timeout, env vars | ✅ |
 | **EnvVar** | Read environment variables. Sensitive values (passwords, tokens) auto-masked | ✅ |
 | **Firewall** | Read firewall rules — iptables/nftables/firewalld (Linux), netsh (Windows). Read-only | ✅ |
-| **SSH** | Execute commands on remote servers via SSH. Password & key auth (PEM, OpenSSH, PuTTY PPK), session pooling, host key verification (strict/tofu/none), ProxyJump, IPv6 | ✅ |
+| **SSH** | SSH execution with 32K head+tail capture, original byte counts, proper non-zero-exit errors, and background jobs (`start/status/tail/cancel`). Auth-aware pooling, host-key verification, ProxyJump, IPv6 | ✅ |
 | **SFTP** | Transfer files and manage remote filesystems over SSH. Upload, download, ls, stat, mkdir, rm, chmod, rename. Reuses SSH session pool. Max 2 GB per transfer | ✅ |
 | **Bash** | Persistent shell sessions with working directory and environment variable retention. Session pooling (max 5, idle timeout 30 min). Unix: bash/sh, Windows: PowerShell/git-bash/cmd (auto-detected, best available). PowerShell sessions include UTF-8 encoding and PATH enhancement | ✅ |
-| **WebFetch** | Fetch web content as text/Markdown. ECH (Encrypted Client Hello) + DoH (DNS over HTTPS) by default. HTML→Markdown auto-conversion. SSRF protection. HTTP/SOCKS5 proxy. Chrome User-Agent. **Note:** Returns full page content (default 100K chars) which consumes context window tokens — use `max_length` to limit, or prefer your agent's built-in web tools for simple searches | ✅ |
+| **WebFetch** | Fetch web content as text/Markdown with a 32K default/128K max. ECH + DoH, HTML→Markdown conversion, SSRF protection, proxy support, Chrome User-Agent | ✅ |
 | **WebSearch** | Web search via Brave Search or Naver API. Requires API key env vars (`BRAVE_SEARCH_API_KEY` or `NAVER_CLIENT_ID`/`NAVER_CLIENT_SECRET`). Auto-selects engine, Brave preferred | ✅ |
 | **Download** | Download files from URLs to disk. ECH + DoH by default. SSRF protection. HTTP/SOCKS5 proxy. Atomic write. Max 2 GB | ✅ |
 | **HTTPReq** | Execute HTTP requests with any method (GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS). API testing with custom headers, body, proxy. SSRF protection | ✅ |
@@ -63,7 +74,7 @@ Claude Code, Codex CLI, Cursor, Windsurf, Cline, Gemini CLI, and any MCP-compati
 | **TOMLQuery** | Query TOML files with dot-notation paths (same syntax as JSONQuery). Supports TOML-specific types (datetime, int64) | ✅ |
 | **Copy** | Copy files/directories with atomic write and permission preservation. Recursive directory copy. Windows locked-file fallback (renames running exe/DLL aside). dry_run preview | ✅ |
 | **Mkdir** | Create directories with optional permission mode (octal, e.g. 0755). Recursive by default (mkdir -p). dry_run preview | ✅ |
-| **MultiRead** | Read multiple files in a single call to reduce API round-trips. Encoding-aware, offset/limit support. Max 50 files | ✅ |
+| **MultiRead** | Read up to 50 files with a call-wide 32K budget, 200-line per-file default, long-line safety, and per-file/overall continuation metadata. Hashes are opt-in | ✅ |
 | **RegexReplace** | Regex find-and-replace across files/directories. Encoding and line-ending preserving, capture groups ($1, $2). Skips binary files. dry_run preview | ✅ |
 | **TLSCheck** | Check TLS certificate details — subject, issuer, expiry, SANs, TLS version, cipher suite | ✅ |
 | **DNSLookup** | DNS record lookup (A/AAAA/MX/CNAME/TXT/NS/SOA). DNS over HTTPS (DoH) by default for privacy | ✅ |
@@ -119,7 +130,7 @@ and nothing the client can observe changes.
 1. Download the binary for your OS from [Releases](https://github.com/knewstimek/agent-tool/releases/latest)
 2. Run `agent-tool install` (or `agent-tool install claude` for a specific agent)
 3. Restart your IDE / agent
-4. Done — all tools are available immediately with no permission popups
+4. Done — the compact core tools are available immediately; `toolbox` activates other groups on demand
 
 Or just ask your AI agent to do it for you:
 > "Download agent-tool from https://github.com/knewstimek/agent-tool/releases/latest and run `agent-tool install`"
@@ -228,6 +239,9 @@ agent-tool uninstall claude   # from specific agent
 | Safe | `--safe-approve` | 29 local-only tools (read, edit, write, grep, glob, etc.) — no SSH, HTTP, DB, bash, process control |
 | None | `--no-auto-approve` | No tools — every call requires manual approval |
 
+Approval level is independent of schema profile: installation may approve the full
+namespace while the server still starts with the token-efficient `core` profile.
+
 ### Manual setup
 
 **Claude Code / Cursor / Cline** (`settings.json` or `mcp.json`):
@@ -250,20 +264,29 @@ command = "/path/to/agent-tool"
 ### Options
 
 ```bash
+# Select the initial schema profile (default: core)
+agent-tool --profile coding
+
 # Set fallback encoding for projects with non-UTF-8 files
 agent-tool --fallback-encoding EUC-KR
 ```
 
+Profiles are additive presets: `core` (11 schemas), `coding` (core plus broader
+file/build/shell tools), `remote`, `analysis`, and `full`. At runtime, use
+`toolbox` with `operation=enable`, `groups=["remote"]` or individual `tools`.
+
 ### Environment Variable
 
-Set `AGENT_TOOL_FALLBACK_ENCODING` to avoid repeating the CLI flag every session:
+Set `AGENT_TOOL_FALLBACK_ENCODING` and/or `AGENT_TOOL_PROFILE` to avoid repeating CLI flags:
 
 ```bash
 # Windows (no admin required)
 setx AGENT_TOOL_FALLBACK_ENCODING EUC-KR
+setx AGENT_TOOL_PROFILE coding
 
 # Linux / macOS (add to ~/.bashrc or ~/.zshrc)
 export AGENT_TOOL_FALLBACK_ENCODING=EUC-KR
+export AGENT_TOOL_PROFILE=coding
 ```
 
 Priority: CLI flag > environment variable > default (UTF-8).
@@ -278,7 +301,7 @@ Agents can change settings at runtime via `set_config` without restarting:
 | `encoding_warnings` | Show encoding detection warnings | `true` |
 | `max_file_size_mb` | Max file size for read/edit/grep (MB) | `100` |
 | `allow_symlinks` | Allow symlink extraction from tar archives | `false` |
-| `workspace` | Default workspace/project root for tools like glob when no explicit path is given | _(cwd)_ |
+| `workspace` | Explicit local workspace root. Otherwise the first MCP client root is used, then cwd | _(MCP root/cwd)_ |
 | `allow_http_private` | Allow webfetch/download/httpreq to access private IPs | `false` |
 | `allow_mysql_private` | Allow mysql tool to access private IPs | `true` |
 | `allow_redis_private` | Allow redis tool to access private IPs | `true` |

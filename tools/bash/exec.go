@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"agent-tool/common"
 )
 
 const (
-	maxOutputSize  = 64 * 1024 // 64 KB
+	maxOutputSize  = common.DefaultOutputChars
 	maxTimeoutSec  = 600
 	sentinelPrefix = "___SENTINEL_"
 	sentinelSuffix = "___"
@@ -18,8 +20,10 @@ const (
 
 // execResult holds the result of a command execution.
 type execResult struct {
-	Output   string
-	ExitCode int
+	Output        string
+	ExitCode      int
+	OriginalBytes int64
+	Truncated     bool
 }
 
 // readResult holds a single line read from stdout.
@@ -57,8 +61,7 @@ func executeCommand(ctx context.Context, sess *shellSession, command string, tim
 	}
 
 	// Read stdout until sentinel line using goroutine to avoid blocking
-	var output strings.Builder
-	outputSize := 0
+	output := common.NewBoundedCapture(maxOutputSize)
 	deadline := time.After(time.Duration(timeoutSec) * time.Second)
 	exitCode := 0
 
@@ -104,16 +107,7 @@ func executeCommand(ctx context.Context, sess *shellSession, command string, tim
 				continue
 			}
 
-			// Accumulate output (with size limit)
-			if outputSize < maxOutputSize {
-				remaining := maxOutputSize - outputSize
-				if len(r.line) > remaining {
-					output.WriteString(r.line[:remaining])
-				} else {
-					output.WriteString(r.line)
-				}
-				outputSize += len(r.line)
-			}
+			_, _ = output.Write([]byte(r.line))
 
 			// Start next read
 			go readNext()
@@ -123,11 +117,13 @@ func executeCommand(ctx context.Context, sess *shellSession, command string, tim
 done:
 	sess.lastUsed = time.Now()
 
-	raw := output.String()
+	raw, originalBytes, truncated := output.Result()
 	raw = strings.TrimRight(raw, "\r\n")
 
 	return &execResult{
-		Output:   decodeOutput(sess.shellKind, raw),
-		ExitCode: exitCode,
+		Output:        decodeOutput(sess.shellKind, raw),
+		ExitCode:      exitCode,
+		OriginalBytes: originalBytes,
+		Truncated:     truncated,
 	}, nil
 }

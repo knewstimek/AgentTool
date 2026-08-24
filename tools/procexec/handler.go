@@ -1,12 +1,10 @@
 package procexec
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -18,38 +16,41 @@ import (
 
 const (
 	maxTimeoutSec = 300
-	maxOutputSize = 64 * 1024 // 64 KB
 )
 
 // dangerousEnvKeys are environment variable keys that could be used to hijack execution.
 var dangerousEnvKeys = map[string]bool{
-	"PATH":              true,
-	"LD_PRELOAD":        true,
-	"LD_LIBRARY_PATH":   true,
-	"DYLD_LIBRARY_PATH": true,
+	"PATH":                  true,
+	"LD_PRELOAD":            true,
+	"LD_LIBRARY_PATH":       true,
+	"DYLD_LIBRARY_PATH":     true,
 	"DYLD_INSERT_LIBRARIES": true,
 	"DYLD_FRAMEWORK_PATH":   true,
-	"COMSPEC":           true, // Windows command interpreter
-	"PATHEXT":           true, // Windows executable extensions
-	"IFS":               true, // shell field separator
+	"COMSPEC":               true, // Windows command interpreter
+	"PATHEXT":               true, // Windows executable extensions
+	"IFS":                   true, // shell field separator
 }
 
 type ProcExecInput struct {
-	Command    string   `json:"command" jsonschema:"Command to execute (required)"`
-	Args       []string `json:"args,omitempty" jsonschema:"Command arguments"`
-	Cwd        string   `json:"cwd,omitempty" jsonschema:"Working directory (default: current directory)"`
-	Env        []string `json:"env,omitempty" jsonschema:"Environment variables in KEY=VALUE format. Inherits parent environment by default"`
-	TimeoutSec interface{} `json:"timeout_sec,omitempty" jsonschema:"Timeout in seconds (default 30, max 300). Ignored for background/suspended execution"`
-	Background interface{} `json:"background,omitempty" jsonschema:"Start process in background and return PID immediately: true or false. Default: false"`
-	Suspended  interface{} `json:"suspended,omitempty" jsonschema:"Start process in suspended state. Windows: CREATE_SUSPENDED, Linux: SIGSTOP. Implies background=true: true or false. Default: false"`
+	Command        string      `json:"command" jsonschema:"Command to execute (required)"`
+	Args           []string    `json:"args,omitempty" jsonschema:"Command arguments"`
+	Cwd            string      `json:"cwd,omitempty" jsonschema:"Working directory. Relative paths use workspace/MCP root"`
+	Env            []string    `json:"env,omitempty" jsonschema:"Environment variables in KEY=VALUE format. Inherits parent environment by default"`
+	TimeoutSec     interface{} `json:"timeout_sec,omitempty" jsonschema:"Timeout in seconds (default 30, max 300). Ignored for background/suspended execution"`
+	Background     interface{} `json:"background,omitempty" jsonschema:"Start process in background and return PID immediately: true or false. Default: false"`
+	Suspended      interface{} `json:"suspended,omitempty" jsonschema:"Start process in suspended state. Windows: CREATE_SUSPENDED, Linux: SIGSTOP. Implies background=true: true or false. Default: false"`
+	MaxOutputChars int         `json:"max_output_chars,omitempty" jsonschema:"Maximum combined stdout/stderr bytes retained. Default: 32768, Max: 131072. Head and tail are preserved"`
 }
 
 type ProcExecOutput struct {
-	PID      int    `json:"pid"`
-	ExitCode int    `json:"exit_code,omitempty"`
-	Stdout   string `json:"stdout,omitempty"`
-	Stderr   string `json:"stderr,omitempty"`
-	Status   string `json:"status"`
+	PID         int    `json:"pid"`
+	ExitCode    int    `json:"exit_code,omitempty"`
+	Stdout      string `json:"stdout,omitempty"`
+	Stderr      string `json:"stderr,omitempty"`
+	Status      string `json:"status"`
+	Truncated   bool   `json:"truncated"`
+	StdoutBytes int64  `json:"stdout_bytes,omitempty"`
+	StderrBytes int64  `json:"stderr_bytes,omitempty"`
 }
 
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input ProcExecInput) (*mcp.CallToolResult, ProcExecOutput, error) {
@@ -72,11 +73,16 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ProcExecInput) 
 	if timeoutSec > maxTimeoutSec {
 		return errorResult(fmt.Sprintf("timeout_sec exceeds maximum (%d)", maxTimeoutSec))
 	}
+	if input.MaxOutputChars == 0 {
+		input.MaxOutputChars = common.DefaultOutputChars
+	}
+	if input.MaxOutputChars < 1024 || input.MaxOutputChars > common.HardOutputChars {
+		return errorResult(fmt.Sprintf("max_output_chars must be between 1024 and %d", common.HardOutputChars))
+	}
 
 	// 3. Validate and resolve cwd
 	if input.Cwd != "" {
-		input.Cwd = filepath.Clean(input.Cwd)
-		absPath, err := filepath.Abs(input.Cwd)
+		absPath, err := common.ResolveRequestPath(ctx, req, input.Cwd)
 		if err != nil {
 			return errorResult(fmt.Sprintf("invalid working directory: %v", err))
 		}
@@ -128,9 +134,10 @@ func execForeground(ctx context.Context, input ProcExecInput, timeoutSec int) (*
 		cmd.Env = mergeEnv(input.Env)
 	}
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &limitWriter{buf: &stdout, max: maxOutputSize}
-	cmd.Stderr = &limitWriter{buf: &stderr, max: maxOutputSize}
+	stdout := common.NewBoundedCapture((input.MaxOutputChars + 1) / 2)
+	stderr := common.NewBoundedCapture(input.MaxOutputChars / 2)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 
 	err := cmd.Run()
 
@@ -150,17 +157,23 @@ func execForeground(ctx context.Context, input ProcExecInput, timeoutSec int) (*
 		pid = cmd.Process.Pid
 	}
 
+	stdoutText, stdoutBytes, stdoutTruncated := stdout.Result()
+	stderrText, stderrBytes, stderrTruncated := stderr.Result()
 	out := ProcExecOutput{
-		PID:      pid,
-		ExitCode: exitCode,
-		Stdout:   proclist.SanitizeCommandLine(stdout.String()),
-		Stderr:   proclist.SanitizeCommandLine(stderr.String()),
-		Status:   "completed",
+		PID:         pid,
+		ExitCode:    exitCode,
+		Stdout:      proclist.SanitizeCommandLine(stdoutText),
+		Stderr:      proclist.SanitizeCommandLine(stderrText),
+		Status:      "completed",
+		Truncated:   stdoutTruncated || stderrTruncated,
+		StdoutBytes: stdoutBytes,
+		StderrBytes: stderrBytes,
 	}
 
 	var sb strings.Builder
 	sb.WriteString("=== Process Execution ===\n")
-	sb.WriteString(fmt.Sprintf("  Command: %s\n", formatCommand(input.Command, input.Args)))
+	displayCommand, _ := common.TruncateRunes(formatCommand(input.Command, input.Args), 500, "… [command abbreviated]")
+	sb.WriteString(fmt.Sprintf("  Command: %s\n", displayCommand))
 	sb.WriteString(fmt.Sprintf("  PID: %d\n", out.PID))
 	sb.WriteString(fmt.Sprintf("  Exit code: %d\n", out.ExitCode))
 	sb.WriteString(fmt.Sprintf("  Status: %s\n", out.Status))
@@ -176,6 +189,9 @@ func execForeground(ctx context.Context, input ProcExecInput, timeoutSec int) (*
 		if !strings.HasSuffix(out.Stderr, "\n") {
 			sb.WriteString("\n")
 		}
+	}
+	if out.Truncated {
+		sb.WriteString(fmt.Sprintf("\n[output truncated: stdout_bytes=%d; stderr_bytes=%d; retained_bytes=%d; head and tail shown]\n", out.StdoutBytes, out.StderrBytes, input.MaxOutputChars))
 	}
 
 	result := sb.String()
@@ -211,8 +227,9 @@ func execBackground(input ProcExecInput) (*mcp.CallToolResult, ProcExecOutput, e
 		Status: "running",
 	}
 
+	displayCommand, _ := common.TruncateRunes(formatCommand(input.Command, input.Args), 500, "… [command abbreviated]")
 	result := fmt.Sprintf("=== Process Execution ===\n  Command: %s\n  PID: %d\n  Status: running (background)\n",
-		formatCommand(input.Command, input.Args), pid)
+		displayCommand, pid)
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: result}},
 	}, out, nil
@@ -229,8 +246,9 @@ func execSuspended(input ProcExecInput) (*mcp.CallToolResult, ProcExecOutput, er
 		Status: "suspended",
 	}
 
+	displayCommand, _ := common.TruncateRunes(formatCommand(input.Command, input.Args), 500, "… [command abbreviated]")
 	result := fmt.Sprintf("=== Process Execution ===\n  Command: %s\n  PID: %d\n  Status: suspended\n  Use prockill with signal=cont to resume.\n",
-		formatCommand(input.Command, input.Args), pid)
+		displayCommand, pid)
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: result}},
 	}, out, nil
@@ -285,23 +303,4 @@ func errorResult(msg string) (*mcp.CallToolResult, ProcExecOutput, error) {
 		Content: []mcp.Content{&mcp.TextContent{Text: msg}},
 		IsError: true,
 	}, ProcExecOutput{}, nil
-}
-
-// limitWriter writes up to max bytes to buf, then silently discards the rest.
-type limitWriter struct {
-	buf *bytes.Buffer
-	max int
-}
-
-func (w *limitWriter) Write(p []byte) (int, error) {
-	remaining := w.max - w.buf.Len()
-	if remaining <= 0 {
-		return len(p), nil
-	}
-	if len(p) > remaining {
-		w.buf.Write(p[:remaining])
-		return len(p), nil
-	}
-	w.buf.Write(p)
-	return len(p), nil
 }

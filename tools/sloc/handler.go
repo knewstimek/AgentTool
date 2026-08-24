@@ -14,96 +14,98 @@ import (
 )
 
 type SlocInput struct {
-	Path       string `json:"path,omitempty" jsonschema:"Absolute path to a file or directory to count,required"`
-	FilePath   string `json:"file_path,omitempty" jsonschema:"Alias for path"`
-	Glob       string `json:"glob,omitempty" jsonschema:"Glob pattern to filter files when path is a directory (e.g. *.go, *.py). Default: all recognized source files"`
-	MaxDepth   interface{} `json:"max_depth,omitempty" jsonschema:"Maximum directory depth to traverse (0 = unlimited). Default: 0"`
-	ShowFiles  *bool  `json:"show_files,omitempty" jsonschema:"Show per-file breakdown. Default: true for <=50 files, false otherwise"`
-	SkipBlank  interface{} `json:"skip_blank,omitempty" jsonschema:"Exclude blank lines from count: true or false. Default: false"`
+	Path           string      `json:"path,omitempty" jsonschema:"File or directory to count. Relative paths use workspace/MCP root,required"`
+	FilePath       string      `json:"file_path,omitempty" jsonschema:"Alias for path"`
+	Glob           string      `json:"glob,omitempty" jsonschema:"Glob pattern to filter files when path is a directory (e.g. *.go, *.py). Default: all recognized source files"`
+	MaxDepth       interface{} `json:"max_depth,omitempty" jsonschema:"Maximum directory depth to traverse (0 = unlimited). Default: 0"`
+	ShowFiles      *bool       `json:"show_files,omitempty" jsonschema:"Show per-file breakdown. Default: true for <=50 files, false otherwise"`
+	SkipBlank      interface{} `json:"skip_blank,omitempty" jsonschema:"Exclude blank lines from count: true or false. Default: false"`
+	MaxOutputChars int         `json:"max_output_chars,omitempty" jsonschema:"Maximum returned text characters. Default: 32768, Max: 131072"`
 }
 
 type SlocOutput struct {
-	Result string `json:"result"`
+	Result    string `json:"result"`
+	Truncated bool   `json:"truncated"`
 }
 
 // Language definition: extensions → language name
 var langMap = map[string]string{
-	".go":     "Go",
-	".py":     "Python",
-	".js":     "JavaScript",
-	".jsx":    "JavaScript",
-	".ts":     "TypeScript",
-	".tsx":    "TypeScript",
-	".java":   "Java",
-	".kt":     "Kotlin",
-	".kts":    "Kotlin",
-	".rs":     "Rust",
-	".c":      "C",
-	".h":      "C/C++ Header",
-	".cpp":    "C++",
-	".cc":     "C++",
-	".cxx":    "C++",
-	".hpp":    "C++ Header",
-	".cs":     "C#",
-	".rb":     "Ruby",
-	".php":    "PHP",
-	".swift":  "Swift",
-	".m":      "Objective-C",
-	".mm":     "Objective-C++",
-	".r":      "R",
-	".R":      "R",
-	".lua":    "Lua",
-	".pl":     "Perl",
-	".pm":     "Perl",
-	".sh":     "Shell",
-	".bash":   "Shell",
-	".zsh":    "Shell",
-	".fish":   "Shell",
-	".ps1":    "PowerShell",
-	".psm1":   "PowerShell",
-	".bat":    "Batch",
-	".cmd":    "Batch",
-	".sql":    "SQL",
-	".html":   "HTML",
-	".htm":    "HTML",
-	".css":    "CSS",
-	".scss":   "SCSS",
-	".sass":   "SASS",
-	".less":   "LESS",
-	".vue":    "Vue",
-	".svelte": "Svelte",
-	".xml":    "XML",
-	".json":   "JSON",
-	".yaml":   "YAML",
-	".yml":    "YAML",
-	".toml":   "TOML",
-	".ini":    "INI",
-	".cfg":    "Config",
-	".conf":   "Config",
-	".md":     "Markdown",
-	".rst":    "reStructuredText",
-	".tex":    "LaTeX",
-	".proto":  "Protocol Buffers",
-	".graphql":"GraphQL",
-	".gql":    "GraphQL",
-	".dart":   "Dart",
-	".ex":     "Elixir",
-	".exs":    "Elixir",
-	".erl":    "Erlang",
-	".hrl":    "Erlang",
-	".hs":     "Haskell",
-	".ml":     "OCaml",
-	".mli":    "OCaml",
-	".fs":     "F#",
-	".fsx":    "F#",
-	".clj":    "Clojure",
-	".scala":  "Scala",
-	".groovy": "Groovy",
-	".gradle": "Gradle",
-	".tf":     "Terraform",
-	".hcl":    "HCL",
+	".go":         "Go",
+	".py":         "Python",
+	".js":         "JavaScript",
+	".jsx":        "JavaScript",
+	".ts":         "TypeScript",
+	".tsx":        "TypeScript",
+	".java":       "Java",
+	".kt":         "Kotlin",
+	".kts":        "Kotlin",
+	".rs":         "Rust",
+	".c":          "C",
+	".h":          "C/C++ Header",
+	".cpp":        "C++",
+	".cc":         "C++",
+	".cxx":        "C++",
+	".hpp":        "C++ Header",
+	".cs":         "C#",
+	".rb":         "Ruby",
+	".php":        "PHP",
+	".swift":      "Swift",
+	".m":          "Objective-C",
+	".mm":         "Objective-C++",
+	".r":          "R",
+	".R":          "R",
+	".lua":        "Lua",
+	".pl":         "Perl",
+	".pm":         "Perl",
+	".sh":         "Shell",
+	".bash":       "Shell",
+	".zsh":        "Shell",
+	".fish":       "Shell",
+	".ps1":        "PowerShell",
+	".psm1":       "PowerShell",
+	".bat":        "Batch",
+	".cmd":        "Batch",
+	".sql":        "SQL",
+	".html":       "HTML",
+	".htm":        "HTML",
+	".css":        "CSS",
+	".scss":       "SCSS",
+	".sass":       "SASS",
+	".less":       "LESS",
+	".vue":        "Vue",
+	".svelte":     "Svelte",
+	".xml":        "XML",
+	".json":       "JSON",
+	".yaml":       "YAML",
+	".yml":        "YAML",
+	".toml":       "TOML",
+	".ini":        "INI",
+	".cfg":        "Config",
+	".conf":       "Config",
+	".md":         "Markdown",
+	".rst":        "reStructuredText",
+	".tex":        "LaTeX",
+	".proto":      "Protocol Buffers",
+	".graphql":    "GraphQL",
+	".gql":        "GraphQL",
+	".dart":       "Dart",
+	".ex":         "Elixir",
+	".exs":        "Elixir",
+	".erl":        "Erlang",
+	".hrl":        "Erlang",
+	".hs":         "Haskell",
+	".ml":         "OCaml",
+	".mli":        "OCaml",
+	".fs":         "F#",
+	".fsx":        "F#",
+	".clj":        "Clojure",
+	".scala":      "Scala",
+	".groovy":     "Groovy",
+	".gradle":     "Gradle",
+	".tf":         "Terraform",
+	".hcl":        "HCL",
 	".dockerfile": "Dockerfile",
-	".makefile":    "Makefile",
+	".makefile":   "Makefile",
 }
 
 // Directories to always skip
@@ -135,8 +137,16 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input SlocInput) (*mc
 	if input.Path == "" {
 		return errorResult("path is required")
 	}
-	if !filepath.IsAbs(input.Path) {
-		return errorResult("path must be absolute")
+	resolvedPath, err := common.ResolveRequestPath(ctx, req, input.Path)
+	if err != nil {
+		return errorResult(fmt.Sprintf("cannot resolve path: %v", err))
+	}
+	input.Path = resolvedPath
+	if input.MaxOutputChars == 0 {
+		input.MaxOutputChars = common.DefaultOutputChars
+	}
+	if input.MaxOutputChars < 1024 || input.MaxOutputChars > common.HardOutputChars {
+		return errorResult(fmt.Sprintf("max_output_chars must be between 1024 and %d", common.HardOutputChars))
 	}
 
 	cleaned := filepath.Clean(input.Path)
@@ -280,10 +290,11 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input SlocInput) (*mc
 	}
 	sb.WriteString(totalLine + "\n")
 
-	result := sb.String()
+	result, truncated := common.TruncateRunes(sb.String(), input.MaxOutputChars,
+		"\n[truncated=true; use show_files=false or a narrower glob/path]")
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: result}},
-	}, SlocOutput{Result: result}, nil
+	}, SlocOutput{Result: result, Truncated: truncated}, nil
 }
 
 func walkDir(root, globPattern string, maxDepth int, skipBlank bool) ([]fileStat, error) {

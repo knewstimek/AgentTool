@@ -24,8 +24,8 @@ const (
 	hardMaxColumns        = 1000
 	defaultMaxValueChars  = 200
 	hardMaxValueChars     = 10000
-	defaultMaxOutputChars = 100000
-	hardMaxOutputChars    = 1000000
+	defaultMaxOutputChars = common.DefaultOutputChars
+	hardMaxOutputChars    = common.HardOutputChars
 )
 
 type MySQLInput struct {
@@ -39,7 +39,7 @@ type MySQLInput struct {
 	MaxRows        int         `json:"max_rows,omitempty" jsonschema:"Maximum rows returned by SELECT-like queries. Default: 1000, Max: 10000"`
 	MaxColumns     int         `json:"max_columns,omitempty" jsonschema:"Maximum columns displayed. Default: 100, Max: 1000"`
 	MaxValueChars  int         `json:"max_value_chars,omitempty" jsonschema:"Maximum characters displayed per cell. Default: 200, Max: 10000"`
-	MaxOutputChars int         `json:"max_output_chars,omitempty" jsonschema:"Maximum total returned text characters. Default: 100000, Max: 1000000"`
+	MaxOutputChars int         `json:"max_output_chars,omitempty" jsonschema:"Maximum total returned text characters. Default: 32768, Max: 131072"`
 }
 
 type MySQLOutput struct {
@@ -389,7 +389,7 @@ Supports SELECT, INSERT, UPDATE, DELETE, SHOW, DESCRIBE, and other SQL statement
 SELECT-like queries return formatted table output with column alignment.
 Non-SELECT queries return affected row count and last insert ID.
 Connection is closed after each call (no session pooling).
-Defaults: 1000 rows, 100 columns, 200 characters per cell, and 100000 total output characters.
+Defaults: 1000 rows, 100 columns, 200 characters per cell, and 32768 total output characters.
 Use max_rows/max_columns/max_value_chars/max_output_chars to tune bounded output;
 use SQL LIMIT/OFFSET for deterministic paging.`,
 	}, Handle)

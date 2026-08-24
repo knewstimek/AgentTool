@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"agent-tool/common"
@@ -22,7 +21,7 @@ type EditOp struct {
 
 // MultiEditInput is the input for the multiedit tool.
 type MultiEditInput struct {
-	FilePath string      `json:"file_path,omitempty" jsonschema:"Absolute path to the file to edit"`
+	FilePath string      `json:"file_path,omitempty" jsonschema:"File to edit. Relative paths use the configured workspace or MCP client root"`
 	Path     string      `json:"path,omitempty" jsonschema:"Alias for file_path"`
 	Edits    []EditOp    `json:"edits" jsonschema:"Ordered list of replacements to apply sequentially"`
 	DryRun   interface{} `json:"dry_run,omitempty" jsonschema:"Preview changes without modifying the file: true or false. Default: false"`
@@ -41,9 +40,11 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input MultiEditInput)
 	if input.FilePath == "" {
 		return errorResult("file_path is required")
 	}
-	if !filepath.IsAbs(input.FilePath) {
-		return errorResult("file_path must be an absolute path")
+	resolvedPath, err := common.ResolveRequestPath(ctx, req, input.FilePath)
+	if err != nil {
+		return errorResult(fmt.Sprintf("cannot resolve file_path: %v", err))
 	}
+	input.FilePath = resolvedPath
 	if len(input.Edits) == 0 {
 		return errorResult("edits is required and must have at least one entry")
 	}

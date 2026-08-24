@@ -72,6 +72,9 @@ func helpOverview() string {
 
 agent-tool provides encoding-aware and indentation-aware file tools.
 It auto-detects file encoding and indentation style, preserving them across edits.
+The compact core profile is loaded by default. Use toolbox to list or enable
+additional file, coding, system, remote, data, analysis, and Windows tools.
+Relative local paths resolve against an explicit workspace, then the client's MCP root.
 
 ## Current Configuration
 - Fallback encoding: ` + common.GetFallbackEncoding() + `
@@ -125,9 +128,11 @@ It auto-detects file encoding and indentation style, preserving them across edit
 - analyze: Static binary analysis (21 operations: disassemble, PE/ELF/Mach-O parsing, imphash, Rich header, resources, DWARF, strings, hexdump, pattern search, entropy, overlay, binary diff, xref, function_at, call_graph, follow_ptr, rtti_dump, struct_layout, vtable_scan)
 - set_config: Change runtime settings (encoding, file size, SSRF policy, DoH/ECH toggle)
 - agent_tool_help: This help tool
+- toolbox: List, enable, or disable tool groups without loading every schema up front
 
 ## Quick Tips
 - Use 'agent_tool_help' with topic='encoding' for encoding setup guide
+- Use toolbox(operation='enable', groups=['remote']) before an SSH/network task
 - Use 'agent_tool_help' with topic='troubleshooting' for common issues`
 }
 
@@ -246,7 +251,12 @@ Read a file with encoding auto-detection. Returns content with line numbers.
 Image files (PNG, JPG, GIF, BMP, WebP, TIFF, ICO) are returned as base64 ImageContent.
 SVG files are returned as text. Supports negative offset to read from end.
 Offset accepts integer, string range "100-200", or [start, end] array.
-Parameters: file_path, offset (integer, "start-end" string, or [start,end] array), limit
+Defaults: 400 lines, max_output_chars=32768, max_line_chars=4000. When output is
+incomplete, truncated=true and next_offset identify the exact continuation.
+Use all=true to remove the default line limit; the character safety budget remains.
+Relative paths use the configured workspace or client MCP root. Hash output can be
+disabled with include_hash=false.
+Parameters: file_path, offset, limit, all, max_output_chars, max_line_chars, include_hash
 
 ## write
 Create or overwrite a file. Preserves encoding for existing files.
@@ -262,22 +272,24 @@ break (same as read and GNU grep), so a classic-Mac CR-only file is one line --
 use file_info to see which endings a file actually uses.
 Output modes: content (default, matching lines), files_with_matches (paths only), count (match counts).
 Context: use before/after/context to include surrounding lines (like grep -B/-A/-C).
-Defaults: max_results=100, max_line_chars=4000, max_output_chars=100000.
+Defaults: max_results=100, max_line_chars=4000, max_output_chars=32768.
 max_results can be raised to 100000; returned text remains bounded by the line
 and total-output budgets. context/before/after accept at most 1000 lines.
-When additional output exists, has_more=true and the text includes a visible
-continuation hint. Grep has no cursor; narrow the query or raise the relevant limit.
+When additional output exists, has_more=true and next_cursor continues without
+rescanning or repeating matches (cursor paging is unavailable with context lines).
 Directory search skips binary files (known extensions plus a NUL-byte content
-sniff), so databases like .codegraph.db no longer flood results with page
-fragments. UTF-16 and other encoded text is still searched. Passing a binary
-file directly as path searches it anyway.
-Parameters: pattern, path, glob, ignore_case, max_results, output_mode, context,
-before, after, max_line_chars, max_output_chars
+sniff), hidden/generated directories, and root .gitignore matches by default.
+Use include_hidden/include_ignored to opt in. Paths are relative by default.
+Parameters: pattern, path, glob, ignore_case, max_results, output_mode,
+output_format (compact default or classic), context, before, after,
+max_line_chars, max_output_chars, cursor, relative_paths, include_hidden, include_ignored
 
 ## glob
-Find files by pattern. Supports ** for recursive matching.
-Use relative_paths=true to return paths relative to search directory (saves tokens).
-Parameters: pattern, path, relative_paths
+Find files by pattern. Supports ** for recursive matching. Results are sorted and
+paged with limit/next_cursor; has_more and truncation are never silent. Generated
+and hidden directories are skipped by default. Paths are relative by default.
+Parameters: pattern, path, relative_paths, limit, max_output_chars, cursor,
+include_hidden, include_ignored
 
 ## listdir
 List directory contents with bounded, pageable output.
@@ -396,9 +408,16 @@ Parameters: filter (rule name or port)
 Execute commands on a remote server via SSH. Supports IPv4 and IPv6.
 Supports password and key-based authentication (PEM, OpenSSH, and PuTTY PPK formats). SSH agent auto-used on Unix.
 Sessions are pooled and reused (idle timeout: 30 min, max: 20 sessions).
+Pool identity includes authentication, host-key policy, and ProxyJump settings.
 Host key verification: strict (known_hosts required), tofu (trust on first use, default), none (insecure).
 ProxyJump: use jump_host to connect through a bastion (e.g. reach IPv6-only servers via IPv4 bastion).
-Parameters: host, port, user, password, key_file, passphrase, use_agent, command, disconnect, host_key_check, timeout_sec, jump_host, jump_port, jump_user, jump_password, jump_key_file, jump_passphrase
+Foreground output defaults to 32768 bytes with original byte counts. output_mode
+selects head_tail (default), head, or tail retention.
+Non-zero remote exits return IsError=true. For long commands, use background=true or
+operation=start, then operation=status/tail/cancel with job_id (tail_lines defaults to 50).
+Parameters: operation, background, job_id, tail_lines, host, port, user, password,
+key_file, passphrase, use_agent, command, disconnect, host_key_check, timeout_sec,
+max_output_chars, output_mode, jump_host, jump_port, jump_user, jump_password, jump_key_file, jump_passphrase
 
 ## sftp
 Transfer files and manage remote filesystems over SSH (SFTP protocol).
@@ -415,6 +434,7 @@ Persistent shell sessions that maintain working directory, environment variables
 Sessions are pooled (max 5, idle timeout 30 min). Uses sentinel markers for output delimitation.
 Platform: bash/sh on Unix, pwsh/git-bash/powershell/cmd on Windows (auto-detected, priority order).
 Use disconnect=true to close a session.
+Output defaults to 32768 bytes and preserves head+tail with explicit truncation metadata.
 Parameters: command, cwd (initial directory for new sessions), session_id (default: "default"), timeout_sec (default 120, max 600), disconnect
 
 ## webfetch
@@ -423,7 +443,7 @@ ECH (Encrypted Client Hello) and DoH (DNS over HTTPS) enabled by default for pri
 Cloud metadata SSRF protection (blocks 169.254.x.x, link-local). Private IPs allowed for local dev.
 Default User-Agent mimics Chrome browser. Custom headers supported (User-Agent, Referer, etc.).
 Supports HTTP and SOCKS5 proxies.
-Parameters: url, headers, max_length (default 100000), timeout_sec (default 30, max 120), proxy_url, no_doh, no_ech, raw
+Parameters: url, headers, max_length (default 32768, max 131072), timeout_sec (default 30, max 120), proxy_url, no_doh, no_ech, raw
 
 ## websearch
 Search the web using Brave Search or Naver Search API.
@@ -445,12 +465,12 @@ Ideal for testing APIs, webhooks, and web services during development.
 ECH and DoH enabled by default. Cloud metadata SSRF protection. HTTP and SOCKS5 proxy support.
 DLP: POST/PUT/PATCH bodies are scanned for sensitive data (PEM keys, AWS keys, tokens, .env dumps) and blocked before transmission.
 Response body is truncated at max_response_kb. Binary responses show Content-Type and size only.
-Parameters: url, method, body, headers, content_type (default application/json), timeout_sec (default 30, max 120), max_response_kb (default 512, max 2048), proxy_url, no_doh, no_ech
+Parameters: url, method, body, headers, content_type (default application/json), timeout_sec (default 30, max 120), max_response_kb (default 32, max 128), proxy_url, no_doh, no_ech
 
 ## copy
 Copy a file or directory. Supports recursive directory copying.
 Uses atomic write (temp file + rename) and preserves file permissions.
-Validates absolute paths and blocks path traversal (..).
+Relative paths use the configured workspace or client MCP root; dangerous paths are blocked.
 Parameters: source, destination, overwrite (default false), dry_run (default false)
 
 ## mkdir
@@ -463,7 +483,11 @@ Parameters: path, recursive (default true), mode (octal, default 0755), dry_run
 Read multiple files in a single call to reduce API round-trips.
 Each file is read with encoding auto-detection and line numbering.
 Files are separated with headers. Errors on individual files don't stop processing.
-Parameters: file_paths (array, max 50), offset (1-based, or negative for end-relative), limit
+Defaults: 200 lines per file and 32768 total characters. Per-file and overall
+next_offset/next_file_index metadata identify continuation. Hashes are opt-in.
+Relative paths use the configured workspace or client MCP root.
+Parameters: file_paths (array, max 50), offset, limit, all, max_output_chars,
+max_line_chars, include_hash
 
 ## regexreplace
 Regex find-and-replace in files or across directories.
@@ -524,7 +548,7 @@ SELECT/SHOW/DESCRIBE/EXPLAIN queries return results as formatted table.
 Other queries (INSERT/UPDATE/DELETE) return affected rows and last insert ID.
 Connection is opened and closed per call (no session pooling).
 Defaults: max_rows=1000, max_columns=100, max_value_chars=200,
-max_output_chars=100000. Use SQL LIMIT/OFFSET for deterministic paging.
+max_output_chars=32768 (max 131072). Use SQL LIMIT/OFFSET for deterministic paging.
 Parameters: host, port (default 3306), user, password, database, query,
 timeout_sec (default 30, max 120), max_rows, max_columns, max_value_chars,
 max_output_chars
@@ -546,7 +570,8 @@ No parameters required.
 Count source lines of code (SLOC) in a file or directory.
 Returns per-language summary with file count, total lines, and blank lines.
 Recognizes 70+ languages by file extension. Skips node_modules, .git, vendor, dist, build.
-Parameters: path (file or directory), glob (filter pattern), max_depth, show_files, skip_blank
+Parameters: path (file or directory), glob (filter pattern), max_depth, show_files,
+skip_blank, max_output_chars (default 32768, max 131072)
 
 ## debug
 Interactive debugger using Debug Adapter Protocol (DAP).
@@ -643,7 +668,7 @@ Parse PE (Portable Executable) headers -- Windows EXE, DLL, .node files.
   analyze(operation="pe_info", file_path="/path/to/file.dll", section=".text")
 
   Import output is paged with result_offset + max_results (default 500,
-  max 100000) and bounded by max_output_chars (default 100000, max 1000000).
+  max 100000) and bounded by max_output_chars (default 32768, max 131072).
 
   Output includes:
     - Machine type, image base, entry point, number of sections
@@ -1126,7 +1151,7 @@ It works with any language that has a DAP-compatible debug adapter.
     variables/completions/loaded_sources: start + max_results (default 200, max 10000)
     modules: start_module + module_count (module_count defaults to max_results)
     variable/evaluation values: max_value_chars (default 4000, max 100000)
-    all listed operations: max_output_chars (default 100000, max 1000000)
+    all listed operations: max_output_chars (default 32768, max 131072)
     A continuation hint reports the next start/start_module when more data exists.
 
 ## Adapter-Specific Notes
@@ -1551,7 +1576,7 @@ in a local SQLite index. Enables precise symbol lookup without grep noise.
   codegraph(op="symbols", path="/path/to/file.cpp")
     List all symbols in a file (classes, functions, calls). No index needed.
     symbols and callees support offset + max_results (default 500, max 100000)
-    and max_output_chars (default 100000, max 1000000). Follow the returned
+    and max_output_chars (default 32768, max 131072). Follow the returned
     next-offset hint to continue.
 
   codegraph(op="methods", name="Monster", path="/project/root")

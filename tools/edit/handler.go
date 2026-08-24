@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -15,7 +14,7 @@ import (
 
 // EditInput is the input parameter for the Edit tool.
 type EditInput struct {
-	FilePath     string      `json:"file_path,omitempty" jsonschema:"Absolute path to the file to edit"`
+	FilePath     string      `json:"file_path,omitempty" jsonschema:"File to edit. Relative paths use the configured workspace or MCP client root"`
 	Path         string      `json:"path,omitempty" jsonschema:"Alias for file_path"`
 	OldString    string      `json:"old_string,omitempty" jsonschema:"Exact text to find in the file"`
 	NewString    string      `json:"new_string,omitempty" jsonschema:"Replacement text (must differ from old_string)"`
@@ -41,9 +40,11 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input EditInput) (*mc
 	if input.FilePath == "" {
 		return errorResult("file_path is required")
 	}
-	if !filepath.IsAbs(input.FilePath) {
-		return errorResult("file_path must be an absolute path")
+	resolvedPath, err := common.ResolveRequestPath(ctx, req, input.FilePath)
+	if err != nil {
+		return errorResult(fmt.Sprintf("cannot resolve file_path: %v", err))
 	}
+	input.FilePath = resolvedPath
 	// Accept old_content/new_content as aliases for old_string/new_string
 	if input.OldString == "" && input.OldContent != "" {
 		input.OldString = input.OldContent

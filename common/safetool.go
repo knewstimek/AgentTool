@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"runtime/debug"
 	"strconv"
+	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -22,8 +23,10 @@ import (
 // Differences from mcp.AddTool (intentional trade-offs):
 //   - Uses encoding/json (case-insensitive field matching) instead of SDK's
 //     segmentio/encoding/json (case-sensitive). This is more lenient for agents.
-//   - Out return value is discarded. StructuredContent/OutputSchema not supported.
-//     All current handlers use Out=any with nil output.
+//   - Out is not attached as StructuredContent. Some MCP clients present
+//     structured content instead of text, which would hide the human-readable
+//     result; attaching both would duplicate large payloads. Continuation and
+//     truncation metadata is therefore included visibly in text content.
 //   - Handler errors are always returned as tool errors (IsError=true), not as
 //     JSON-RPC protocol errors. This lets agents see the error and retry, rather
 //     than getting an opaque transport error. The SDK's jsonrpc.Error type is in
@@ -40,6 +43,11 @@ func SafeAddTool[In, Out any](s *mcp.Server, t *mcp.Tool, h mcp.ToolHandlerFor[I
 	if err != nil {
 		panic(fmt.Sprintf("SafeAddTool %q: schema generation failed: %v", toolName, err))
 	}
+	// interface{} was historically used for lenient number/bool parsing. That
+	// made the generated MCP schema omit the property's type, so agents had to
+	// infer it from prose. Restore a precise schema here while keeping the raw
+	// coercion below for clients that serialize scalars as strings.
+	annotateFlexibleScalarTypes(schema, rt)
 	t.InputSchema = schema
 
 	resolved, err := schema.Resolve(&jsonschema.ResolveOptions{ValidateDefaults: true})
@@ -51,6 +59,7 @@ func SafeAddTool[In, Out any](s *mcp.Server, t *mcp.Tool, h mcp.ToolHandlerFor[I
 	// Handles both direct "integer" type and nullable patterns like
 	// oneOf: [{type: "integer"}, {type: "null"}] (Go *int fields).
 	intProps := collectIntProperties(schema)
+	boolProps := collectBoolProperties(schema)
 
 	// Collect which properties are string-array-typed for coercion.
 	// Agents sometimes pass arrays as JSON-encoded strings (double-encoding),
@@ -75,6 +84,9 @@ func SafeAddTool[In, Out any](s *mcp.Server, t *mcp.Tool, h mcp.ToolHandlerFor[I
 		args := req.Params.Arguments
 		if len(args) > 0 && len(intProps) > 0 {
 			args = coerceIntProperties(args, intProps)
+		}
+		if len(args) > 0 && len(boolProps) > 0 {
+			args = coerceBoolProperties(args, boolProps)
 		}
 
 		// Coerce JSON-encoded string values to actual arrays for string-array-typed properties.
@@ -112,10 +124,47 @@ func SafeAddTool[In, Out any](s *mcp.Server, t *mcp.Tool, h mcp.ToolHandlerFor[I
 		if handlerErr != nil {
 			return toolError(handlerErr.Error()), nil
 		}
+		LimitToolResultText(res, HardOutputChars)
 		return res, nil
 	}
 
 	s.AddTool(t, rawHandler)
+}
+
+// annotateFlexibleScalarTypes gives top-level interface{} fields the type the
+// handler already expects through FlexInt or FlexBool. read.offset is the sole
+// intentionally polymorphic top-level scalar and advertises that fact in its
+// description, so it remains untyped.
+func annotateFlexibleScalarTypes(schema *jsonschema.Schema, rt reflect.Type) {
+	if schema == nil || schema.Properties == nil || rt.Kind() != reflect.Struct {
+		return
+	}
+	interfaceType := reflect.TypeFor[any]()
+	for i := 0; i < rt.NumField(); i++ {
+		field := rt.Field(i)
+		if field.Type != interfaceType {
+			continue
+		}
+		jsonName := strings.Split(field.Tag.Get("json"), ",")[0]
+		if jsonName == "" || jsonName == "-" {
+			continue
+		}
+		property := schema.Properties[jsonName]
+		if property == nil || property.Type != "" || len(property.Types) > 0 {
+			continue
+		}
+		description := strings.ToLower(property.Description)
+		if strings.Contains(description, "string range") || strings.Contains(description, "array") {
+			continue
+		}
+		if strings.Contains(description, "true or false") ||
+			strings.Contains(description, "default false") ||
+			strings.Contains(description, "default true") {
+			property.Type = "boolean"
+		} else {
+			property.Type = "integer"
+		}
+	}
 }
 
 // toolError creates a CallToolResult with IsError=true.
@@ -137,6 +186,19 @@ func collectIntProperties(s *jsonschema.Schema) map[string]bool {
 	}
 	for name, prop := range s.Properties {
 		if prop != nil && isIntegerSchema(prop) {
+			result[name] = true
+		}
+	}
+	return result
+}
+
+func collectBoolProperties(s *jsonschema.Schema) map[string]bool {
+	result := make(map[string]bool)
+	if s == nil || s.Properties == nil {
+		return result
+	}
+	for name, prop := range s.Properties {
+		if prop != nil && prop.Type == "boolean" {
 			result[name] = true
 		}
 	}
@@ -266,6 +328,56 @@ func coerceIntProperties(data json.RawMessage, intProps map[string]bool) json.Ra
 		}
 	}
 
+	if !changed {
+		return data
+	}
+	result, err := json.Marshal(m)
+	if err != nil {
+		return data
+	}
+	return result
+}
+
+// coerceBoolProperties preserves the old FlexBool leniency while exposing a
+// proper boolean MCP schema. XML-based clients sometimes encode booleans as
+// strings, and a few older callers used 0/1.
+func coerceBoolProperties(data json.RawMessage, boolProps map[string]bool) json.RawMessage {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(data, &m); err != nil {
+		return data
+	}
+
+	changed := false
+	for key, raw := range m {
+		if !boolProps[key] {
+			continue
+		}
+		var value any
+		if err := json.Unmarshal(raw, &value); err != nil {
+			continue
+		}
+		var normalized bool
+		switch v := value.(type) {
+		case string:
+			switch strings.ToLower(strings.TrimSpace(v)) {
+			case "true", "1":
+				normalized = true
+			case "false", "0":
+				normalized = false
+			default:
+				continue
+			}
+		case float64:
+			if v != 0 && v != 1 {
+				continue
+			}
+			normalized = v == 1
+		default:
+			continue
+		}
+		m[key] = json.RawMessage(strconv.FormatBool(normalized))
+		changed = true
+	}
 	if !changed {
 		return data
 	}

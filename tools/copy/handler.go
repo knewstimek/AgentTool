@@ -18,13 +18,13 @@ import (
 )
 
 type CopyInput struct {
-	Source      string      `json:"source,omitempty" jsonschema:"Absolute path to the source file or directory,required"`
-	Destination string      `json:"destination,omitempty" jsonschema:"Absolute path to the destination,required"`
+	Source      string `json:"source,omitempty" jsonschema:"Source file or directory. Relative paths use workspace/MCP root,required"`
+	Destination string `json:"destination,omitempty" jsonschema:"Destination path. Relative paths use workspace/MCP root,required"`
 	// Aliases for compatibility with agents that use short names
-	Src         string      `json:"src,omitempty" jsonschema:"Alias for source"`
-	Dst         string      `json:"dst,omitempty" jsonschema:"Alias for destination"`
-	Overwrite   interface{} `json:"overwrite,omitempty" jsonschema:"Overwrite existing destination: true or false. Default: false"`
-	DryRun      interface{} `json:"dry_run,omitempty" jsonschema:"Preview what would be copied without doing it: true or false. Default: false"`
+	Src       string      `json:"src,omitempty" jsonschema:"Alias for source"`
+	Dst       string      `json:"dst,omitempty" jsonschema:"Alias for destination"`
+	Overwrite interface{} `json:"overwrite,omitempty" jsonschema:"Overwrite existing destination: true or false. Default: false"`
+	DryRun    interface{} `json:"dry_run,omitempty" jsonschema:"Preview what would be copied without doing it: true or false. Default: false"`
 }
 
 type CopyOutput struct {
@@ -48,8 +48,14 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input CopyInput) (*mc
 	if input.Source == "" || input.Destination == "" {
 		return errorResult("both source and destination are required")
 	}
-	if !filepath.IsAbs(input.Source) || !filepath.IsAbs(input.Destination) {
-		return errorResult("both paths must be absolute")
+	var err error
+	input.Source, err = common.ResolveRequestPath(ctx, req, input.Source)
+	if err != nil {
+		return errorResult(fmt.Sprintf("cannot resolve source: %v", err))
+	}
+	input.Destination, err = common.ResolveRequestPath(ctx, req, input.Destination)
+	if err != nil {
+		return errorResult(fmt.Sprintf("cannot resolve destination: %v", err))
 	}
 
 	srcCleaned := filepath.Clean(input.Source)
@@ -349,7 +355,6 @@ Use dry_run=true to preview what would be copied without doing it.
 On Windows, handles locked files (running executables, loaded DLLs) by renaming the locked file aside before replacing it. Use overwrite=true when updating a running binary.`,
 	}, Handle)
 }
-
 
 func errorResult(msg string) (*mcp.CallToolResult, CopyOutput, error) {
 	return &mcp.CallToolResult{

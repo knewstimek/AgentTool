@@ -24,8 +24,8 @@ const (
 )
 
 type CompressInput struct {
-	Sources []string `json:"sources" jsonschema:"List of absolute paths to files or directories to compress"`
-	Output  string   `json:"output" jsonschema:"Absolute path for the output archive file (.zip or .tar.gz)"`
+	Sources []string `json:"sources" jsonschema:"Files or directories to compress. Relative paths use workspace/MCP root"`
+	Output  string   `json:"output" jsonschema:"Output archive path (.zip or .tar.gz). Relative paths use workspace/MCP root"`
 }
 
 type CompressOutput struct {
@@ -34,8 +34,8 @@ type CompressOutput struct {
 }
 
 type DecompressInput struct {
-	Archive string `json:"archive" jsonschema:"Absolute path to the archive file (.zip or .tar.gz)"`
-	Output  string `json:"output,omitempty" jsonschema:"Absolute path to the output directory. Defaults to archive's directory"`
+	Archive string `json:"archive" jsonschema:"Archive path (.zip or .tar.gz). Relative paths use workspace/MCP root"`
+	Output  string `json:"output,omitempty" jsonschema:"Output directory path. Relative paths use workspace/MCP root"`
 }
 
 type DecompressOutput struct {
@@ -50,15 +50,20 @@ func HandleCompress(ctx context.Context, req *mcp.CallToolRequest, input Compres
 	if input.Output == "" {
 		return compressError("output is required")
 	}
-	if !filepath.IsAbs(input.Output) {
-		return compressError("output must be an absolute path")
+	resolvedOutput, err := common.ResolveRequestPath(ctx, req, input.Output)
+	if err != nil {
+		return compressError(fmt.Sprintf("cannot resolve output: %v", err))
 	}
+	input.Output = resolvedOutput
 
 	// Validate source paths
-	for _, src := range input.Sources {
-		if !filepath.IsAbs(src) {
-			return compressError(fmt.Sprintf("source path must be absolute: %s", src))
+	for i, src := range input.Sources {
+		resolved, err := common.ResolveRequestPath(ctx, req, src)
+		if err != nil {
+			return compressError(fmt.Sprintf("cannot resolve source %q: %v", src, err))
 		}
+		input.Sources[i] = resolved
+		src = resolved
 		if _, err := os.Stat(src); err != nil {
 			if os.IsNotExist(err) {
 				return compressError(fmt.Sprintf("source not found: %s", src))
@@ -73,7 +78,6 @@ func HandleCompress(ctx context.Context, req *mcp.CallToolRequest, input Compres
 	}
 
 	var count int
-	var err error
 
 	ext := strings.ToLower(input.Output)
 	switch {
@@ -102,12 +106,16 @@ func HandleDecompress(ctx context.Context, req *mcp.CallToolRequest, input Decom
 	if input.Output == "" {
 		return decompressError("output is required")
 	}
-	if !filepath.IsAbs(input.Archive) {
-		return decompressError("archive must be an absolute path")
+	resolvedArchive, err := common.ResolveRequestPath(ctx, req, input.Archive)
+	if err != nil {
+		return decompressError(fmt.Sprintf("cannot resolve archive: %v", err))
 	}
-	if !filepath.IsAbs(input.Output) {
-		return decompressError("output must be an absolute path")
+	input.Archive = resolvedArchive
+	resolvedOutput, err := common.ResolveRequestPath(ctx, req, input.Output)
+	if err != nil {
+		return decompressError(fmt.Sprintf("cannot resolve output: %v", err))
 	}
+	input.Output = resolvedOutput
 
 	if _, err := os.Stat(input.Archive); err != nil {
 		if os.IsNotExist(err) {
@@ -121,7 +129,6 @@ func HandleDecompress(ctx context.Context, req *mcp.CallToolRequest, input Decom
 	}
 
 	var count, skippedSymlinks int
-	var err error
 
 	ext := strings.ToLower(input.Archive)
 	switch {

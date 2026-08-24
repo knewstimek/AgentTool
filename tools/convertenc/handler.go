@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"agent-tool/common"
@@ -14,7 +13,7 @@ import (
 )
 
 type ConvertInput struct {
-	FilePath   string `json:"file_path,omitempty" jsonschema:"Absolute path to the file to convert"`
+	FilePath   string `json:"file_path,omitempty" jsonschema:"File to convert. Relative paths use workspace/MCP root"`
 	Path       string `json:"path,omitempty" jsonschema:"Alias for file_path"`
 	ToEncoding string `json:"to_encoding" jsonschema:"Target encoding. Examples: UTF-8, UTF-8-BOM, EUC-KR, Shift_JIS, ISO-8859-1"`
 }
@@ -31,9 +30,11 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ConvertInput) (
 	if input.FilePath == "" {
 		return errorResult("file_path is required")
 	}
-	if !filepath.IsAbs(input.FilePath) {
-		return errorResult("file_path must be an absolute path")
+	resolvedPath, err := common.ResolveRequestPath(ctx, req, input.FilePath)
+	if err != nil {
+		return errorResult(fmt.Sprintf("cannot resolve file_path: %v", err))
 	}
+	input.FilePath = resolvedPath
 	if input.ToEncoding == "" {
 		return errorResult("to_encoding is required")
 	}

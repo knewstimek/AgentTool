@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"agent-tool/common"
@@ -15,14 +14,14 @@ import (
 const (
 	defaultPEImportResults    = 500
 	hardPEImportResults       = 100000
-	defaultAnalyzeOutputChars = 100000
-	hardAnalyzeOutputChars    = 1000000
+	defaultAnalyzeOutputChars = common.DefaultOutputChars
+	hardAnalyzeOutputChars    = common.HardOutputChars
 )
 
 // AnalyzeInput defines parameters for the static binary analysis tool.
 type AnalyzeInput struct {
 	Operation string `json:"operation" jsonschema:"Operation: disassemble, pe_info, elf_info, macho_info, strings, hexdump, pattern_search, entropy, bin_diff, resource_info, imphash, rich_header, overlay_detect, dwarf_info, xref, function_at, call_graph, follow_ptr, rtti_dump, struct_layout, vtable_scan,required"`
-	FilePath  string `json:"file_path,omitempty" jsonschema:"Absolute path to the binary file,required"`
+	FilePath  string `json:"file_path,omitempty" jsonschema:"Binary file path. Relative paths use workspace/MCP root,required"`
 	Path      string `json:"path,omitempty" jsonschema:"Alias for file_path"`
 
 	// disassemble / function_at / follow_ptr parameters
@@ -46,7 +45,7 @@ type AnalyzeInput struct {
 	Section        string `json:"section,omitempty" jsonschema:"Filter by section name (e.g. '.text', '.rdata'). Empty = show all"`
 	RVA            string `json:"rva,omitempty" jsonschema:"RVA to convert to file offset (hex string, e.g. '0x36A20'). For pe_info only"`
 	ResultOffset   int    `json:"result_offset,omitempty" jsonschema:"Zero-based import result offset for pe_info paging. Default: 0"`
-	MaxOutputChars int    `json:"max_output_chars,omitempty" jsonschema:"Maximum returned text characters for paged analysis output. Default: 100000, Max: 1000000"`
+	MaxOutputChars int    `json:"max_output_chars,omitempty" jsonschema:"Maximum returned text characters for paged analysis output. Default: 32768, Max: 131072"`
 
 	// pattern_search parameters
 	Pattern string `json:"pattern,omitempty" jsonschema:"Hex byte pattern with ?? wildcards (e.g. '4D 5A ?? ?? 50 45'). For pattern_search"`
@@ -55,7 +54,7 @@ type AnalyzeInput struct {
 	TargetVA string `json:"target_va,omitempty" jsonschema:"Target virtual address to find references to (hex). For xref operation."`
 
 	// bin_diff parameters
-	FilePathB string `json:"file_path_b,omitempty" jsonschema:"Absolute path to the second file for bin_diff comparison"`
+	FilePathB string `json:"file_path_b,omitempty" jsonschema:"Second file for bin_diff. Relative paths use workspace/MCP root"`
 
 	// call_graph parameters are reused from VA + Count fields above
 }
@@ -125,10 +124,16 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input AnalyzeInput) (
 	if input.FilePath == "" {
 		return errorResult("file_path is required")
 	}
-	// Normalize before validation to prevent path traversal (e.g. "/../")
-	input.FilePath = filepath.Clean(input.FilePath)
-	if !filepath.IsAbs(input.FilePath) {
-		return errorResult("file_path must be an absolute path")
+	resolvedPath, err := common.ResolveRequestPath(ctx, req, input.FilePath)
+	if err != nil {
+		return errorResult(fmt.Sprintf("cannot resolve file_path: %v", err))
+	}
+	input.FilePath = resolvedPath
+	if input.FilePathB != "" {
+		input.FilePathB, err = common.ResolveRequestPath(ctx, req, input.FilePathB)
+		if err != nil {
+			return errorResult(fmt.Sprintf("cannot resolve file_path_b: %v", err))
+		}
 	}
 
 	// Symlink check

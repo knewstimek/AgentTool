@@ -16,13 +16,15 @@ import (
 )
 
 type TOMLQueryInput struct {
-	FilePath string `json:"file_path,omitempty" jsonschema:"Absolute path to the TOML file"`
-	Path     string `json:"path,omitempty" jsonschema:"Alias for file_path"`
-	Query    string `json:"query" jsonschema:"Dot-notation query path (e.g. dependencies.react, tool.poetry.name, servers[0].host)"`
+	FilePath       string `json:"file_path,omitempty" jsonschema:"TOML file. Relative paths use workspace/MCP root"`
+	Path           string `json:"path,omitempty" jsonschema:"Alias for file_path"`
+	Query          string `json:"query" jsonschema:"Dot-notation query path (e.g. dependencies.react, tool.poetry.name, servers[0].host)"`
+	MaxOutputChars int    `json:"max_output_chars,omitempty" jsonschema:"Maximum returned text characters. Default: 32768, Max: 131072"`
 }
 
 type TOMLQueryOutput struct {
-	Result string `json:"result"`
+	Result    string `json:"result"`
+	Truncated bool   `json:"truncated"`
 }
 
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input TOMLQueryInput) (*mcp.CallToolResult, TOMLQueryOutput, error) {
@@ -32,9 +34,11 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input TOMLQueryInput)
 	if input.FilePath == "" {
 		return errorResult("file_path is required")
 	}
-	if !filepath.IsAbs(input.FilePath) {
-		return errorResult("file_path must be an absolute path")
+	resolvedPath, err := common.ResolveRequestPath(ctx, req, input.FilePath)
+	if err != nil {
+		return errorResult(fmt.Sprintf("cannot resolve file_path: %v", err))
 	}
+	input.FilePath = resolvedPath
 	if strings.TrimSpace(input.Query) == "" {
 		return errorResult("query is required")
 	}
@@ -114,10 +118,19 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input TOMLQueryInput)
 
 	msg := fmt.Sprintf("File: %s\nQuery: %s\nType: %s\n\n%s",
 		filepath.Base(input.FilePath), input.Query, typeName, valueStr)
+	maxOutputChars := input.MaxOutputChars
+	if maxOutputChars <= 0 {
+		maxOutputChars = common.DefaultOutputChars
+	}
+	if maxOutputChars > common.HardOutputChars {
+		return errorResult(fmt.Sprintf("max_output_chars must be at most %d", common.HardOutputChars))
+	}
+	msg, truncated := common.TruncateRunes(msg, maxOutputChars,
+		"\n[truncated=true; refine the query or select a narrower array/object path]")
 
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: msg}},
-	}, TOMLQueryOutput{Result: msg}, nil
+	}, TOMLQueryOutput{Result: msg, Truncated: truncated}, nil
 }
 
 // normalizeTOML recursively converts typed slices to []interface{}
@@ -186,7 +199,8 @@ func Register(server *mcp.Server) {
 Supports nested keys (a.b.c), array indices ([0], [-1] for last), and wildcards ([*] for all elements).
 Examples: "dependencies.react", "tool.poetry.name", "servers[0].host", "servers[*].role".
 Returns the matched value with its type. Objects and arrays are pretty-printed as JSON.
-Use this to extract specific values from large TOML files to save tokens.`,
+Use this to extract specific values from large TOML files to save tokens.
+Output defaults to 32768 characters and visibly reports truncation.`,
 	}, Handle)
 }
 

@@ -1,8 +1,11 @@
 package ssh
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -38,8 +41,8 @@ func (e *sessionEntry) close() {
 // dialResult holds the result of a dial operation for pool insertion.
 type dialResult struct {
 	client      *gossh.Client
-	agentConn   net.Conn   // SSH agent socket; nil if not used
-	jumpCleanup func()     // closes jump host client + its agent conn; nil if no proxy
+	agentConn   net.Conn // SSH agent socket; nil if not used
+	jumpCleanup func()   // closes jump host client + its agent conn; nil if no proxy
 }
 
 type sessionPool struct {
@@ -55,9 +58,15 @@ func init() {
 	go pool.reaper()
 }
 
-// sessionKey returns a unique key for a host:port:user combination.
-func sessionKey(host string, port int, user string) string {
-	return fmt.Sprintf("%s:%d:%s", host, port, user)
+// sessionKey includes every connection-semantic option. Secrets are hashed so
+// pool bookkeeping and diagnostics never retain them in plaintext.
+func sessionKey(input SSHInput) string {
+	identity := fmt.Sprintf("%s\x00%s\x00%v\x00%s\x00%s\x00%s\x00%d\x00%s\x00%s\x00%s\x00%s",
+		input.Password, input.KeyFile, input.UseAgent, input.Passphrase, input.HostKeyCheck,
+		input.JumpHost, input.JumpPortInt, input.JumpUser, input.JumpPassword,
+		input.JumpKeyFile, input.JumpPassphrase)
+	sum := sha256.Sum256([]byte(identity))
+	return fmt.Sprintf("%s:%d:%s:%s", input.Host, input.PortInt, input.User, hex.EncodeToString(sum[:]))
 }
 
 // getOrCreate returns an existing session or creates a new one using dialFn.
@@ -193,7 +202,7 @@ func GetClient(input SSHInput) (*gossh.Client, bool, error) {
 	if err := validateInput(&input); err != nil {
 		return nil, false, err
 	}
-	key := sessionKey(input.Host, input.PortInt, input.User)
+	key := sessionKey(input)
 	return pool.getOrCreate(key, func() (*dialResult, error) {
 		// No resolved IP available — dial by hostname.
 		// This is acceptable because callers must perform SSRF checks before
@@ -204,17 +213,37 @@ func GetClient(input SSHInput) (*gossh.Client, bool, error) {
 
 // RemoveClient removes a pooled session by connection parameters.
 func RemoveClient(host string, port int, user string) bool {
-	key := sessionKey(host, port, user)
-	return pool.remove(key)
+	prefix := fmt.Sprintf("%s:%d:%s:", host, port, user)
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	removed := false
+	for key, entry := range pool.sessions {
+		if strings.HasPrefix(key, prefix) {
+			entry.close()
+			delete(pool.sessions, key)
+			removed = true
+		}
+	}
+	return removed
+}
+
+// RemoveClientFor removes only the session matching the full connection identity.
+func RemoveClientFor(input SSHInput) bool {
+	if err := validateInput(&input); err != nil {
+		return false
+	}
+	return pool.remove(sessionKey(input))
 }
 
 // TouchClient updates the lastUsed timestamp for a pooled session.
 func TouchClient(host string, port int, user string) {
-	key := sessionKey(host, port, user)
+	prefix := fmt.Sprintf("%s:%d:%s:", host, port, user)
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
-	if entry, ok := pool.sessions[key]; ok {
-		entry.lastUsed = time.Now()
+	for key, entry := range pool.sessions {
+		if strings.HasPrefix(key, prefix) {
+			entry.lastUsed = time.Now()
+		}
 	}
 }
 

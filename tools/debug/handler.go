@@ -14,8 +14,8 @@ const (
 	hardDebugMaxResults        = 10000
 	defaultDebugMaxValueChars  = 4000
 	hardDebugMaxValueChars     = 100000
-	defaultDebugMaxOutputChars = 100000
-	hardDebugMaxOutputChars    = 1000000
+	defaultDebugMaxOutputChars = common.DefaultOutputChars
+	hardDebugMaxOutputChars    = common.HardOutputChars
 )
 
 // DebugInput defines the parameters for all debug operations.
@@ -50,7 +50,7 @@ type DebugInput struct {
 	Start              int    `json:"start,omitempty" jsonschema:"Zero-based result offset for variables, completions, and loaded_sources paging. Default: 0"`
 	MaxResults         int    `json:"max_results,omitempty" jsonschema:"Maximum results for variables, completions, modules, and loaded_sources. Default: 200, Max: 10000"`
 	MaxValueChars      int    `json:"max_value_chars,omitempty" jsonschema:"Maximum characters for one variable/evaluation/detail value. Default: 4000, Max: 100000"`
-	MaxOutputChars     int    `json:"max_output_chars,omitempty" jsonschema:"Maximum total returned text characters. Default: 100000, Max: 1000000"`
+	MaxOutputChars     int    `json:"max_output_chars,omitempty" jsonschema:"Maximum total returned text characters. Default: 32768, Max: 131072"`
 	VariableFilter     string `json:"variable_filter,omitempty" jsonschema:"DAP variable filter: indexed or named. For variables"`
 
 	// evaluate / set_expression

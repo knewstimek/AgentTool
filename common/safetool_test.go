@@ -2,6 +2,7 @@ package common
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -82,6 +83,47 @@ func TestCoerceIntProperties(t *testing.T) {
 				t.Errorf("key %q: got %v (%T), want %v (%T)", tt.wantKey, got, got, tt.wantVal, tt.wantVal)
 			}
 		})
+	}
+}
+
+func TestAnnotateFlexibleScalarTypes(t *testing.T) {
+	type input struct {
+		Limit   interface{} `json:"limit,omitempty" jsonschema:"Maximum lines. Default: 100"`
+		DryRun  interface{} `json:"dry_run,omitempty" jsonschema:"Preview: true or false. Default: false"`
+		Offset  interface{} `json:"offset,omitempty" jsonschema:"Integer, string range, or array"`
+		Already string      `json:"already,omitempty"`
+	}
+	schema, err := jsonschema.ForType(reflect.TypeFor[input](), &jsonschema.ForOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	annotateFlexibleScalarTypes(schema, reflect.TypeFor[input]())
+	if got := schema.Properties["limit"].Type; got != "integer" {
+		t.Fatalf("limit type = %q, want integer", got)
+	}
+	if got := schema.Properties["dry_run"].Type; got != "boolean" {
+		t.Fatalf("dry_run type = %q, want boolean", got)
+	}
+	if got := schema.Properties["offset"].Type; got != "" {
+		t.Fatalf("polymorphic offset type = %q, want empty", got)
+	}
+}
+
+func TestCoerceBoolProperties(t *testing.T) {
+	props := map[string]bool{"dry_run": true}
+	for _, input := range []string{
+		`{"dry_run":"true"}`,
+		`{"dry_run":"1"}`,
+		`{"dry_run":1}`,
+	} {
+		got := coerceBoolProperties(json.RawMessage(input), props)
+		var value map[string]any
+		if err := json.Unmarshal(got, &value); err != nil {
+			t.Fatal(err)
+		}
+		if value["dry_run"] != true {
+			t.Fatalf("input %s: got %#v", input, value["dry_run"])
+		}
 	}
 }
 

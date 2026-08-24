@@ -3,6 +3,9 @@ package grep
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -25,29 +28,32 @@ var (
 )
 
 const (
-	defaultMaxResults     = 100
-	hardMaxResults        = 100000
-	defaultMaxLineChars   = 4000
-	hardMaxLineChars      = 100000
-	defaultMaxOutputChars = 100000
-	hardMaxOutputChars    = 1000000
-	hardMaxContextLines   = 1000
+	defaultMaxResults   = 100
+	hardMaxResults      = 100000
+	defaultMaxLineChars = 4000
+	hardMaxLineChars    = 32768
+	hardMaxContextLines = 1000
 )
 
 type GrepInput struct {
-	Pattern        string      `json:"pattern" jsonschema:"Regular expression pattern to search for"`
-	Path           string      `json:"path,omitempty" jsonschema:"File or directory to search in (absolute path). Defaults to current directory"`
-	FilePath       string      `json:"file_path,omitempty" jsonschema:"Alias for path"`
-	Glob           string      `json:"glob,omitempty" jsonschema:"Glob pattern to filter files (e.g. *.go). Only used when path is a directory"`
-	IgnoreCase     interface{} `json:"ignore_case,omitempty" jsonschema:"Case insensitive search: true or false. Default: false"`
-	Recursive      interface{} `json:"recursive,omitempty" jsonschema:"Recurse into subdirectories: true or false. Default: true"`
-	MaxResults     interface{} `json:"max_results,omitempty" jsonschema:"Maximum matching lines/files to inspect for the result. Default: 100, Max: 100000. Total returned text is also bounded by max_output_chars"`
-	OutputMode     string      `json:"output_mode,omitempty" jsonschema:"Output mode: 'content' (matching lines with path:line:text, default), 'files_with_matches' (file paths only), 'count' (match count per file)"`
-	Context        interface{} `json:"context,omitempty" jsonschema:"Lines of context before and after each match (like grep -C). Default: 0, Max: 1000"`
-	Before         interface{} `json:"before,omitempty" jsonschema:"Lines of context before each match (like grep -B). Overrides context. Default: 0, Max: 1000"`
-	After          interface{} `json:"after,omitempty" jsonschema:"Lines of context after each match (like grep -A). Overrides context. Default: 0, Max: 1000"`
-	MaxLineChars   interface{} `json:"max_line_chars,omitempty" jsonschema:"Maximum characters returned from one matching or context line. Default: 4000, Max: 100000"`
-	MaxOutputChars interface{} `json:"max_output_chars,omitempty" jsonschema:"Maximum total result characters. Default: 100000, Max: 1000000"`
+	Pattern        string `json:"pattern" jsonschema:"Regular expression pattern to search for"`
+	Path           string `json:"path,omitempty" jsonschema:"File or directory to search. Defaults to configured workspace, MCP client root, or current directory"`
+	FilePath       string `json:"file_path,omitempty" jsonschema:"Alias for path"`
+	Glob           string `json:"glob,omitempty" jsonschema:"Glob pattern to filter files (e.g. *.go). Only used when path is a directory"`
+	IgnoreCase     bool   `json:"ignore_case,omitempty" jsonschema:"Case-insensitive search. Default: false"`
+	Recursive      *bool  `json:"recursive,omitempty" jsonschema:"Recurse into subdirectories. Default: true"`
+	MaxResults     int    `json:"max_results,omitempty" jsonschema:"Maximum matching lines/files per page. Default: 100, Max: 100000"`
+	OutputMode     string `json:"output_mode,omitempty" jsonschema:"Output mode: content (default), files_with_matches, or count"`
+	OutputFormat   string `json:"output_format,omitempty" jsonschema:"Content layout: compact (group matches by file, default) or classic (path:line:text on every line)"`
+	Context        int    `json:"context,omitempty" jsonschema:"Lines before and after each match (like grep -C). Default: 0, Max: 1000"`
+	Before         int    `json:"before,omitempty" jsonschema:"Lines before each match. Overrides context. Default: 0, Max: 1000"`
+	After          int    `json:"after,omitempty" jsonschema:"Lines after each match. Overrides context. Default: 0, Max: 1000"`
+	MaxLineChars   int    `json:"max_line_chars,omitempty" jsonschema:"Maximum characters per matching/context line. Default: 4000, Max: 32768"`
+	MaxOutputChars int    `json:"max_output_chars,omitempty" jsonschema:"Maximum total result characters. Default: 32768, Max: 131072"`
+	RelativePaths  *bool  `json:"relative_paths,omitempty" jsonschema:"Return paths relative to the search root. Default: true for directory searches"`
+	IncludeHidden  bool   `json:"include_hidden,omitempty" jsonschema:"Search hidden directories. Explicitly provided hidden roots are always searched. Default: false"`
+	IncludeIgnored bool   `json:"include_ignored,omitempty" jsonschema:"Search common generated/vendor directories instead of skipping them. Default: false"`
+	Cursor         string `json:"cursor,omitempty" jsonschema:"Opaque continuation cursor returned by a previous grep call. Not supported with context lines"`
 }
 
 type GrepOutput struct {
@@ -57,6 +63,7 @@ type GrepOutput struct {
 	Truncated     bool     `json:"truncated"`
 	LimitReached  bool     `json:"limit_reached"`
 	HasMore       bool     `json:"has_more"`
+	NextCursor    string   `json:"next_cursor,omitempty"`
 }
 
 // searchOpts holds computed search options passed to search functions.
@@ -67,7 +74,18 @@ type searchOpts struct {
 	showPath       bool // include file path prefix on each line (true for directory search)
 	maxLineChars   int
 	maxOutputChars int
+	rootDir        string
+	relativePaths  bool
+	includeHidden  bool
+	includeIgnored bool
 }
+
+type grepCursor struct {
+	Offset    int    `json:"o"`
+	Signature string `json:"s"`
+}
+
+var classicGrepLine = regexp.MustCompile(`^(.*):([0-9]+)([:\-])(.*)$`)
 
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input GrepInput) (*mcp.CallToolResult, GrepOutput, error) {
 	if input.Path == "" {
@@ -77,14 +95,19 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input GrepInput) (*mc
 		return errorResult("pattern is required")
 	}
 	if input.Path == "" {
-		return errorResult("path is required")
+		input.Path = common.RequestWorkspace(ctx, req)
 	}
 	if !filepath.IsAbs(input.Path) {
-		return errorResult("path must be an absolute path")
+		resolved, err := common.ResolveRequestPath(ctx, req, input.Path)
+		if err != nil {
+			return errorResult(fmt.Sprintf("cannot resolve path: %v", err))
+		}
+		input.Path = resolved
 	}
+	input.Path = filepath.Clean(input.Path)
 
 	flags := ""
-	if common.FlexBool(input.IgnoreCase) {
+	if input.IgnoreCase {
 		flags = "(?i)"
 	}
 	re, err := regexp.Compile(flags + input.Pattern)
@@ -92,52 +115,34 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input GrepInput) (*mc
 		return errorResult(fmt.Sprintf("invalid regex pattern: %v", err))
 	}
 
-	maxResults, ok := common.FlexInt(input.MaxResults)
-	if !ok {
-		return errorResult("max_results must be an integer")
-	}
+	maxResults := input.MaxResults
 	if maxResults <= 0 {
 		maxResults = defaultMaxResults
 	}
 	if maxResults > hardMaxResults {
 		return errorResult(fmt.Sprintf("max_results must be at most %d; use a narrower path/pattern or multiple calls", hardMaxResults))
 	}
-	ctxLines, ok := common.FlexInt(input.Context)
-	if !ok {
-		return errorResult("context must be an integer")
-	}
-	beforeLines, ok := common.FlexInt(input.Before)
-	if !ok {
-		return errorResult("before must be an integer")
-	}
-	afterLines, ok := common.FlexInt(input.After)
-	if !ok {
-		return errorResult("after must be an integer")
-	}
+	ctxLines := input.Context
+	beforeLines := input.Before
+	afterLines := input.After
 	for name, value := range map[string]int{"context": ctxLines, "before": beforeLines, "after": afterLines} {
 		if value < 0 || value > hardMaxContextLines {
 			return errorResult(fmt.Sprintf("%s must be between 0 and %d", name, hardMaxContextLines))
 		}
 	}
-	maxLineChars, ok := common.FlexInt(input.MaxLineChars)
-	if !ok {
-		return errorResult("max_line_chars must be an integer")
-	}
+	maxLineChars := input.MaxLineChars
 	if maxLineChars <= 0 {
 		maxLineChars = defaultMaxLineChars
 	}
 	if maxLineChars > hardMaxLineChars {
 		return errorResult(fmt.Sprintf("max_line_chars must be at most %d", hardMaxLineChars))
 	}
-	maxOutputChars, ok := common.FlexInt(input.MaxOutputChars)
-	if !ok {
-		return errorResult("max_output_chars must be an integer")
-	}
+	maxOutputChars := input.MaxOutputChars
 	if maxOutputChars <= 0 {
-		maxOutputChars = defaultMaxOutputChars
+		maxOutputChars = common.DefaultOutputChars
 	}
-	if maxOutputChars > hardMaxOutputChars {
-		return errorResult(fmt.Sprintf("max_output_chars must be at most %d", hardMaxOutputChars))
+	if maxOutputChars > common.HardOutputChars {
+		return errorResult(fmt.Sprintf("max_output_chars must be at most %d", common.HardOutputChars))
 	}
 
 	// Compute search options
@@ -148,6 +153,13 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input GrepInput) (*mc
 	default:
 		return errorResult(fmt.Sprintf("invalid output_mode %q -- use 'content', 'files_with_matches', or 'count'", input.OutputMode))
 	}
+	outputFormat := strings.ToLower(strings.TrimSpace(input.OutputFormat))
+	if outputFormat == "" {
+		outputFormat = "compact"
+	}
+	if outputFormat != "compact" && outputFormat != "classic" {
+		return errorResult("output_format must be compact or classic")
+	}
 	if ctxLines > 0 {
 		opts.before = ctxLines
 		opts.after = ctxLines
@@ -157,6 +169,9 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input GrepInput) (*mc
 	}
 	if afterLines > 0 {
 		opts.after = afterLines
+	}
+	if input.Cursor != "" && (opts.before > 0 || opts.after > 0) {
+		return errorResult("cursor cannot be used with context/before/after; narrow the search or continue without context")
 	}
 
 	fi, err := os.Stat(input.Path)
@@ -169,33 +184,63 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input GrepInput) (*mc
 
 	// recursive defaults to true; only disable when explicitly false.
 	recursive := true
-	if input.Recursive != nil && !common.FlexBool(input.Recursive) {
-		recursive = false
+	if input.Recursive != nil {
+		recursive = *input.Recursive
 	}
 
 	// Directory search includes file path on each line; single-file search
 	// omits it to save tokens (agent already knows which file it passed).
 	opts.showPath = fi.IsDir()
+	opts.rootDir = input.Path
+	opts.relativePaths = fi.IsDir() && (input.RelativePaths == nil || *input.RelativePaths)
+	opts.includeHidden = input.IncludeHidden
+	opts.includeIgnored = input.IncludeIgnored
+	if outputFormat == "compact" && opts.showPath && (opts.outputMode == "" || opts.outputMode == "content") {
+		// Internal classic records repeat paths. Give collection a larger budget;
+		// the compact renderer below enforces the requested response budget.
+		opts.maxOutputChars = common.HardOutputChars
+	}
+
+	pageOffset := 0
+	signature := cursorSignature(input, recursive)
+	if input.Cursor != "" {
+		cursor, err := decodeCursor(input.Cursor)
+		if err != nil {
+			return errorResult(fmt.Sprintf("invalid cursor: %v", err))
+		}
+		if cursor.Signature != signature {
+			return errorResult("cursor does not match this grep query; reuse the same pattern/path/glob/mode options")
+		}
+		pageOffset = cursor.Offset
+	}
+	searchLimit := maxResults + pageOffset
+	if searchLimit > hardMaxResults {
+		return errorResult(fmt.Sprintf("cursor offset plus max_results must be at most %d", hardMaxResults))
+	}
 
 	var matches []string
 	var matchCount int
 	hasLowConfidence := false
 	skippedBinary := 0
+	skippedIgnored := 0
+	skippedUnreadable := 0
 	searchOutputTruncated := false
 	hasMore := false
 
 	if fi.IsDir() {
 		var dirResult searchDirResult
-		dirResult, err = searchDir(input.Path, input.Glob, re, maxResults, opts, recursive)
+		dirResult, err = searchDir(input.Path, input.Glob, re, searchLimit, opts, recursive)
 		matches = dirResult.matches
 		matchCount = dirResult.matchCount
 		hasLowConfidence = dirResult.lowConfidenceCount > 0
 		skippedBinary = dirResult.skippedBinary
+		skippedIgnored = dirResult.skippedIgnored
+		skippedUnreadable = dirResult.skippedUnreadable
 		searchOutputTruncated = dirResult.outputTruncated
 		hasMore = dirResult.hasMore
 	} else {
 		var fileResult searchFileResult
-		fileResult, err = searchFile(input.Path, re, maxResults, opts)
+		fileResult, err = searchFile(input.Path, re, searchLimit, opts)
 		matches = fileResult.matches
 		matchCount = fileResult.matchCount
 		hasLowConfidence = fileResult.lowConfidence
@@ -206,14 +251,33 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input GrepInput) (*mc
 	if err != nil {
 		return errorResult(fmt.Sprintf("search error: %v", err))
 	}
+	if pageOffset > 0 {
+		if pageOffset >= len(matches) {
+			matches = nil
+		} else {
+			matches = matches[pageOffset:]
+		}
+	}
+	if len(matches) > maxResults {
+		matches = matches[:maxResults]
+		hasMore = true
+	}
 
 	var sb strings.Builder
 	usedChars := 0
 	displayedMatches := make([]string, 0, len(matches))
 	outputTruncated := searchOutputTruncated
+	bodyBudget := maxOutputChars - 512
+	if bodyBudget < 256 {
+		bodyBudget = maxOutputChars
+	}
+	currentFile := ""
 	for _, m := range matches {
 		line := m + "\n"
-		if !common.AppendWithinRuneBudget(&sb, &usedChars, line, maxOutputChars) {
+		if outputFormat == "compact" && opts.showPath && (opts.outputMode == "" || opts.outputMode == "content") {
+			line, currentFile = compactDisplayLine(m, currentFile)
+		}
+		if !common.AppendWithinRuneBudget(&sb, &usedChars, line, bodyBudget) {
 			outputTruncated = true
 			break
 		}
@@ -221,7 +285,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input GrepInput) (*mc
 	}
 
 	text := sb.String()
-	if matchCount == 0 {
+	if len(displayedMatches) == 0 {
 		text = "No matches found"
 	}
 
@@ -241,18 +305,35 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input GrepInput) (*mc
 			"Results may be incomplete. Consider setting fallback_encoding via set_config tool " +
 			"or adding 'charset' to .editorconfig."
 	}
-	if hasMore {
-		text += fmt.Sprintf("\n[More grep results are available. Narrow path/pattern/context or raise max_results/max_output_chars (maximums: %d/%d).]", hardMaxResults, hardMaxOutputChars)
+	nextCursor := ""
+	if (hasMore || outputTruncated) && opts.before == 0 && opts.after == 0 {
+		nextCursor = encodeCursor(grepCursor{Offset: pageOffset + len(displayedMatches), Signature: signature})
 	}
-	if outputTruncated {
-		text += fmt.Sprintf("\n[Output truncated at %d characters after %d displayed lines. Narrow path/pattern/context or raise max_output_chars (max %d).]", maxOutputChars, len(displayedMatches), hardMaxOutputChars)
+	if skippedIgnored > 0 {
+		text += fmt.Sprintf("\n(%d ignored/generated path(s) skipped; use include_ignored=true or include_hidden=true to include them)", skippedIgnored)
 	}
-	text, finalTruncated := common.TruncateRunes(text, maxOutputChars, "\n[Output truncated]")
+	if skippedUnreadable > 0 {
+		text += fmt.Sprintf("\n(%d unreadable path(s) skipped; results may be incomplete)", skippedUnreadable)
+	}
+	if hasMore || outputTruncated {
+		if hasMore {
+			text += "\n[More grep results are available.]"
+		}
+		text += fmt.Sprintf("\n[grep returned=%d; matched_through=%d; truncated=%t; has_more=%t",
+			len(displayedMatches), matchCount, outputTruncated, hasMore)
+		if nextCursor != "" {
+			text += "; next_cursor=" + nextCursor
+		} else {
+			text += "; continuation=unsupported_with_context; narrow the query"
+		}
+		text += "]"
+	}
+	text, finalTruncated := common.TruncateRunes(text, maxOutputChars, "\n[truncated]")
 	outputTruncated = outputTruncated || finalTruncated
 
 	out := GrepOutput{
 		Matches: displayedMatches, Count: matchCount, ReturnedLines: len(displayedMatches),
-		Truncated: outputTruncated, LimitReached: hasMore, HasMore: hasMore,
+		Truncated: outputTruncated, LimitReached: hasMore, HasMore: hasMore, NextCursor: nextCursor,
 	}
 	// Text only, no StructuredContent: clients that understand structured output
 	// render it *instead of* the text, so a compact metadata-only payload hid
@@ -261,6 +342,63 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input GrepInput) (*mc
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: text}},
 	}, out, nil
+}
+
+func cursorSignature(input GrepInput, recursive bool) string {
+	mode := input.OutputMode
+	if mode == "" {
+		mode = "content"
+	}
+	format := input.OutputFormat
+	if format == "" {
+		format = "compact"
+	}
+	relative := input.RelativePaths == nil || *input.RelativePaths
+	value := fmt.Sprintf("%s\x00%s\x00%s\x00%t\x00%t\x00%s\x00%s\x00%d\x00%d\x00%d\x00%t\x00%t\x00%v",
+		input.Pattern, input.Path, input.Glob, input.IgnoreCase, recursive, mode,
+		format, input.Context, input.Before, input.After, input.IncludeHidden,
+		input.IncludeIgnored, relative)
+	sum := sha256.Sum256([]byte(value))
+	return fmt.Sprintf("%x", sum[:8])
+}
+
+func compactDisplayLine(classic, currentFile string) (string, string) {
+	if classic == "--" {
+		return "  --\n", currentFile
+	}
+	parts := classicGrepLine.FindStringSubmatch(classic)
+	if len(parts) != 5 {
+		return classic + "\n", currentFile
+	}
+	var sb strings.Builder
+	if parts[1] != currentFile {
+		sb.WriteString(parts[1])
+		sb.WriteByte('\n')
+		currentFile = parts[1]
+	}
+	sb.WriteString("  ")
+	sb.WriteString(parts[2])
+	sb.WriteString(parts[3])
+	sb.WriteString(parts[4])
+	sb.WriteByte('\n')
+	return sb.String(), currentFile
+}
+
+func encodeCursor(cursor grepCursor) string {
+	data, _ := json.Marshal(cursor)
+	return base64.RawURLEncoding.EncodeToString(data)
+}
+
+func decodeCursor(value string) (grepCursor, error) {
+	var cursor grepCursor
+	data, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil {
+		return cursor, errors.New("not valid base64url")
+	}
+	if err := json.Unmarshal(data, &cursor); err != nil || cursor.Offset < 0 || cursor.Signature == "" {
+		return grepCursor{}, errors.New("malformed cursor payload")
+	}
+	return cursor, nil
 }
 
 // searchFileResult is the return value of searchFile.
@@ -277,8 +415,7 @@ func searchFile(path string, re *regexp.Regexp, maxResults int, opts searchOpts)
 	hintCharset := edit.FindEditorConfigCharset(path)
 	content, encInfo, err := common.ReadFileWithEncoding(path, hintCharset)
 	if err != nil {
-		// Skip files that fail to read (e.g. too large) -- return empty result instead of error
-		return searchFileResult{}, nil
+		return searchFileResult{}, err
 	}
 
 	result := searchFileResult{
@@ -300,7 +437,7 @@ func searchFile(path string, re *regexp.Regexp, maxResults int, opts searchOpts)
 		scanner := bufio.NewScanner(strings.NewReader(content))
 		for scanner.Scan() {
 			if re.MatchString(scanner.Text()) {
-				if !appendDisplay(path) {
+				if !appendDisplay(resultPath(path, opts)) {
 					result.hasMore = true
 				}
 				result.matchCount = 1
@@ -336,7 +473,7 @@ func searchFile(path string, re *regexp.Regexp, maxResults int, opts searchOpts)
 	// count mode: return "path:count"
 	if opts.outputMode == "count" {
 		if len(matchIndices) > 0 {
-			if !appendDisplay(fmt.Sprintf("%s:%d", path, len(matchIndices))) {
+			if !appendDisplay(fmt.Sprintf("%s:%d", resultPath(path, opts), len(matchIndices))) {
 				result.hasMore = true
 			}
 			result.matchCount = 1 // 1 file entry
@@ -348,14 +485,14 @@ func searchFile(path string, re *regexp.Regexp, maxResults int, opts searchOpts)
 	fmtMatch := func(lineNum int, text string) string {
 		text, _ = common.TruncateRunes(text, opts.maxLineChars, "… [line truncated]")
 		if opts.showPath {
-			return fmt.Sprintf("%s:%d:%s", path, lineNum, text)
+			return fmt.Sprintf("%s:%d:%s", resultPath(path, opts), lineNum, text)
 		}
 		return fmt.Sprintf("%d:%s", lineNum, text)
 	}
 	fmtContext := func(lineNum int, text string) string {
 		text, _ = common.TruncateRunes(text, opts.maxLineChars, "… [line truncated]")
 		if opts.showPath {
-			return fmt.Sprintf("%s:%d-%s", path, lineNum, text)
+			return fmt.Sprintf("%s:%d-%s", resultPath(path, opts), lineNum, text)
 		}
 		return fmt.Sprintf("%d-%s", lineNum, text)
 	}
@@ -437,12 +574,25 @@ func searchFile(path string, re *regexp.Regexp, maxResults int, opts searchOpts)
 	return result, nil
 }
 
+func resultPath(path string, opts searchOpts) string {
+	if !opts.relativePaths || opts.rootDir == "" {
+		return path
+	}
+	rel, err := filepath.Rel(opts.rootDir, path)
+	if err != nil {
+		return path
+	}
+	return filepath.ToSlash(rel)
+}
+
 // searchDirResult is the return value of searchDir.
 type searchDirResult struct {
 	matches            []string
 	matchCount         int // total match count across all files
 	lowConfidenceCount int // number of files with low encoding detection confidence
 	skippedBinary      int // binary files not searched
+	skippedIgnored     int // hidden, generated, vendor, or .gitignore paths
+	skippedUnreadable  int // paths that could not be read or traversed
 	displayChars       int
 	outputTruncated    bool
 	hasMore            bool
@@ -450,21 +600,45 @@ type searchDirResult struct {
 
 func searchDir(dir, globPattern string, re *regexp.Regexp, maxResults int, opts searchOpts, recursive bool) (searchDirResult, error) {
 	result := searchDirResult{}
+	ignoreRules := loadRootGitignore(dir)
 
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			return nil // skip inaccessible files
+			result.skippedUnreadable++
+			return nil
 		}
 		if info.IsDir() {
-			// Skip hidden directories (.git, etc.)
-			if strings.HasPrefix(info.Name(), ".") && info.Name() != "." {
-				return filepath.SkipDir
+			// An explicitly-selected hidden root must still be searchable. Only
+			// descendants are subject to the default ignore policy.
+			if path != dir {
+				if !opts.includeHidden && strings.HasPrefix(info.Name(), ".") {
+					result.skippedIgnored++
+					return filepath.SkipDir
+				}
+				if !opts.includeIgnored && isDefaultIgnoredDir(info.Name()) {
+					result.skippedIgnored++
+					return filepath.SkipDir
+				}
+				if !opts.includeIgnored && ignoreRules != nil {
+					rel, _ := filepath.Rel(dir, path)
+					if ignoreRules.match(filepath.ToSlash(rel), true) {
+						result.skippedIgnored++
+						return filepath.SkipDir
+					}
+				}
 			}
 			// When non-recursive, skip subdirectories (but not the root dir itself)
 			if !recursive && path != dir {
 				return filepath.SkipDir
 			}
 			return nil
+		}
+		if !opts.includeIgnored && ignoreRules != nil {
+			rel, _ := filepath.Rel(dir, path)
+			if ignoreRules.match(filepath.ToSlash(rel), false) {
+				result.skippedIgnored++
+				return nil
+			}
 		}
 
 		// glob filter
@@ -491,7 +665,7 @@ func searchDir(dir, globPattern string, re *regexp.Regexp, maxResults int, opts 
 			// match is found so has_more is exact at the boundary.
 			probeOpts := opts
 			probeOpts.before, probeOpts.after = 0, 0
-			probeOpts.maxOutputChars = hardMaxOutputChars
+			probeOpts.maxOutputChars = common.HardOutputChars
 			probe, probeErr := searchFile(path, re, 1, probeOpts)
 			if probeErr == nil && probe.matchCount > 0 {
 				result.hasMore = true
@@ -509,7 +683,8 @@ func searchDir(dir, globPattern string, re *regexp.Regexp, maxResults int, opts 
 		}
 		fileResult, err := searchFile(path, re, remaining, fileOpts)
 		if err != nil {
-			return nil // skip files that fail to read
+			result.skippedUnreadable++
+			return nil
 		}
 		result.matches = append(result.matches, fileResult.matches...)
 		result.matchCount += fileResult.matchCount
@@ -541,7 +716,8 @@ func Register(server *mcp.Server) {
 		Description: `Searches file contents for a regex pattern.
 Encoding-aware: auto-detects file encoding.
 Can search a single file or recursively search a directory.
-Output modes: content (default, matching lines), files_with_matches (paths only), count (match counts).
+Output modes: content (default), files_with_matches, count. Compact content groups
+matches under one file header by default; use output_format=classic for path:line:text.
 A CRLF ending is a terminator, not content: "^foo$" matches in a CRLF file and returned lines carry no stray CR. A lone CR is not a line break (same as read), so a CR-only file is one line.
 Context: use before/after/context to include surrounding lines (like grep -B/-A/-C).
 Large result sets stay usable: max_results supports up to 100000, while max_line_chars

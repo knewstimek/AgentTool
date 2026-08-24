@@ -14,10 +14,10 @@ import (
 )
 
 type MkdirInput struct {
-	Path      string `json:"path,omitempty" jsonschema:"Absolute path of the directory to create,required"`
-	FilePath  string `json:"file_path,omitempty" jsonschema:"Alias for path"`
-	Recursive *bool  `json:"recursive,omitempty" jsonschema:"Create parent directories as needed (like mkdir -p). Default: true"`
-	Mode      string `json:"mode,omitempty" jsonschema:"Directory permission mode in octal (e.g. 0755, 0700). Default: 0755. Applied on Unix/Linux only"`
+	Path      string      `json:"path,omitempty" jsonschema:"Directory to create. Relative paths use workspace/MCP root,required"`
+	FilePath  string      `json:"file_path,omitempty" jsonschema:"Alias for path"`
+	Recursive *bool       `json:"recursive,omitempty" jsonschema:"Create parent directories as needed (like mkdir -p). Default: true"`
+	Mode      string      `json:"mode,omitempty" jsonschema:"Directory permission mode in octal (e.g. 0755, 0700). Default: 0755. Applied on Unix/Linux only"`
 	DryRun    interface{} `json:"dry_run,omitempty" jsonschema:"Preview what would be created without actually creating: true or false. Default: false"`
 }
 
@@ -32,9 +32,11 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input MkdirInput) (*m
 	if input.Path == "" {
 		return errorResult("path is required")
 	}
-	if !filepath.IsAbs(input.Path) {
-		return errorResult("path must be absolute")
+	resolvedPath, err := common.ResolveRequestPath(ctx, req, input.Path)
+	if err != nil {
+		return errorResult(fmt.Sprintf("cannot resolve path: %v", err))
 	}
+	input.Path = resolvedPath
 
 	cleaned := filepath.Clean(input.Path)
 
@@ -92,7 +94,6 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input MkdirInput) (*m
 		}, MkdirOutput{Result: msg}, nil
 	}
 
-	var err error
 	if recursive {
 		err = os.MkdirAll(cleaned, perm)
 	} else {

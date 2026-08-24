@@ -37,20 +37,32 @@ const maxImageSize = 20 * 1024 * 1024
 const readHashThreshold = 10 * 1024 * 1024 // 10MB
 
 type ReadInput struct {
-	FilePath  string      `json:"file_path,omitempty" jsonschema:"Absolute or relative path to the file to read"`
-	Path      string      `json:"path,omitempty" jsonschema:"Alias for file_path"`
-	Offset    any         `json:"offset,omitempty" jsonschema:"Line offset. Integer (1-based, negative=from end), string range 'start-end', or [start,end] array. Default: 0 (all)"`
-	Limit     interface{} `json:"limit,omitempty" jsonschema:"Maximum number of lines to read. Default: 0 (all)"`
-	StartLine interface{} `json:"start_line,omitempty" jsonschema:"Alias for offset (1-based line number to start reading from)"`
-	EndLine   interface{} `json:"end_line,omitempty" jsonschema:"End line number (1-based, inclusive). Sets limit = end_line - start_line + 1 when used with start_line"`
+	FilePath       string `json:"file_path,omitempty" jsonschema:"Absolute or workspace-relative path to the file to read"`
+	Path           string `json:"path,omitempty" jsonschema:"Compatibility alias for file_path; prefer file_path"`
+	Offset         any    `json:"offset,omitempty" jsonschema:"Line offset. Integer (1-based, negative=from end), string range 'start-end', or [start,end] array. Default: 1"`
+	Limit          *int   `json:"limit,omitempty" jsonschema:"Maximum lines to return. Default: 400. Set 0 or all=true to remove the line limit; the character budget still applies"`
+	StartLine      *int   `json:"start_line,omitempty" jsonschema:"Compatibility alias for offset; prefer offset"`
+	EndLine        *int   `json:"end_line,omitempty" jsonschema:"Inclusive end line used with start_line"`
+	All            bool   `json:"all,omitempty" jsonschema:"Remove the default line limit. The max_output_chars safety budget still applies. Default: false"`
+	MaxOutputChars int    `json:"max_output_chars,omitempty" jsonschema:"Maximum returned text characters. Default: 32768, Max: 131072"`
+	MaxLineChars   int    `json:"max_line_chars,omitempty" jsonschema:"Maximum characters returned from one line. Default: 4000, Max: 32768"`
+	IncludeHash    *bool  `json:"include_hash,omitempty" jsonschema:"Include SHA-256 for optimistic edit concurrency. Default: true"`
 }
 
 type ReadOutput struct {
-	Content    string `json:"content"`
-	Encoding   string `json:"encoding"`
-	TotalLines int    `json:"total_lines"`
-	Hash       string `json:"hash,omitempty"`
+	Content       string `json:"content"`
+	Encoding      string `json:"encoding"`
+	TotalLines    int    `json:"total_lines"`
+	Hash          string `json:"hash,omitempty"`
+	ReturnedLines int    `json:"returned_lines"`
+	Truncated     bool   `json:"truncated"`
+	NextOffset    int    `json:"next_offset,omitempty"`
 }
+
+const (
+	defaultLineLimit    = 400
+	defaultMaxLineChars = 4000
+)
 
 // parseFlexOffset accepts integer, "N", "N-M" range string, "[N, M]" string,
 // or [N, M] array. Agents sometimes pass offset as a string or array instead
@@ -137,29 +149,26 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ReadInput) (*mc
 
 	// Accept start_line/end_line as aliases for offset/limit
 	if input.StartLine != nil && input.Offset == nil {
-		input.Offset = input.StartLine
+		input.Offset = *input.StartLine
 	}
 	if input.EndLine != nil {
-		startLine, ok := common.FlexInt(input.StartLine)
-		if !ok {
-			startLine = 1
+		startLine := 1
+		if input.StartLine != nil {
+			startLine = *input.StartLine
 		}
-		endLine, ok := common.FlexInt(input.EndLine)
-		if ok && endLine >= startLine {
-			input.Limit = endLine - startLine + 1
+		if *input.EndLine >= startLine {
+			limit := *input.EndLine - startLine + 1
+			input.Limit = &limit
 		}
 	}
 	if input.FilePath == "" {
 		return errorResult("file_path is required")
 	}
-	// Resolve relative paths against the process working directory
-	if !filepath.IsAbs(input.FilePath) {
-		abs, err := filepath.Abs(input.FilePath)
-		if err != nil {
-			return errorResult(fmt.Sprintf("cannot resolve path: %v", err))
-		}
-		input.FilePath = abs
+	resolvedPath, err := common.ResolveRequestPath(ctx, req, input.FilePath)
+	if err != nil {
+		return errorResult(fmt.Sprintf("cannot resolve path: %v", err))
 	}
+	input.FilePath = resolvedPath
 
 	fi, err := os.Stat(input.FilePath)
 	if err != nil {
@@ -187,26 +196,52 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ReadInput) (*mc
 		return errorResult(fmt.Sprintf("failed to read file: %v", err))
 	}
 
-	// Count total lines (allocation-free O(N))
-	totalLines := strings.Count(content, "\n") + 1
+	// Match bufio.ScanLines semantics: a final newline terminates the last line
+	// and does not create a phantom continuation line.
+	totalLines := common.TextLineCount(content)
 
 	offset, rangeLimit, err := parseFlexOffset(input.Offset)
 	if err != nil {
 		return errorResult(err.Error())
 	}
 
-	limit, ok := common.FlexInt(input.Limit)
-	if !ok {
-		return errorResult("limit must be an integer")
+	limit := 0
+	limitProvided := input.Limit != nil
+	if limitProvided {
+		limit = *input.Limit
+		if limit < 0 {
+			return errorResult("limit must be non-negative")
+		}
 	}
 	// Range (e.g. "100-200") sets limit when explicit limit is not provided
-	if rangeLimit > 0 && limit == 0 {
+	if rangeLimit > 0 && !limitProvided {
 		limit = rangeLimit
+		limitProvided = true
+	}
+	if !limitProvided && !input.All {
+		limit = defaultLineLimit
+	}
+
+	maxOutputChars := input.MaxOutputChars
+	if maxOutputChars <= 0 {
+		maxOutputChars = common.DefaultOutputChars
+	}
+	if maxOutputChars > common.HardOutputChars {
+		return errorResult(fmt.Sprintf("max_output_chars must be at most %d", common.HardOutputChars))
+	}
+	maxLineChars := input.MaxLineChars
+	if maxLineChars <= 0 {
+		maxLineChars = defaultMaxLineChars
+	}
+	if maxLineChars > common.DefaultOutputChars {
+		return errorResult(fmt.Sprintf("max_line_chars must be at most %d", common.DefaultOutputChars))
 	}
 
 	var startIdx, endIdx int
 
-	if offset < 0 {
+	if totalLines == 0 {
+		startIdx = 0
+	} else if offset < 0 {
 		// Negative index: calculate from the end
 		startIdx = totalLines + offset
 		if startIdx < 0 {
@@ -227,16 +262,36 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ReadInput) (*mc
 		endIdx = startIdx + limit
 	}
 
-	// Process only the needed range with Scanner (saves memory vs full Split).
+	// Process only the needed range. The scanner buffer is raised to the decoded
+	// file size so a single long line is handled explicitly by max_line_chars
+	// instead of disappearing behind Scanner's 64 KiB default token limit.
 	var sb strings.Builder
 	scanner := bufio.NewScanner(strings.NewReader(content))
+	scanner.Buffer(make([]byte, 64*1024), len(content)+1)
 	lineNum := 0
+	returnedLines := 0
+	outputTruncated := false
+	lineTruncated := false
+	nextOffset := 0
+	contentBudget := maxOutputChars - 512 // reserve room for metadata/footer
+	if contentBudget < 256 {
+		contentBudget = maxOutputChars
+	}
+	usedChars := 0
 	for scanner.Scan() {
 		if lineNum >= endIdx {
 			break
 		}
 		if lineNum >= startIdx {
-			fmt.Fprintf(&sb, "%6d\t%s\n", lineNum+1, scanner.Text())
+			lineText, wasLineTruncated := common.TruncateRunes(scanner.Text(), maxLineChars, "… [line truncated]")
+			lineTruncated = lineTruncated || wasLineTruncated
+			formatted := fmt.Sprintf("%6d\t%s\n", lineNum+1, lineText)
+			if !common.AppendWithinRuneBudget(&sb, &usedChars, formatted, contentBudget) {
+				outputTruncated = true
+				nextOffset = lineNum + 1
+				break
+			}
+			returnedLines++
 		}
 		lineNum++
 	}
@@ -258,27 +313,53 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ReadInput) (*mc
 		}, ReadOutput{}, nil
 	}
 
-	result := sb.String()
-
-	// Add warning if encoding detection confidence is low
-	if warning := common.EncodingWarning(encInfo); warning != "" {
-		result += warning
+	if nextOffset == 0 && endIdx < totalLines {
+		nextOffset = endIdx + 1
 	}
+	truncated := outputTruncated || endIdx < totalLines || lineTruncated
 
-	// Add file hash (only for files <= 10MB -- use checksum tool for larger files)
+	// Add file hash only when requested. It is useful with edit.expected_hash,
+	// but callers can disable it when reading many short-lived files.
 	var fileHash string
-	if fi.Size() <= readHashThreshold {
+	includeHash := input.IncludeHash == nil || *input.IncludeHash
+	if includeHash && fi.Size() <= readHashThreshold {
 		if h, err := common.ComputeFileHash(input.FilePath); err == nil {
 			fileHash = h
-			result += fmt.Sprintf("\n[sha256: %s]", h)
 		}
 	}
 
+	if warning := common.EncodingWarning(encInfo); warning != "" {
+		sb.WriteString(warning)
+	}
+	firstLine, lastLine := startIdx+1, startIdx+returnedLines
+	if returnedLines == 0 {
+		firstLine, lastLine = 0, 0
+	}
+	footer := fmt.Sprintf("\n[read: lines=%d-%d/%d; returned=%d; truncated=%t; encoding=%s",
+		firstLine, lastLine, totalLines, returnedLines, truncated, encInfo.Charset)
+	if nextOffset > 0 {
+		footer += fmt.Sprintf("; next_offset=%d", nextOffset)
+	}
+	if lineTruncated {
+		footer += "; line_truncated=true; raise max_line_chars to inspect full long lines"
+	}
+	if fileHash != "" {
+		footer += fmt.Sprintf("; sha256=%s", fileHash)
+	}
+	footer += "]"
+	sb.WriteString(footer)
+	result, finalTruncated := common.TruncateRunes(sb.String(), maxOutputChars,
+		fmt.Sprintf("\n[truncated=true; next_offset=%d]", max(startIdx+returnedLines+1, 1)))
+	truncated = truncated || finalTruncated
+
 	out := ReadOutput{
-		Content:    result,
-		Encoding:   encInfo.Charset,
-		TotalLines: totalLines,
-		Hash:       fileHash,
+		Content:       result,
+		Encoding:      encInfo.Charset,
+		TotalLines:    totalLines,
+		Hash:          fileHash,
+		ReturnedLines: returnedLines,
+		Truncated:     truncated,
+		NextOffset:    nextOffset,
 	}
 
 	return &mcp.CallToolResult{
@@ -293,9 +374,11 @@ func Register(server *mcp.Server) {
 Encoding-aware: auto-detects file encoding (UTF-8, EUC-KR, Shift-JIS, etc.).
 Image files (PNG, JPG, GIF, BMP, WebP, TIFF, ICO) are returned as ImageContent (base64).
 SVG files are returned as text. Supports offset/limit for reading specific line ranges.
+Text defaults to 400 lines and 32768 characters; use offset/limit to continue.
+Every text result ends with total line count, truncation state, and next_offset when more is available.
 Negative offset reads from end (e.g. offset=-5 reads last 5 lines).
 Offset accepts integer, string range "100-200", or [start, end] array.
-Accepts "path" as alias for "file_path". Relative paths are resolved against the server CWD (the directory from which agent-tool was launched).`,
+Accepts "path" as alias for "file_path". Relative paths use the configured workspace, MCP client root, or server CWD in that order.`,
 	}, Handle)
 }
 
@@ -312,7 +395,7 @@ func handleImage(path string, fi os.FileInfo, mime string) (*mcp.CallToolResult,
 		text := string(data)
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: text}},
-		}, ReadOutput{Content: text, Encoding: "utf-8", TotalLines: strings.Count(text, "\n") + 1}, nil
+		}, ReadOutput{Content: text, Encoding: "utf-8", TotalLines: common.TextLineCount(text)}, nil
 	}
 	msg := fmt.Sprintf("Image: %s (%d bytes)", filepath.Base(path), fi.Size())
 	return &mcp.CallToolResult{

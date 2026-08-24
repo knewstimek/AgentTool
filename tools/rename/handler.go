@@ -13,14 +13,14 @@ import (
 )
 
 type RenameInput struct {
-	OldPath string      `json:"old_path,omitempty" jsonschema:"Absolute path to the file or directory to rename"`
-	NewPath string      `json:"new_path,omitempty" jsonschema:"Absolute path for the new name/location"`
+	OldPath string `json:"old_path,omitempty" jsonschema:"Existing path. Relative paths use workspace/MCP root"`
+	NewPath string `json:"new_path,omitempty" jsonschema:"New path. Relative paths use workspace/MCP root"`
 	// Aliases for compatibility with agents that use different conventions
-	Source string      `json:"source,omitempty" jsonschema:"Alias for old_path"`
-	Destination string `json:"destination,omitempty" jsonschema:"Alias for new_path"`
-	From   string      `json:"from,omitempty" jsonschema:"Alias for old_path"`
-	To     string      `json:"to,omitempty" jsonschema:"Alias for new_path"`
-	DryRun interface{} `json:"dry_run,omitempty" jsonschema:"Preview rename without actually moving the file: true or false. Default: false"`
+	Source      string      `json:"source,omitempty" jsonschema:"Alias for old_path"`
+	Destination string      `json:"destination,omitempty" jsonschema:"Alias for new_path"`
+	From        string      `json:"from,omitempty" jsonschema:"Alias for old_path"`
+	To          string      `json:"to,omitempty" jsonschema:"Alias for new_path"`
+	DryRun      interface{} `json:"dry_run,omitempty" jsonschema:"Preview rename without actually moving the file: true or false. Default: false"`
 }
 
 type RenameOutput struct {
@@ -47,8 +47,14 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input RenameInput) (*
 	if input.OldPath == "" || input.NewPath == "" {
 		return errorResult("both old_path and new_path are required")
 	}
-	if !filepath.IsAbs(input.OldPath) || !filepath.IsAbs(input.NewPath) {
-		return errorResult("both paths must be absolute")
+	var err error
+	input.OldPath, err = common.ResolveRequestPath(ctx, req, input.OldPath)
+	if err != nil {
+		return errorResult(fmt.Sprintf("cannot resolve old_path: %v", err))
+	}
+	input.NewPath, err = common.ResolveRequestPath(ctx, req, input.NewPath)
+	if err != nil {
+		return errorResult(fmt.Sprintf("cannot resolve new_path: %v", err))
 	}
 
 	oldCleaned := filepath.Clean(input.OldPath)

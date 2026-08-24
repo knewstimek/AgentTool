@@ -27,38 +27,64 @@ const (
 type SSHInput struct {
 	// Resolved int values set by validateInput after FlexInt conversion.
 	// Not exported in JSON; used internally after validation.
-	PortInt        int `json:"-"`
-	TimeoutSecInt  int `json:"-"`
-	JumpPortInt    int `json:"-"`
+	PortInt       int `json:"-"`
+	TimeoutSecInt int `json:"-"`
+	JumpPortInt   int `json:"-"`
 
-	Host         string `json:"host" jsonschema:"SSH server hostname or IP address (IPv4 or IPv6),required"`
-	Port         interface{} `json:"port,omitempty" jsonschema:"SSH port number. Default: 22"`
-	User         string `json:"user" jsonschema:"SSH username,required"`
-	Password     string `json:"password,omitempty" jsonschema:"Password for authentication"`
-	KeyFile      string `json:"key_file,omitempty" jsonschema:"Path to SSH private key file (e.g. ~/.ssh/id_rsa)"`
-	Passphrase   string `json:"passphrase,omitempty" jsonschema:"Passphrase for encrypted private key"`
-	UseAgent     interface{} `json:"use_agent,omitempty" jsonschema:"Use SSH agent for authentication: true or false. Default: true if no other auth method specified"`
-	Command      string      `json:"command,omitempty" jsonschema:"Command to execute on the remote server"`
-	Disconnect   interface{} `json:"disconnect,omitempty" jsonschema:"Close the SSH session for this host (no command needed): true or false. Default: false"`
-	HostKeyCheck string `json:"host_key_check,omitempty" jsonschema:"Host key verification: strict (requires known_hosts), tofu (trust on first use, default), none (insecure)"`
-	TimeoutSec   interface{} `json:"timeout_sec,omitempty" jsonschema:"Command execution timeout in seconds. Default: 30, Max: 300"`
+	Host           string      `json:"host" jsonschema:"SSH server hostname or IP address (IPv4 or IPv6),required"`
+	Port           interface{} `json:"port,omitempty" jsonschema:"SSH port number. Default: 22"`
+	User           string      `json:"user" jsonschema:"SSH username,required"`
+	Password       string      `json:"password,omitempty" jsonschema:"Password for authentication"`
+	KeyFile        string      `json:"key_file,omitempty" jsonschema:"Path to SSH private key file (e.g. ~/.ssh/id_rsa)"`
+	Passphrase     string      `json:"passphrase,omitempty" jsonschema:"Passphrase for encrypted private key"`
+	UseAgent       interface{} `json:"use_agent,omitempty" jsonschema:"Use SSH agent for authentication: true or false. Default: true if no other auth method specified"`
+	Command        string      `json:"command,omitempty" jsonschema:"Command to execute on the remote server"`
+	Operation      string      `json:"operation,omitempty" jsonschema:"Operation: execute (default), start, status, tail, cancel"`
+	Background     bool        `json:"background,omitempty" jsonschema:"Start a background SSH job and return job_id immediately. Alias for operation=start"`
+	JobID          string      `json:"job_id,omitempty" jsonschema:"Background SSH job ID for status, tail, or cancel"`
+	TailLines      int         `json:"tail_lines,omitempty" jsonschema:"Lines returned by operation=tail. Default: 50, Max: 1000"`
+	Disconnect     interface{} `json:"disconnect,omitempty" jsonschema:"Close the SSH session for this host (no command needed): true or false. Default: false"`
+	HostKeyCheck   string      `json:"host_key_check,omitempty" jsonschema:"Host key verification: strict (requires known_hosts), tofu (trust on first use, default), none (insecure)"`
+	TimeoutSec     interface{} `json:"timeout_sec,omitempty" jsonschema:"Command execution timeout in seconds. Default: 30, Max: 300"`
+	MaxOutputChars int         `json:"max_output_chars,omitempty" jsonschema:"Maximum combined stdout/stderr bytes retained. Default: 32768, Max: 131072. Head and tail are preserved"`
+	OutputMode     string      `json:"output_mode,omitempty" jsonschema:"Retained portion for large output: head_tail (default), head, or tail"`
 
 	// Proxy Jump — connect through a bastion/jump host (like ssh -J).
 	// Useful for reaching IPv6-only servers via an IPv4 bastion, or accessing
 	// hosts in private networks.
-	JumpHost       string `json:"jump_host,omitempty" jsonschema:"Jump/bastion host for ProxyJump (hostname or IP). When set, connects through this host to reach the target"`
+	JumpHost       string      `json:"jump_host,omitempty" jsonschema:"Jump/bastion host for ProxyJump (hostname or IP). When set, connects through this host to reach the target"`
 	JumpPort       interface{} `json:"jump_port,omitempty" jsonschema:"Jump host SSH port. Default: 22"`
-	JumpUser       string `json:"jump_user,omitempty" jsonschema:"Jump host username. Default: same as user"`
-	JumpPassword   string `json:"jump_password,omitempty" jsonschema:"Jump host password. Default: same as password"`
-	JumpKeyFile    string `json:"jump_key_file,omitempty" jsonschema:"Jump host SSH private key file. Default: same as key_file"`
-	JumpPassphrase string `json:"jump_passphrase,omitempty" jsonschema:"Jump host key passphrase. Default: same as passphrase"`
+	JumpUser       string      `json:"jump_user,omitempty" jsonschema:"Jump host username. Default: same as user"`
+	JumpPassword   string      `json:"jump_password,omitempty" jsonschema:"Jump host password. Default: same as password"`
+	JumpKeyFile    string      `json:"jump_key_file,omitempty" jsonschema:"Jump host SSH private key file. Default: same as key_file"`
+	JumpPassphrase string      `json:"jump_passphrase,omitempty" jsonschema:"Jump host key passphrase. Default: same as passphrase"`
 }
 
 type SSHOutput struct {
-	Result string `json:"result"`
+	Result      string `json:"result"`
+	ExitCode    int    `json:"exit_code"`
+	Truncated   bool   `json:"truncated"`
+	StdoutBytes int64  `json:"stdout_bytes,omitempty"`
+	StderrBytes int64  `json:"stderr_bytes,omitempty"`
+	JobID       string `json:"job_id,omitempty"`
+	Status      string `json:"status,omitempty"`
 }
 
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input SSHInput) (*mcp.CallToolResult, SSHOutput, error) {
+	op := strings.ToLower(strings.TrimSpace(input.Operation))
+	if op == "" {
+		if input.Background {
+			op = "start"
+		} else {
+			op = "execute"
+		}
+	}
+	if op == "status" || op == "tail" || op == "cancel" {
+		return handleJobOperation(op, input)
+	}
+	if op != "execute" && op != "start" {
+		return errorResult("operation must be execute, start, status, tail, or cancel")
+	}
 	// 1. Validate input
 	if err := validateInput(&input); err != nil {
 		return errorResult(err.Error())
@@ -85,7 +111,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input SSHInput) (*mcp
 		}
 	}
 
-	key := sessionKey(input.Host, input.PortInt, input.User)
+	key := sessionKey(input)
 
 	// 2. Handle disconnect
 	if common.FlexBool(input.Disconnect) {
@@ -115,13 +141,21 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input SSHInput) (*mcp
 	if err != nil {
 		return errorResult(fmt.Sprintf("SSH connection failed: %s", sanitizeError(err, input)))
 	}
+	if op == "start" {
+		job, err := startSSHJob(client, input.Command, input.MaxOutputChars, input.OutputMode)
+		if err != nil {
+			return errorResult(fmt.Sprintf("failed to start SSH job: %s", sanitizeError(err, input)))
+		}
+		msg := fmt.Sprintf("SSH background job started.\njob_id: %s\nstatus: running\nUse operation=status or operation=tail with this job_id; use operation=cancel to stop it.", job.id)
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: msg}}}, SSHOutput{Result: msg, JobID: job.id, Status: "running"}, nil
+	}
 
 	// 5. Execute command with timeout
 	timeout := time.Duration(input.TimeoutSecInt) * time.Second
 	execCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	result, err := executeCommand(execCtx, client, input.Command)
+	result, err := executeCommand(execCtx, client, input.Command, input.MaxOutputChars, input.OutputMode)
 	if err != nil {
 		// If connection is broken, remove from pool
 		if isConnectionError(err) {
@@ -141,7 +175,8 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input SSHInput) (*mcp
 	} else {
 		sb.WriteString("[Reusing existing session]\n")
 	}
-	sb.WriteString(fmt.Sprintf("$ %s\n\n", input.Command))
+	displayCommand, _ := common.TruncateRunes(input.Command, 500, "… [command abbreviated]")
+	sb.WriteString(fmt.Sprintf("$ %s\n\n", displayCommand))
 
 	if result.Stdout != "" {
 		sb.WriteString(result.Stdout)
@@ -159,6 +194,10 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input SSHInput) (*mcp
 	if result.ExitCode != 0 {
 		sb.WriteString(fmt.Sprintf("\n[Exit code: %d]", result.ExitCode))
 	}
+	truncated := result.StdoutTruncated || result.StderrTruncated
+	if truncated {
+		sb.WriteString(fmt.Sprintf("\n[output truncated: stdout_bytes=%d; stderr_bytes=%d; retained_bytes=%d; output_mode=%s]", result.StdoutBytes, result.StderrBytes, input.MaxOutputChars, input.OutputMode))
+	}
 
 	output := sb.String()
 	if ssrfWarning != "" {
@@ -166,7 +205,60 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input SSHInput) (*mcp
 	}
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: output}},
-	}, SSHOutput{Result: output}, nil
+		IsError: result.ExitCode != 0,
+	}, SSHOutput{Result: output, ExitCode: result.ExitCode, Truncated: truncated, StdoutBytes: result.StdoutBytes, StderrBytes: result.StderrBytes}, nil
+}
+
+func handleJobOperation(op string, input SSHInput) (*mcp.CallToolResult, SSHOutput, error) {
+	if strings.TrimSpace(input.JobID) == "" {
+		return errorResult("job_id is required for status, tail, or cancel")
+	}
+	job, ok := getSSHJob(strings.TrimSpace(input.JobID))
+	if !ok {
+		return errorResult("SSH job not found or expired")
+	}
+	if op == "cancel" {
+		if err := job.cancel(); err != nil {
+			return errorResult(err.Error())
+		}
+	}
+	snap := job.snapshot()
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("job_id: %s\nstatus: %s\n", snap.ID, snap.Status))
+	if !snap.FinishedAt.IsZero() {
+		sb.WriteString(fmt.Sprintf("exit_code: %d\n", snap.ExitCode))
+	}
+	sb.WriteString(fmt.Sprintf("stdout_bytes: %d\nstderr_bytes: %d\n", snap.StdoutBytes, snap.StderrBytes))
+	if snap.StdoutTruncated || snap.StderrTruncated {
+		sb.WriteString("truncated: true (head and tail retained)\n")
+	}
+	if snap.Error != "" {
+		sb.WriteString("error: " + snap.Error + "\n")
+	}
+	if op == "tail" {
+		lines := input.TailLines
+		if lines == 0 {
+			lines = 50
+		}
+		if lines < 1 || lines > 1000 {
+			return errorResult("tail_lines must be between 1 and 1000")
+		}
+		if snap.Stdout != "" {
+			sb.WriteString("\n--- stdout tail ---\n" + lastLines(snap.Stdout, lines) + "\n")
+		}
+		if snap.Stderr != "" {
+			sb.WriteString("\n--- stderr tail ---\n" + lastLines(snap.Stderr, lines) + "\n")
+		}
+	}
+	result := sb.String()
+	return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: result}},
+			IsError: snap.Status == "failed",
+		}, SSHOutput{
+			Result: result, JobID: snap.ID, Status: snap.Status, ExitCode: snap.ExitCode,
+			Truncated:   snap.StdoutTruncated || snap.StderrTruncated,
+			StdoutBytes: snap.StdoutBytes, StderrBytes: snap.StderrBytes,
+		}, nil
 }
 
 func Register(server *mcp.Server) {
@@ -174,8 +266,9 @@ func Register(server *mcp.Server) {
 		Name: "ssh",
 		Description: `Execute commands on a remote server via SSH.
 Supports password and key-based authentication. SSH agent is used as fallback on Unix.
-Sessions are automatically pooled and reused for the same host:port:user combination.
-Idle sessions expire after 10 minutes.
+Sessions are pooled only when host, user, authentication identity, host-key policy, and jump route all match.
+Idle sessions expire after 30 minutes. Foreground output defaults to 32768 bytes and reports truncation explicitly; output_mode selects head_tail, head, or tail retention.
+For long commands, use background=true (or operation=start), then poll with operation=status/tail and job_id; operation=cancel stops the job.
 Supports IPv6 addresses and ProxyJump (jump_host) for reaching servers through bastion hosts.`,
 	}, Handle)
 }
@@ -380,9 +473,22 @@ func validateInput(input *SSHInput) error {
 		timeoutSec = defaultTimeoutSec
 	}
 	if timeoutSec > maxTimeoutSec {
-		timeoutSec = maxTimeoutSec
+		return fmt.Errorf("timeout_sec exceeds maximum (%d)", maxTimeoutSec)
 	}
 	input.TimeoutSecInt = timeoutSec
+	if input.MaxOutputChars == 0 {
+		input.MaxOutputChars = common.DefaultOutputChars
+	}
+	if input.MaxOutputChars < 1024 || input.MaxOutputChars > common.HardOutputChars {
+		return fmt.Errorf("max_output_chars must be between 1024 and %d", common.HardOutputChars)
+	}
+	input.OutputMode = strings.ToLower(strings.TrimSpace(input.OutputMode))
+	if input.OutputMode == "" {
+		input.OutputMode = "head_tail"
+	}
+	if input.OutputMode != "head_tail" && input.OutputMode != "head" && input.OutputMode != "tail" {
+		return fmt.Errorf("output_mode must be head_tail, head, or tail")
+	}
 
 	// Host key check
 	input.HostKeyCheck = strings.ToLower(strings.TrimSpace(input.HostKeyCheck))

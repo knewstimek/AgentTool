@@ -13,14 +13,14 @@ import (
 const (
 	defaultCodeGraphMaxResults     = 500
 	hardCodeGraphMaxResults        = 100000
-	defaultCodeGraphMaxOutputChars = 100000
-	hardCodeGraphMaxOutputChars    = 1000000
+	defaultCodeGraphMaxOutputChars = common.DefaultOutputChars
+	hardCodeGraphMaxOutputChars    = common.HardOutputChars
 )
 
 // CodeGraphInput defines parameters for the codegraph tool.
 type CodeGraphInput struct {
 	Operation      string      `json:"operation" jsonschema:"Operation: index, find, callers, callees, symbols, methods, inherits, stats, importers, unused, call_tree,required"`
-	Path           string      `json:"path,omitempty" jsonschema:"Project directory path (for index) or file path (for symbols)"`
+	Path           string      `json:"path,omitempty" jsonschema:"Project/file path. Relative paths use workspace/MCP root"`
 	Name           string      `json:"name,omitempty" jsonschema:"Symbol name to search for (for find, callers, callees, methods, inherits, call_tree)"`
 	Language       string      `json:"language,omitempty" jsonschema:"Language hint: cpp, python, go, csharp, rust, java. Default: auto-detect from file extension"`
 	Workers        interface{} `json:"workers,omitempty" jsonschema:"Number of parallel parse workers for index operation. Default: 4. Higher = faster but more memory (~7MB per worker)"`
@@ -28,7 +28,7 @@ type CodeGraphInput struct {
 	Direction      string      `json:"direction,omitempty" jsonschema:"Direction for call_tree: up (callers) or down (callees). Default: up"`
 	Offset         int         `json:"offset,omitempty" jsonschema:"Zero-based result offset for symbols and callees paging. Default: 0"`
 	MaxResults     int         `json:"max_results,omitempty" jsonschema:"Maximum results for symbols and callees. Default: 500, Max: 100000"`
-	MaxOutputChars int         `json:"max_output_chars,omitempty" jsonschema:"Maximum total returned text characters for symbols and callees. Default: 100000, Max: 1000000"`
+	MaxOutputChars int         `json:"max_output_chars,omitempty" jsonschema:"Maximum total returned text characters for symbols and callees. Default: 32768, Max: 131072"`
 }
 
 // CodeGraphOutput holds the tool result.
@@ -62,6 +62,13 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input CodeGraphInput)
 	}
 	if err := normalizeCodeGraphLimits(&input); err != nil {
 		return errorResult(err.Error())
+	}
+	if input.Path != "" {
+		resolvedPath, err := common.ResolveRequestPath(ctx, req, input.Path)
+		if err != nil {
+			return errorResult(fmt.Sprintf("cannot resolve path: %v", err))
+		}
+		input.Path = resolvedPath
 	}
 
 	var result string

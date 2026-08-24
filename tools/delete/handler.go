@@ -13,8 +13,8 @@ import (
 )
 
 type DeleteInput struct {
-	FilePath string `json:"file_path,omitempty" jsonschema:"Absolute path to the file to delete"`
-	Path     string `json:"path,omitempty" jsonschema:"Alias for file_path"`
+	FilePath string      `json:"file_path,omitempty" jsonschema:"File to delete. Relative paths use workspace/MCP root"`
+	Path     string      `json:"path,omitempty" jsonschema:"Alias for file_path"`
 	DryRun   interface{} `json:"dry_run,omitempty" jsonschema:"Preview deletion without actually removing the file: true or false. Default: false"`
 }
 
@@ -29,9 +29,11 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input DeleteInput) (*
 	if input.FilePath == "" {
 		return errorResult("file_path is required")
 	}
-	if !filepath.IsAbs(input.FilePath) {
-		return errorResult("file_path must be an absolute path")
+	resolvedPath, err := common.ResolveRequestPath(ctx, req, input.FilePath)
+	if err != nil {
+		return errorResult(fmt.Sprintf("cannot resolve file_path: %v", err))
 	}
+	input.FilePath = resolvedPath
 
 	// Normalize path
 	cleaned := filepath.Clean(input.FilePath)
@@ -144,13 +146,13 @@ func checkDangerousPath(cleaned string) error {
 		blocked = []string{
 			"/etc/", "/boot/", "/sbin/", "/usr/sbin/",
 			"/proc/", "/sys/", "/dev/",
-			"/var/run/", "/run/",           // runtime sockets/PIDs
-			"/usr/lib/systemd/",            // systemd units
-			"/lib/systemd/",                // CentOS/RHEL systemd
-			"/usr/lib64/",                  // RHEL/CentOS libraries
-			"/lib64/",                      // RHEL/CentOS libraries
-			"/lib/", "/usr/lib/",           // system libraries
-			"/root/",                       // root home
+			"/var/run/", "/run/", // runtime sockets/PIDs
+			"/usr/lib/systemd/",  // systemd units
+			"/lib/systemd/",      // CentOS/RHEL systemd
+			"/usr/lib64/",        // RHEL/CentOS libraries
+			"/lib64/",            // RHEL/CentOS libraries
+			"/lib/", "/usr/lib/", // system libraries
+			"/root/", // root home
 		}
 	}
 

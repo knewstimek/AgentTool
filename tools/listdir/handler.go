@@ -16,7 +16,7 @@ import (
 )
 
 type ListDirInput struct {
-	Path            string      `json:"path,omitempty" jsonschema:"Absolute path to the directory to list"`
+	Path            string      `json:"path,omitempty" jsonschema:"Directory to list. Relative paths use the configured workspace or MCP client root"`
 	FilePath        string      `json:"file_path,omitempty" jsonschema:"Alias for path"`
 	MaxDepth        interface{} `json:"max_depth,omitempty" jsonschema:"Maximum depth for traversal. Default: 3"`
 	MaxEntries      interface{} `json:"max_entries,omitempty" jsonschema:"Maximum entries to return per page. Default: 500, maximum: 10000"`
@@ -109,10 +109,11 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ListDirInput) (
 	if input.Path == "" {
 		return errorResult("path is required")
 	}
-	if !filepath.IsAbs(input.Path) {
-		return errorResult("path must be an absolute path")
+	resolvedPath, err := common.ResolveRequestPath(ctx, req, input.Path)
+	if err != nil {
+		return errorResult(fmt.Sprintf("cannot resolve path: %v", err))
 	}
-	input.Path = filepath.Clean(input.Path)
+	input.Path = resolvedPath
 
 	fi, err := os.Lstat(input.Path)
 	if err != nil {

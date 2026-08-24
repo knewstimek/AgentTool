@@ -25,7 +25,7 @@ const (
 
 type DownloadInput struct {
 	URL        string            `json:"url" jsonschema:"URL of the file to download,required"`
-	OutputPath string            `json:"output_path" jsonschema:"Absolute path to save the downloaded file,required"`
+	OutputPath string            `json:"output_path" jsonschema:"Local output path. Relative paths use workspace/MCP root,required"`
 	Headers    map[string]string `json:"headers,omitempty" jsonschema:"Custom HTTP headers (e.g. User-Agent, Referer, Authorization)"`
 	Overwrite  interface{}       `json:"overwrite,omitempty" jsonschema:"Overwrite existing file: true or false. Default: false"`
 	TimeoutSec interface{}       `json:"timeout_sec,omitempty" jsonschema:"Request timeout in seconds. Default: 60, Max: 600"`
@@ -62,10 +62,11 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input DownloadInput) 
 	if strings.TrimSpace(input.OutputPath) == "" {
 		return errorResult("output_path is required")
 	}
-	input.OutputPath = filepath.Clean(input.OutputPath)
-	if !filepath.IsAbs(input.OutputPath) {
-		return errorResult("output_path must be an absolute path")
+	resolvedOutput, err := common.ResolveRequestPath(ctx, req, input.OutputPath)
+	if err != nil {
+		return errorResult(fmt.Sprintf("cannot resolve output_path: %v", err))
 	}
+	input.OutputPath = resolvedOutput
 
 	// Check if file exists
 	if !common.FlexBool(input.Overwrite) {

@@ -17,11 +17,11 @@ import (
 )
 
 type BackupInput struct {
-	Source       string   `json:"source,omitempty" jsonschema:"Absolute path to the directory to backup"`
-	Path         string   `json:"path,omitempty" jsonschema:"Alias for source"`
-	OutputDir    string   `json:"output_dir,omitempty" jsonschema:"Absolute path to the backup output directory. Default: ./backups/"`
-	Excludes     []string `json:"excludes,omitempty" jsonschema:"Glob patterns to exclude (e.g. node_modules, *.log, .git)"`
-	ExcludesFile string   `json:"excludes_file,omitempty" jsonschema:"Absolute path to a file containing exclude patterns (one per line). Lines starting with # are comments. Patterns are appended to excludes list"`
+	Source       string      `json:"source,omitempty" jsonschema:"Directory to backup. Relative paths use workspace/MCP root"`
+	Path         string      `json:"path,omitempty" jsonschema:"Alias for source"`
+	OutputDir    string      `json:"output_dir,omitempty" jsonschema:"Backup output directory. Relative paths use workspace/MCP root. Default: source/backups"`
+	Excludes     []string    `json:"excludes,omitempty" jsonschema:"Glob patterns to exclude (e.g. node_modules, *.log, .git)"`
+	ExcludesFile string      `json:"excludes_file,omitempty" jsonschema:"File containing exclude patterns. Relative paths use workspace/MCP root"`
 	DryRun       interface{} `json:"dry_run,omitempty" jsonschema:"Preview backup without creating archive: true or false. Shows summary with directory counts, exclude pattern matches, and largest files. Default: false"`
 }
 
@@ -52,9 +52,11 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input BackupInput) (*
 	if input.Source == "" {
 		return errorResult("source is required")
 	}
-	if !filepath.IsAbs(input.Source) {
-		return errorResult("source must be an absolute path")
+	resolvedSource, err := common.ResolveRequestPath(ctx, req, input.Source)
+	if err != nil {
+		return errorResult(fmt.Sprintf("cannot resolve source: %v", err))
 	}
+	input.Source = resolvedSource
 
 	fi, err := os.Stat(input.Source)
 	if err != nil {
@@ -69,8 +71,11 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input BackupInput) (*
 
 	// Output directory
 	outputDir := input.OutputDir
-	if outputDir != "" && !filepath.IsAbs(outputDir) {
-		return errorResult("output_dir must be an absolute path")
+	if outputDir != "" {
+		outputDir, err = common.ResolveRequestPath(ctx, req, outputDir)
+		if err != nil {
+			return errorResult(fmt.Sprintf("cannot resolve output_dir: %v", err))
+		}
 	}
 	if outputDir == "" {
 		outputDir = filepath.Join(input.Source, "backups")
@@ -87,8 +92,9 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input BackupInput) (*
 
 	// Load patterns from excludes_file if specified
 	if input.ExcludesFile != "" {
-		if !filepath.IsAbs(input.ExcludesFile) {
-			return errorResult("excludes_file must be an absolute path")
+		input.ExcludesFile, err = common.ResolveRequestPath(ctx, req, input.ExcludesFile)
+		if err != nil {
+			return errorResult(fmt.Sprintf("cannot resolve excludes_file: %v", err))
 		}
 		filePatterns, err := loadExcludesFile(input.ExcludesFile)
 		if err != nil {
@@ -123,13 +129,13 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input BackupInput) (*
 
 // dryRunStats collects statistics during dry run walk.
 type dryRunStats struct {
-	includeCount    int
-	includeSize     int64
-	excludeCount    int
-	dirCounts       map[string]int      // top-level dir → file count
-	dirSizes        map[string]int64    // top-level dir → total size
-	patternMatches  map[string]int      // exclude pattern → match count
-	largestFiles    []fileEntry         // sorted by size desc
+	includeCount   int
+	includeSize    int64
+	excludeCount   int
+	dirCounts      map[string]int   // top-level dir → file count
+	dirSizes       map[string]int64 // top-level dir → total size
+	patternMatches map[string]int   // exclude pattern → match count
+	largestFiles   []fileEntry      // sorted by size desc
 }
 
 type fileEntry struct {

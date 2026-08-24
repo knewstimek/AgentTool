@@ -18,7 +18,7 @@ import (
 )
 
 type ChecksumInput struct {
-	FilePath  string `json:"file_path,omitempty" jsonschema:"Absolute path to the file"`
+	FilePath  string `json:"file_path,omitempty" jsonschema:"File path. Relative paths use workspace/MCP root"`
 	Path      string `json:"path,omitempty" jsonschema:"Alias for file_path"`
 	Algorithm string `json:"algorithm,omitempty" jsonschema:"Hash algorithm: md5, sha1, sha256 (default sha256)"`
 }
@@ -34,9 +34,11 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ChecksumInput) 
 	if input.FilePath == "" {
 		return errorResult("file_path is required")
 	}
-	if !filepath.IsAbs(input.FilePath) {
-		return errorResult("file_path must be an absolute path")
+	resolvedPath, err := common.ResolveRequestPath(ctx, req, input.FilePath)
+	if err != nil {
+		return errorResult(fmt.Sprintf("cannot resolve file_path: %v", err))
 	}
+	input.FilePath = resolvedPath
 
 	algo := strings.ToLower(strings.TrimSpace(input.Algorithm))
 	if algo == "" {

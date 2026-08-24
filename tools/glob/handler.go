@@ -2,6 +2,9 @@ package glob
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,14 +18,28 @@ import (
 )
 
 type GlobInput struct {
-	Pattern       string `json:"pattern" jsonschema:"Glob pattern to match files (e.g. **/*.go or src/**/*.ts)"`
-	Path          string `json:"path,omitempty" jsonschema:"Directory to search in (absolute path). Defaults to current directory if empty"`
-	RelativePaths interface{} `json:"relative_paths,omitempty" jsonschema:"Return paths relative to the search directory instead of absolute paths. Saves tokens in output: true or false. Default: false"`
+	Pattern        string `json:"pattern" jsonschema:"Glob pattern to match files (e.g. **/*.go or src/**/*.ts)"`
+	Path           string `json:"path,omitempty" jsonschema:"Directory to search. Defaults to configured workspace, MCP client root, or current directory"`
+	RelativePaths  *bool  `json:"relative_paths,omitempty" jsonschema:"Return paths relative to the search directory. Default: true"`
+	Limit          int    `json:"limit,omitempty" jsonschema:"Maximum paths returned per page. Default: 200, Max: 5000"`
+	MaxOutputChars int    `json:"max_output_chars,omitempty" jsonschema:"Maximum returned text characters. Default: 32768, Max: 131072"`
+	Cursor         string `json:"cursor,omitempty" jsonschema:"Opaque continuation cursor returned by a previous glob call"`
+	IncludeHidden  bool   `json:"include_hidden,omitempty" jsonschema:"Traverse hidden directories. Explicit hidden roots are always searched. Default: false"`
+	IncludeIgnored bool   `json:"include_ignored,omitempty" jsonschema:"Traverse generated/vendor directories such as node_modules, vendor, target, build, and dist. Default: false"`
 }
 
 type GlobOutput struct {
-	Files []string `json:"files"`
-	Count int      `json:"count"`
+	Files      []string `json:"files"`
+	Count      int      `json:"count"`
+	Returned   int      `json:"returned"`
+	HasMore    bool     `json:"has_more"`
+	Truncated  bool     `json:"truncated"`
+	NextCursor string   `json:"next_cursor,omitempty"`
+}
+
+type globCursor struct {
+	Offset    int    `json:"o"`
+	Signature string `json:"s"`
 }
 
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input GlobInput) (*mcp.CallToolResult, GlobOutput, error) {
@@ -32,171 +49,219 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input GlobInput) (*mc
 
 	searchDir := input.Path
 	if searchDir == "" {
-		if ws := common.GetWorkspace(); ws != "" {
-			searchDir = ws
-		} else {
-			var err error
-			searchDir, err = os.Getwd()
-			if err != nil {
-				return errorResult(fmt.Sprintf("failed to get working directory: %v", err))
-			}
-		}
+		searchDir = common.RequestWorkspace(ctx, req)
 	}
-
 	if !filepath.IsAbs(searchDir) {
-		return errorResult("path must be an absolute path")
+		resolved, err := common.ResolveRequestPath(ctx, req, searchDir)
+		if err != nil {
+			return errorResult(fmt.Sprintf("cannot resolve path: %v", err))
+		}
+		searchDir = resolved
 	}
-
-	if _, err := os.Stat(searchDir); os.IsNotExist(err) {
+	searchDir = filepath.Clean(searchDir)
+	if fi, err := os.Stat(searchDir); err != nil || !fi.IsDir() {
 		return errorResult(fmt.Sprintf("directory not found: %s", searchDir))
 	}
 
-	matches, err := findMatches(searchDir, input.Pattern)
+	limit := input.Limit
+	if limit <= 0 {
+		limit = 200
+	}
+	if limit > 5000 {
+		return errorResult("limit must be at most 5000")
+	}
+	maxOutputChars := input.MaxOutputChars
+	if maxOutputChars <= 0 {
+		maxOutputChars = common.DefaultOutputChars
+	}
+	if maxOutputChars > common.HardOutputChars {
+		return errorResult(fmt.Sprintf("max_output_chars must be at most %d", common.HardOutputChars))
+	}
+
+	relativePaths := input.RelativePaths == nil || *input.RelativePaths
+	signature := globCursorSignature(searchDir, input, relativePaths)
+	offset := 0
+	if input.Cursor != "" {
+		cursor, err := decodeGlobCursor(input.Cursor)
+		if err != nil {
+			return errorResult(fmt.Sprintf("invalid cursor: %v", err))
+		}
+		if cursor.Signature != signature {
+			return errorResult("cursor does not match this glob query; reuse the same path/pattern/include options")
+		}
+		offset = cursor.Offset
+	}
+
+	matches, skipped, err := findMatches(searchDir, input.Pattern, input.IncludeHidden, input.IncludeIgnored)
 	if err != nil {
 		return errorResult(fmt.Sprintf("glob error: %v", err))
 	}
 
-	// Sort by modification time (newest first).
-	// Cache modTime in a single pass to avoid O(N log N) syscalls from calling os.Stat
-	// in every sort comparison — this limits it to O(N) syscalls.
 	type fileWithTime struct {
 		path    string
 		modTime time.Time
-		valid   bool
 	}
-	filesWithTime := make([]fileWithTime, len(matches))
-	for i, m := range matches {
-		fi, err := os.Stat(m)
+	filesWithTime := make([]fileWithTime, 0, len(matches))
+	for _, match := range matches {
+		fi, err := os.Stat(match)
 		if err != nil {
-			filesWithTime[i] = fileWithTime{path: m}
-		} else {
-			filesWithTime[i] = fileWithTime{path: m, modTime: fi.ModTime(), valid: true}
+			skipped++
+			continue
 		}
+		filesWithTime = append(filesWithTime, fileWithTime{path: match, modTime: fi.ModTime()})
 	}
 	sort.Slice(filesWithTime, func(i, j int) bool {
-		if !filesWithTime[i].valid {
-			return false // files that failed stat go to the end
-		}
-		if !filesWithTime[j].valid {
-			return true
+		if filesWithTime[i].modTime.Equal(filesWithTime[j].modTime) {
+			return filesWithTime[i].path < filesWithTime[j].path
 		}
 		return filesWithTime[i].modTime.After(filesWithTime[j].modTime)
 	})
-
-	// Exclude files that failed stat (deleted, no permission, etc.) from results.
-	// The 500-file limit counts only valid files so the user gets as many results as possible.
 	matches = matches[:0]
-	for _, ft := range filesWithTime {
-		if !ft.valid {
-			continue
-		}
-		matches = append(matches, ft.path)
-		if len(matches) >= 500 {
-			break
-		}
+	for _, file := range filesWithTime {
+		matches = append(matches, file.path)
 	}
 
-	// Build display paths (relative or absolute)
-	displayPaths := matches
-	if common.FlexBool(input.RelativePaths) && len(matches) > 0 {
-		displayPaths = make([]string, len(matches))
-		for i, m := range matches {
-			if rel, err := filepath.Rel(searchDir, m); err == nil {
-				displayPaths[i] = filepath.ToSlash(rel)
-			} else {
-				displayPaths[i] = m
+	total := len(matches)
+	if offset > total {
+		return errorResult(fmt.Sprintf("cursor offset %d is past the current result count %d; restart without cursor", offset, total))
+	}
+	end := min(offset+limit, total)
+	page := matches[offset:end]
+	displayPaths := make([]string, 0, len(page))
+	for _, match := range page {
+		if relativePaths {
+			if rel, err := filepath.Rel(searchDir, match); err == nil {
+				displayPaths = append(displayPaths, filepath.ToSlash(rel))
+				continue
 			}
 		}
+		displayPaths = append(displayPaths, match)
 	}
 
 	var sb strings.Builder
-	for _, m := range displayPaths {
-		sb.WriteString(m)
-		sb.WriteString("\n")
+	usedChars := 0
+	bodyBudget := maxOutputChars - 512
+	if bodyBudget < 256 {
+		bodyBudget = maxOutputChars
+	}
+	returned := make([]string, 0, len(displayPaths))
+	for _, displayPath := range displayPaths {
+		if !common.AppendWithinRuneBudget(&sb, &usedChars, displayPath+"\n", bodyBudget) {
+			break
+		}
+		returned = append(returned, displayPath)
+	}
+	if len(returned) == 0 && total == 0 {
+		sb.WriteString("No files matched the pattern")
 	}
 
-	text := sb.String()
-	if len(matches) == 0 {
-		text = "No files matched the pattern"
+	hasMore := offset+len(returned) < total
+	nextCursor := ""
+	if hasMore {
+		nextCursor = encodeGlobCursor(globCursor{Offset: offset + len(returned), Signature: signature})
 	}
+	fmt.Fprintf(&sb, "\n[glob: returned=%d; total=%d; skipped=%d; truncated=%t; has_more=%t",
+		len(returned), total, skipped, hasMore, hasMore)
+	if nextCursor != "" {
+		fmt.Fprintf(&sb, "; next_cursor=%s", nextCursor)
+	}
+	sb.WriteString("]")
+	text, finalTruncated := common.TruncateRunes(sb.String(), maxOutputChars, "\n[truncated]")
 
-	return &mcp.CallToolResult{
-		Content: []mcp.Content{&mcp.TextContent{Text: text}},
-	}, GlobOutput{Files: displayPaths, Count: len(matches)}, nil
+	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}}, GlobOutput{
+		Files: returned, Count: total, Returned: len(returned), HasMore: hasMore,
+		Truncated: hasMore || finalTruncated, NextCursor: nextCursor,
+	}, nil
 }
 
-// findMatches returns file paths in baseDir matching the given pattern.
-// The "**" pattern is handled via recursive directory traversal, automatically
-// skipping hidden directories (.git, etc.), node_modules, and vendor.
-// Examples: "**/*.go" → all .go files under baseDir
-//           "src/**/*.ts" → all .ts files under baseDir/src/
-func findMatches(baseDir, pattern string) ([]string, error) {
+// findMatches returns recursive glob matches and a count of paths skipped by
+// the default hidden/generated directory policy or traversal errors.
+func findMatches(baseDir, pattern string, includeHidden, includeIgnored bool) ([]string, int, error) {
 	var matches []string
-
-	// Support ** pattern: recursive traversal.
-	// Simple implementation: ** is handled once, and the suffix after ** is matched as a filename glob.
-	// Example: "src/**/*.ts" → prefix="src/", suffix="*.ts"
+	skipped := 0
 	if strings.Contains(pattern, "**") {
 		parts := strings.SplitN(pattern, "**", 2)
 		prefix := parts[0]
-		suffix := ""
-		if len(parts) > 1 {
-			suffix = strings.TrimPrefix(parts[1], "/")
-			suffix = strings.TrimPrefix(suffix, "\\")
-		}
-
+		suffix := strings.TrimLeft(parts[1], "/\\")
 		startDir := filepath.Join(baseDir, filepath.FromSlash(prefix))
-		if _, err := os.Stat(startDir); os.IsNotExist(err) {
+		if _, err := os.Stat(startDir); err != nil {
 			startDir = baseDir
 		}
-
 		err := filepath.Walk(startDir, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
+				skipped++
 				return nil
 			}
 			if info.IsDir() {
-				// Skip hidden/vendor dirs only when encountered during traversal,
-				// not when they are the explicit search root. Otherwise globbing an
-				// explicitly-given hidden root (e.g. C:\Users\...\.codex) would abort
-				// immediately, since Walk hands the root itself to walkFn first.
 				if path != startDir {
-					if strings.HasPrefix(info.Name(), ".") && info.Name() != "." {
+					if !includeHidden && strings.HasPrefix(info.Name(), ".") {
+						skipped++
 						return filepath.SkipDir
 					}
-					if info.Name() == "node_modules" || info.Name() == "vendor" {
+					if !includeIgnored && isIgnoredGlobDir(info.Name()) {
+						skipped++
 						return filepath.SkipDir
 					}
 				}
 				return nil
 			}
-
 			if suffix == "" {
 				matches = append(matches, path)
 				return nil
 			}
-
 			matched, _ := filepath.Match(suffix, info.Name())
 			if matched {
 				matches = append(matches, path)
 			}
 			return nil
 		})
-		return matches, err
+		return matches, skipped, err
 	}
+	matches, err := filepath.Glob(filepath.Join(baseDir, filepath.FromSlash(pattern)))
+	return matches, skipped, err
+}
 
-	// Standard glob pattern
-	fullPattern := filepath.Join(baseDir, filepath.FromSlash(pattern))
-	return filepath.Glob(fullPattern)
+func isIgnoredGlobDir(name string) bool {
+	switch strings.ToLower(name) {
+	case ".git", ".svn", ".hg", "node_modules", "vendor", "target", "build", "dist", "coverage", "__pycache__", ".venv", "venv":
+		return true
+	default:
+		return false
+	}
+}
+
+func globCursorSignature(searchDir string, input GlobInput, relativePaths bool) string {
+	value := fmt.Sprintf("%s\x00%s\x00%t\x00%t\x00%t", searchDir, input.Pattern,
+		relativePaths, input.IncludeHidden, input.IncludeIgnored)
+	sum := sha256.Sum256([]byte(value))
+	return fmt.Sprintf("%x", sum[:8])
+}
+
+func encodeGlobCursor(cursor globCursor) string {
+	data, _ := json.Marshal(cursor)
+	return base64.RawURLEncoding.EncodeToString(data)
+}
+
+func decodeGlobCursor(value string) (globCursor, error) {
+	var cursor globCursor
+	data, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil {
+		return cursor, fmt.Errorf("not valid base64url")
+	}
+	if err := json.Unmarshal(data, &cursor); err != nil || cursor.Offset < 0 || cursor.Signature == "" {
+		return globCursor{}, fmt.Errorf("malformed cursor payload")
+	}
+	return cursor, nil
 }
 
 func Register(server *mcp.Server) {
 	common.SafeAddTool(server, &mcp.Tool{
 		Name: "glob",
 		Description: `Finds files matching a glob pattern.
-Supports ** for recursive directory matching.
-Returns matching file paths sorted by modification time (newest first).
-Skips hidden directories (.git, etc.) and common vendor directories.
-Use relative_paths=true to return paths relative to the search directory (saves tokens).`,
+Supports ** recursive matching and sorts results by modification time (newest first).
+Defaults to 200 workspace-relative paths and 32768 characters per page.
+Skips hidden and common generated/vendor directories unless explicitly included.
+Returns total/has_more/truncated metadata and an opaque next_cursor.`,
 	}, Handle)
 }
 

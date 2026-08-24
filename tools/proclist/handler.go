@@ -10,18 +10,41 @@ import (
 )
 
 type ProcListInput struct {
-	Filter string      `json:"filter,omitempty" jsonschema:"Filter by process name (case-insensitive partial match)"`
-	Port   interface{} `json:"port,omitempty" jsonschema:"Show only processes using this port number"`
+	Filter         string      `json:"filter,omitempty" jsonschema:"Filter by process name (case-insensitive partial match)"`
+	Port           interface{} `json:"port,omitempty" jsonschema:"Show only processes using this port number"`
+	Offset         int         `json:"offset,omitempty" jsonschema:"Zero-based result offset. Default: 0"`
+	MaxResults     int         `json:"max_results,omitempty" jsonschema:"Maximum processes returned per page. Default: 100, Max: 1000"`
+	MaxOutputChars int         `json:"max_output_chars,omitempty" jsonschema:"Maximum returned text characters. Default: 32768, Max: 131072"`
 }
 
 type ProcListOutput struct {
-	Result string `json:"result"`
+	Result     string `json:"result"`
+	Total      int    `json:"total"`
+	Returned   int    `json:"returned"`
+	HasMore    bool   `json:"has_more"`
+	NextOffset int    `json:"next_offset,omitempty"`
+	Truncated  bool   `json:"truncated"`
 }
 
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input ProcListInput) (*mcp.CallToolResult, ProcListOutput, error) {
 	port, ok := common.FlexInt(input.Port)
 	if !ok {
 		return errorResult("port must be an integer")
+	}
+	if input.Offset < 0 {
+		return errorResult("offset must be non-negative")
+	}
+	if input.MaxResults == 0 {
+		input.MaxResults = 100
+	}
+	if input.MaxResults < 1 || input.MaxResults > 1000 {
+		return errorResult("max_results must be between 1 and 1000")
+	}
+	if input.MaxOutputChars == 0 {
+		input.MaxOutputChars = common.DefaultOutputChars
+	}
+	if input.MaxOutputChars < 1024 || input.MaxOutputChars > common.HardOutputChars {
+		return errorResult(fmt.Sprintf("max_output_chars must be between 1024 and %d", common.HardOutputChars))
 	}
 
 	procs, err := listProcesses()
@@ -74,12 +97,23 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ProcListInput) 
 		filtered = append(filtered, *p)
 	}
 
-	// Fetch command lines only for filtered results (wmic is slow on Windows, so only after filtering)
-	enrichCommandLines(filtered)
+	matchedCount := len(filtered)
+	start := input.Offset
+	if start > matchedCount {
+		start = matchedCount
+	}
+	end := start + input.MaxResults
+	if end > matchedCount {
+		end = matchedCount
+	}
+	page := filtered[start:end]
+
+	// Fetch command lines only for this page (wmic is slow on Windows).
+	enrichCommandLines(page)
 
 	// Mask sensitive information in command lines
-	for i := range filtered {
-		filtered[i].CmdLine = SanitizeCommandLine(filtered[i].CmdLine)
+	for i := range page {
+		page[i].CmdLine = SanitizeCommandLine(page[i].CmdLine)
 	}
 
 	// Output formatting
@@ -94,7 +128,10 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ProcListInput) 
 	sb.WriteString(fmt.Sprintf("  %-8s %-24s %-12s %s\n", "PID", "NAME", "MEM", "COMMAND"))
 	sb.WriteString(strings.Repeat("-", 80) + "\n")
 
-	for _, p := range filtered {
+	used := len([]rune(sb.String()))
+	returned := 0
+	outputTruncated := false
+	for _, p := range page {
 		mem := formatMemKB(p.MemKB)
 		cmdline := p.CmdLine
 		if cmdline == "" {
@@ -104,7 +141,12 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ProcListInput) 
 		if len(cmdline) > 200 {
 			cmdline = cmdline[:197] + "..."
 		}
-		sb.WriteString(fmt.Sprintf("  %-8d %-24s %-12s %s\n", p.PID, truncate(p.Name, 24), mem, cmdline))
+		line := fmt.Sprintf("  %-8d %-24s %-12s %s\n", p.PID, truncate(p.Name, 24), mem, cmdline)
+		if !common.AppendWithinRuneBudget(&sb, &used, line, input.MaxOutputChars-256) {
+			outputTruncated = true
+			break
+		}
+		returned++
 	}
 
 	// Append port information
@@ -116,16 +158,28 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ProcListInput) 
 		sb.WriteString("\n")
 	}
 
-	sb.WriteString(fmt.Sprintf("\nTotal: %d processes shown", len(filtered)))
+	nextOffset := start + returned
+	hasMore := nextOffset < matchedCount
+	if outputTruncated {
+		hasMore = true
+	}
+	sb.WriteString(fmt.Sprintf("\n[proclist: returned=%d; matched=%d; total_system=%d; has_more=%t", returned, matchedCount, totalCount, hasMore))
+	if hasMore {
+		sb.WriteString(fmt.Sprintf("; next_offset=%d", nextOffset))
+	}
+	if outputTruncated {
+		sb.WriteString("; truncated=true")
+	}
+	sb.WriteString("]")
 	if filter != "" || port > 0 {
-		sb.WriteString(fmt.Sprintf(" (filtered from %d)", totalCount))
+		sb.WriteString(" (filtered)")
 	}
 	sb.WriteString("\n")
 
 	result := sb.String()
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: result}},
-	}, ProcListOutput{Result: result}, nil
+	}, ProcListOutput{Result: result, Total: matchedCount, Returned: returned, HasMore: hasMore, NextOffset: nextOffset, Truncated: outputTruncated}, nil
 }
 
 func Register(server *mcp.Server) {
@@ -133,7 +187,8 @@ func Register(server *mcp.Server) {
 		Name: "proclist",
 		Description: `Lists running processes with PID, name, command line, and memory usage.
 Sensitive information in command-line arguments (passwords, tokens) is automatically masked.
-Use filter to search by process name, or port to find processes using a specific port.`,
+Use filter to search by process name, or port to find processes using a specific port.
+Results are paged; continue with next_offset when has_more=true.`,
 	}, Handle)
 }
 

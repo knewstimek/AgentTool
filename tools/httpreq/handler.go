@@ -17,8 +17,8 @@ import (
 const (
 	defaultTimeoutSec  = 30
 	maxTimeoutSec      = 120
-	defaultMaxRespKB   = 512
-	maxMaxRespKB       = 2048
+	defaultMaxRespKB   = common.DefaultOutputChars / 1024
+	maxMaxRespKB       = common.HardOutputChars / 1024
 	defaultContentType = "application/json"
 	defaultUserAgent   = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
 )
@@ -29,16 +29,16 @@ var allowedMethods = map[string]bool{
 }
 
 type HTTPReqInput struct {
-	URL            string            `json:"url" jsonschema:"URL to send the request to,required"`
-	Method         string            `json:"method" jsonschema:"HTTP method: GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS,required"`
-	Body           string            `json:"body,omitempty" jsonschema:"Request body (string). Typically JSON for API calls"`
-	Headers        map[string]string `json:"headers,omitempty" jsonschema:"Custom HTTP headers (e.g. Authorization, Accept)"`
-	ContentType    string            `json:"content_type,omitempty" jsonschema:"Content-Type header. Default: application/json"`
-	TimeoutSec     interface{}       `json:"timeout_sec,omitempty" jsonschema:"Request timeout in seconds. Default: 30, Max: 120"`
-	ProxyURL       string            `json:"proxy_url,omitempty" jsonschema:"HTTP or SOCKS5 proxy URL (e.g. http://proxy:8080, socks5://proxy:1080)"`
-	NoDoH          interface{}       `json:"no_doh,omitempty" jsonschema:"Disable DNS over HTTPS: true or false. Default: false (DoH enabled)"`
-	NoECH          interface{}       `json:"no_ech,omitempty" jsonschema:"Disable Encrypted Client Hello: true or false. Default: false (ECH enabled)"`
-	MaxResponseKB  interface{}       `json:"max_response_kb,omitempty" jsonschema:"Maximum response body size in KB. Default: 512, Max: 2048"`
+	URL           string            `json:"url" jsonschema:"URL to send the request to,required"`
+	Method        string            `json:"method" jsonschema:"HTTP method: GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS,required"`
+	Body          string            `json:"body,omitempty" jsonschema:"Request body (string). Typically JSON for API calls"`
+	Headers       map[string]string `json:"headers,omitempty" jsonschema:"Custom HTTP headers (e.g. Authorization, Accept)"`
+	ContentType   string            `json:"content_type,omitempty" jsonschema:"Content-Type header. Default: application/json"`
+	TimeoutSec    interface{}       `json:"timeout_sec,omitempty" jsonschema:"Request timeout in seconds. Default: 30, Max: 120"`
+	ProxyURL      string            `json:"proxy_url,omitempty" jsonschema:"HTTP or SOCKS5 proxy URL (e.g. http://proxy:8080, socks5://proxy:1080)"`
+	NoDoH         interface{}       `json:"no_doh,omitempty" jsonschema:"Disable DNS over HTTPS: true or false. Default: false (DoH enabled)"`
+	NoECH         interface{}       `json:"no_ech,omitempty" jsonschema:"Disable Encrypted Client Hello: true or false. Default: false (ECH enabled)"`
+	MaxResponseKB interface{}       `json:"max_response_kb,omitempty" jsonschema:"Maximum response body size in KB. Default: 32, Max: 128"`
 }
 
 type HTTPReqOutput struct {

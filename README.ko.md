@@ -14,25 +14,36 @@ AI 코딩 에이전트(Claude Code, Cursor, Codex 등)의 내장 도구에는 �
 
 - **탭 들여쓰기 깨짐**: LLM은 공백을 출력하지만, 프로젝트는 탭을 사용. 내장 Edit는 공백을 그대로 써서 들여쓰기 스타일이 망가짐.
 - **인코딩 손상**: EUC-KR, Shift-JIS, GB18030 파일을 편집하면 조용히 UTF-8로 변환되어 레거시 프로젝트가 깨짐.
-- **도구가 너무 분산됨**: 에이전트에게 Redis CLI, MySQL 클라이언트, SSH 클라이언트 등을 찾고, 설치하고, 설정하게 시키는 과정 자체가 번거롭고 오류가 잦음. agent-tool은 50개 도구를 단일 바이너리로 통합 -- 한 번 설치하면 전부 동작.
+- **도구가 너무 분산됨**: Redis CLI, MySQL/SSH 클라이언트를 따로 찾고 설정하는 과정은 번거롭고 오류가 잦음. agent-tool은 54개 도구를 한 바이너리로 통합하고 compact 프로필에서 필요할 때 활성화함.
 - **리버스 엔지니어링 지원 부재**: 내장 도구로는 바이너리 디스어셈블, PE/ELF 헤더 분석, 함수 경계 탐지, 크로스 레퍼런스 검색이 불가능. agent-tool은 정적 바이너리 분석(디스어셈블리, xref, 함수 탐지), DAP 디버거, CheatEngine 스타일 메모리 도구를 포함 -- 에이전트에게 완전한 리버스 엔지니어링 능력을 부여.
 - **네트워크 검열**: 일부 국가에서 정부 수준의 웹 필터링으로 `curl`/`wget` 요청이 차단됨. agent-tool은 ECH (Encrypted Client Hello)와 DoH (DNS over HTTPS)를 기본 활성화하여 이런 제한을 우회.
 
-**agent-tool**은 프로젝트의 규칙을 존중하는 대체 도구를 제공합니다.
+**agent-tool**은 프로젝트 규칙을 보존하면서 모델 컨텍스트를 제한하는 에이전트 지향 도구를 제공합니다.
 
 ## 지원 에이전트
 
 Claude Code, Codex CLI, Cursor, Windsurf, Cline, Gemini CLI 및 모든 MCP 호환 에이전트.
+
+## LLM 친화적 기본 동작
+
+기본 `core` 프로필은 54개 전체 스키마 대신 `toolbox`를 포함한 11개만 노출합니다.
+실제 MCP 프로토콜 측정에서 직렬화된 도구 목록은 `full` 약 83KB에서 약 17KB로
+줄었습니다. 필요할 때 `toolbox`로 그룹/개별 도구만 활성화하거나
+`--profile coding|remote|analysis|full`로 시작할 수 있습니다.
+
+대용량 텍스트 결과는 기본 32K자, 절대 상한 128K이며 잘림을 숨기지 않습니다.
+페이지 가능 도구는 `next_offset` 또는 `next_cursor`를 반환합니다. 로컬 상대경로는
+명시적 workspace, MCP 클라이언트 root, 서버 cwd 순서로 해석됩니다.
 
 ## 기능
 
 | 도구 | 설명 | 상태 |
 |------|------|------|
 | **Edit** | 스마트 들여쓰기 + 인코딩 보존 문자열 치환 (dry_run 지원) | ✅ |
-| **Read** | 인코딩 인식 파일 읽기 (offset: 정수, `"N-M"` 범위 문자열, `[N,M]` 배열 지원). 이미지 파일(PNG/JPG/GIF/BMP/WebP/TIFF/ICO)은 base64 ImageContent로 반환 | ✅ |
+| **Read** | 인코딩 인식 줄번호 읽기. 기본 400줄/32K자, 명시적 truncation과 정확한 `next_offset`, 초장문 행 안전 처리, 선택적 SHA-256, 이미지 ImageContent | ✅ |
 | **Write** | 인코딩 인식 파일 생성/덮어쓰기 | ✅ |
-| **Grep** | 인코딩 인식 정규식 내용 검색 (output_mode: content/files_with_matches/count, context 옵션 -B/-A/-C). 큰 결과 수도 허용하면서 줄별·전체 출력 예산으로 컨텍스트 폭주 방지. 정확한 `has_more` 메타데이터와 텍스트 안내로 미완료 결과 표시. 바이너리 파일 자동 제외 (확장자 + NUL 검사). CRLF 는 종결자로 처리하므로 CRLF 파일에서도 `^foo$` 가 매칭 | ✅ |
-| **Glob** | `**` 재귀 지원 파일 패턴 매칭 | ✅ |
+| **Grep** | 기본 32K 예산, 파일별 compact 묶음 출력, 상대경로, `.gitignore`/생성 디렉터리 제외, 바이너리 감지, 중복 없는 결정적 `next_cursor` 페이징 | ✅ |
+| **Glob** | 정렬·제한된 `**` 검색. 상대경로, 생성 디렉터리 제외, 명시적 `has_more`, 결정적 cursor 페이징 | ✅ |
 | **ListDir** | 출력 제한·페이징 디렉토리 목록. max_entries + continuation cursor, 디렉토리/파일 필터, 이름 glob 필터, counts-only, flat/tree 지원 | ✅ |
 | **Diff** | 두 파일 비교 (unified diff 출력, 인코딩 인식). 줄바꿈이나 끝 개행만 다른 경우 빈 diff 대신 그 사실을 명시 | ✅ |
 | **Patch** | unified diff 패치 적용 (dry_run 지원). 줄마다 자기 줄바꿈을 유지하므로 CRLF/LF 혼합 파일이 재작성되지 않음 | ✅ |
@@ -51,10 +62,10 @@ Claude Code, Codex CLI, Cursor, Windsurf, Cline, Gemini CLI 및 모든 MCP 호�
 | **ProcExec** | 명령어를 새 프로세스로 실행. 포그라운드/백그라운드/일시정지 상태 시작 (Windows: CREATE_SUSPENDED, Linux: SIGSTOP). 타임아웃, 환경변수 | ✅ |
 | **EnvVar** | 환경변수 조회. 민감 값(비밀번호, 토큰) 자동 마스킹 | ✅ |
 | **Firewall** | 방화벽 규칙 조회 — iptables/nftables/firewalld (Linux), netsh (Windows). 읽기 전용 | ✅ |
-| **SSH** | SSH로 원격 서버 명령 실행. 비밀번호/키 인증 (PEM, OpenSSH, PuTTY PPK), 세션 풀링, 호스트 키 검증 (strict/tofu/none), ProxyJump, IPv6 | ✅ |
+| **SSH** | 기본 32K head+tail 캡처, 원본 바이트 수, 비정상 종료 오류 의미론, 백그라운드 작업(start/status/tail/cancel). 인증 인식 풀링, 호스트 키 검증, ProxyJump, IPv6 | ✅ |
 | **SFTP** | SSH 경유 파일 전송 및 원격 파일시스템 관리. 업로드, 다운로드, ls, stat, mkdir, rm, chmod, rename. 비동기 전송(upload_async/download_async + status/cancel). SSH 세션 풀 재사용. 최대 2GB | ✅ |
 | **Bash** | 영속 셸 세션 — 작업 디렉토리, 환경변수 상태 유지. 세션 풀링 (최대 5개, 유휴 타임아웃 30분). Unix: bash/sh, Windows: PowerShell/git-bash/cmd (자동 감지). PowerShell 세션은 UTF-8 인코딩 + PATH 자동 보강 | ✅ |
-| **WebFetch** | 웹 콘텐츠를 텍스트/마크다운으로 가져오기. ECH(Encrypted Client Hello) + DoH(DNS over HTTPS) 기본 활성. HTML→마크다운 자동 변환. SSRF 차단. HTTP/SOCKS5 프록시. Chrome User-Agent. **주의:** 페이지 전체 내용을 반환(기본 10만자)하므로 컨텍스트 윈도우 토큰을 많이 소비할 수 있음 — `max_length`로 제한하거나, 단순 검색은 에이전트 내장 웹 도구 사용 권장 | ✅ |
+| **WebFetch** | 기본 32K/최대 128K 웹 콘텐츠 텍스트·마크다운 반환. ECH + DoH, HTML→마크다운, SSRF 차단, 프록시 지원 | ✅ |
 | **WebSearch** | Brave Search 또는 Naver API를 통한 웹 검색. API 키 환경변수 필요 (`BRAVE_SEARCH_API_KEY` 또는 `NAVER_CLIENT_ID`/`NAVER_CLIENT_SECRET`). 엔진 자동 선택, Brave 우선 | ✅ |
 | **Download** | URL에서 파일 다운로드. ECH + DoH 기본 활성. SSRF 차단. HTTP/SOCKS5 프록시. 원자적 파일 저장. 최대 2GB | ✅ |
 | **HTTPReq** | HTTP 요청 실행 (GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS). 커스텀 헤더, 본문, 프록시 지원. API 테스트용. SSRF 차단 | ✅ |
@@ -63,7 +74,7 @@ Claude Code, Codex CLI, Cursor, Windsurf, Cline, Gemini CLI 및 모든 MCP 호�
 | **TOMLQuery** | TOML 파일을 점 표기법으로 쿼리 (JSONQuery와 동일 문법). TOML 전용 타입(datetime, int64) 지원 | ✅ |
 | **Copy** | 파일/디렉토리 복사. 원자적 쓰기 + 권한 보존. 재귀 디렉토리 복사. Windows 잠긴 파일 폴백 (실행 중인 exe/DLL 이름 변경 후 교체). dry_run 미리보기 | ✅ |
 | **Mkdir** | 디렉토리 생성. 8진수 권한 모드 지정 가능 (예: 0755). 기본 재귀 생성 (mkdir -p). dry_run 미리보기 | ✅ |
-| **MultiRead** | 여러 파일을 한 번에 읽기 (API 왕복 절약). 인코딩 인식, offset/limit 지원. 최대 50개 | ✅ |
+| **MultiRead** | 최대 50개 파일, 호출 전체 32K 예산, 파일별 기본 200줄, 초장문 행 안전 처리, 파일별/전체 continuation 메타데이터. 해시는 opt-in | ✅ |
 | **RegexReplace** | 파일/디렉토리 전체 정규식 찾기-바꾸기. 인코딩과 줄바꿈 보존, 캡처 그룹 ($1, $2) 지원. 바이너리 파일 자동 제외. dry_run 미리보기 | ✅ |
 | **TLSCheck** | TLS 인증서 상세 조회 — 주체, 발급자, 만료일, SAN, TLS 버전, 암호화 스위트 | ✅ |
 | **DNSLookup** | DNS 레코드 조회 (A/AAAA/MX/CNAME/TXT/NS/SOA). DoH(DNS over HTTPS) 기본 활성 | ✅ |
@@ -226,6 +237,9 @@ agent-tool uninstall claude   # 특정 에이전트에서만 제거
 | Safe | `--safe-approve` | 29개 로컬 전용 도구 (read, edit, write, grep, glob 등) — SSH, HTTP, DB, bash, 프로세스 제어 제외 |
 | None | `--no-auto-approve` | 없음 — 모든 호출에 수동 승인 필요 |
 
+승인 수준과 스키마 프로필은 별개입니다. 전체 네임스페이스를 승인해도 서버는
+토큰 효율적인 `core` 프로필로 시작할 수 있습니다.
+
 ### 수동 설정
 
 **Claude Code / Cursor / Cline** (`settings.json` 또는 `mcp.json`):
@@ -248,9 +262,16 @@ command = "/path/to/agent-tool"
 ### 옵션
 
 ```bash
+# 초기 스키마 프로필 선택 (기본: core)
+agent-tool --profile coding
+
 # UTF-8이 아닌 프로젝트에서 폴백 인코딩 지정
 agent-tool --fallback-encoding EUC-KR
 ```
+
+프로필: `core`(11개 스키마), `coding`, `remote`, `analysis`, `full`.
+실행 중에는 `toolbox`의 `operation=enable`, `groups=["remote"]` 또는 개별
+`tools`로 필요한 기능만 추가할 수 있습니다.
 
 ### 환경변수
 
@@ -259,9 +280,11 @@ agent-tool --fallback-encoding EUC-KR
 ```bash
 # Windows (관리자 권한 불필요)
 setx AGENT_TOOL_FALLBACK_ENCODING EUC-KR
+setx AGENT_TOOL_PROFILE coding
 
 # Linux / macOS (~/.bashrc 또는 ~/.zshrc에 추가)
 export AGENT_TOOL_FALLBACK_ENCODING=EUC-KR
+export AGENT_TOOL_PROFILE=coding
 ```
 
 우선순위: CLI 플래그 > 환경변수 > 기본값 (UTF-8).
@@ -276,7 +299,7 @@ export AGENT_TOOL_FALLBACK_ENCODING=EUC-KR
 | `encoding_warnings` | 인코딩 감지 경고 표시 | `true` |
 | `max_file_size_mb` | read/edit/grep 최대 파일 크기 (MB) | `100` |
 | `allow_symlinks` | tar 압축 해제 시 symlink 생성 허용 | `false` |
-| `workspace` | glob 등에서 경로 미지정 시 사용할 기본 프로젝트 루트 | _(cwd)_ |
+| `workspace` | 명시적 로컬 루트. 미설정 시 첫 MCP 클라이언트 root, 이후 cwd 사용 | _(MCP root/cwd)_ |
 | `allow_http_private` | webfetch/download/httpreq의 사설 IP 접근 허용 | `false` |
 | `allow_mysql_private` | mysql 도구의 사설 IP 접근 허용 | `true` |
 | `allow_redis_private` | redis 도구의 사설 IP 접근 허용 | `true` |

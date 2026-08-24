@@ -18,7 +18,7 @@ import (
 const smallLocaleFileRunes = 200
 
 type WriteInput struct {
-	FilePath string `json:"file_path,omitempty" jsonschema:"Absolute path to the file to write"`
+	FilePath string `json:"file_path,omitempty" jsonschema:"File to write. Relative paths use the configured workspace or MCP client root"`
 	Path     string `json:"path,omitempty" jsonschema:"Alias for file_path"`
 	Content  string `json:"content" jsonschema:"Content to write to the file"`
 }
@@ -34,9 +34,11 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input WriteInput) (*m
 	if input.FilePath == "" {
 		return errorResult("file_path is required")
 	}
-	if !filepath.IsAbs(input.FilePath) {
-		return errorResult("file_path must be an absolute path")
+	resolvedPath, err := common.ResolveRequestPath(ctx, req, input.FilePath)
+	if err != nil {
+		return errorResult(fmt.Sprintf("cannot resolve file_path: %v", err))
 	}
+	input.FilePath = resolvedPath
 
 	// Auto-create directories
 	dir := filepath.Dir(input.FilePath)

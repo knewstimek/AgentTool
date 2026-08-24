@@ -3,7 +3,6 @@ package bash
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	"agent-tool/common"
@@ -13,19 +12,21 @@ import (
 const defaultSessionID = "default"
 
 type BashInput struct {
-	Command    string `json:"command" jsonschema:"Shell command to execute"`
-	Cwd        string `json:"cwd,omitempty" jsonschema:"Initial working directory (only used when creating a new session)"`
-	SessionID  string `json:"session_id,omitempty" jsonschema:"Session identifier for persistent shell. Default: default"`
+	Command    string      `json:"command" jsonschema:"Shell command to execute"`
+	Cwd        string      `json:"cwd,omitempty" jsonschema:"Initial working directory (only used when creating a new session)"`
+	SessionID  string      `json:"session_id,omitempty" jsonschema:"Session identifier for persistent shell. Default: default"`
 	TimeoutSec interface{} `json:"timeout_sec,omitempty" jsonschema:"Command timeout in seconds (default 120, max 600). For a longer-running process, raise this up to 600 or launch it detached with procexec instead of waiting here."`
 	Timeout    interface{} `json:"timeout,omitempty" jsonschema:"Alias for timeout_sec (seconds). Used only when timeout_sec is not set."`
 	Disconnect interface{} `json:"disconnect,omitempty" jsonschema:"Close the shell session: true or false. Default: false"`
 }
 
 type BashOutput struct {
-	SessionID string `json:"session_id"`
-	Output    string `json:"output"`
-	ExitCode  int    `json:"exit_code"`
-	IsNew     bool   `json:"is_new"`
+	SessionID     string `json:"session_id"`
+	Output        string `json:"output"`
+	ExitCode      int    `json:"exit_code"`
+	IsNew         bool   `json:"is_new"`
+	Truncated     bool   `json:"truncated"`
+	OriginalBytes int64  `json:"original_bytes,omitempty"`
 }
 
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input BashInput) (*mcp.CallToolResult, BashOutput, error) {
@@ -70,8 +71,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input BashInput) (*mc
 
 	// Normalize cwd (validation deferred to session creation)
 	if input.Cwd != "" {
-		input.Cwd = filepath.Clean(input.Cwd)
-		absPath, err := filepath.Abs(input.Cwd)
+		absPath, err := common.ResolveRequestPath(ctx, req, input.Cwd)
 		if err != nil {
 			return errorResult(fmt.Sprintf("invalid working directory: %v", err))
 		}
@@ -95,10 +95,12 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input BashInput) (*mc
 	}
 
 	out := BashOutput{
-		SessionID: input.SessionID,
-		Output:    result.Output,
-		ExitCode:  result.ExitCode,
-		IsNew:     isNew,
+		SessionID:     input.SessionID,
+		Output:        result.Output,
+		ExitCode:      result.ExitCode,
+		IsNew:         isNew,
+		Truncated:     result.Truncated,
+		OriginalBytes: result.OriginalBytes,
 	}
 
 	// Format output
@@ -109,7 +111,8 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input BashInput) (*mc
 			sb.WriteString("[Warning: PowerShell 5.1 does not support && and ||. Use ; (semicolons) to chain commands.]\n")
 		}
 	}
-	sb.WriteString(fmt.Sprintf("$ %s\n", input.Command))
+	displayCommand, _ := common.TruncateRunes(input.Command, 500, "… [command abbreviated]")
+	sb.WriteString(fmt.Sprintf("$ %s\n", displayCommand))
 	if result.Output != "" {
 		sb.WriteString(result.Output)
 		if !strings.HasSuffix(result.Output, "\n") {
@@ -117,6 +120,9 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input BashInput) (*mc
 		}
 	}
 	sb.WriteString(fmt.Sprintf("[exit code: %d]", result.ExitCode))
+	if result.Truncated {
+		sb.WriteString(fmt.Sprintf("\n[output truncated: original_bytes=%d; retained_bytes=%d; head and tail shown]", result.OriginalBytes, maxOutputSize))
+	}
 	// Warn when chain operators were used in PS 5.1 (auto-transformed to prevent hang).
 	// Uses quote-aware hasChainOps to avoid false warnings on: echo "a && b"
 	if sess.shellKind == kindPowerShell && hasChainOps(input.Command) {
@@ -136,6 +142,7 @@ func Register(server *mcp.Server) {
 Sessions maintain working directory, environment variables, and shell state across calls.
 Use session_id to manage multiple independent shell sessions.
 Set timeout_sec (or its alias timeout) in seconds, default 120, max 600. For a process that runs longer than that, launch it detached with procexec rather than blocking here.
+Output is bounded to 32768 bytes; large output keeps both the head and tail and reports original_bytes/truncated.
 Use disconnect=true to close a session.
 Platform: bash/sh on Unix, PowerShell/git-bash/cmd on Windows (auto-detected, best available).`,
 	}, Handle)

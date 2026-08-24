@@ -1,33 +1,36 @@
 package ssh
 
 import (
-	"bytes"
 	"context"
-	"io"
+
+	"agent-tool/common"
 
 	gossh "golang.org/x/crypto/ssh"
 )
 
-const maxOutputSize = 1024 * 1024 // 1MB per stream
-
 // execResult holds the result of a remote command execution.
 type execResult struct {
-	Stdout   string
-	Stderr   string
-	ExitCode int
+	Stdout          string
+	Stderr          string
+	ExitCode        int
+	StdoutBytes     int64
+	StderrBytes     int64
+	StdoutTruncated bool
+	StderrTruncated bool
 }
 
 // executeCommand runs a command on the remote server with timeout.
-func executeCommand(ctx context.Context, client *gossh.Client, command string) (*execResult, error) {
+func executeCommand(ctx context.Context, client *gossh.Client, command string, maxOutputBytes int, outputMode string) (*execResult, error) {
 	session, err := client.NewSession()
 	if err != nil {
 		return nil, err
 	}
 	defer session.Close()
 
-	var stdoutBuf, stderrBuf bytes.Buffer
-	session.Stdout = &limitWriter{w: &stdoutBuf, limit: maxOutputSize}
-	session.Stderr = &limitWriter{w: &stderrBuf, limit: maxOutputSize}
+	stdoutBuf := common.NewBoundedCaptureMode((maxOutputBytes+1)/2, outputMode)
+	stderrBuf := common.NewBoundedCaptureMode(maxOutputBytes/2, outputMode)
+	session.Stdout = stdoutBuf
+	session.Stderr = stderrBuf
 
 	// Run command in goroutine for timeout support
 	done := make(chan error, 1)
@@ -44,10 +47,16 @@ func executeCommand(ctx context.Context, client *gossh.Client, command string) (
 		<-done // wait for goroutine to exit
 		return nil, ctx.Err()
 	case err := <-done:
+		stdout, stdoutBytes, stdoutTruncated := stdoutBuf.Result()
+		stderr, stderrBytes, stderrTruncated := stderrBuf.Result()
 		result := &execResult{
-			Stdout:   stdoutBuf.String(),
-			Stderr:   stderrBuf.String(),
-			ExitCode: 0,
+			Stdout:          stdout,
+			Stderr:          stderr,
+			ExitCode:        0,
+			StdoutBytes:     stdoutBytes,
+			StderrBytes:     stderrBytes,
+			StdoutTruncated: stdoutTruncated,
+			StderrTruncated: stderrTruncated,
 		}
 		if err != nil {
 			if exitErr, ok := err.(*gossh.ExitError); ok {
@@ -58,31 +67,4 @@ func executeCommand(ctx context.Context, client *gossh.Client, command string) (
 		}
 		return result, nil
 	}
-}
-
-// limitWriter writes at most `limit` bytes. Excess bytes are silently discarded.
-type limitWriter struct {
-	w       io.Writer
-	limit   int
-	written int
-}
-
-func (lw *limitWriter) Write(p []byte) (int, error) {
-	remaining := lw.limit - lw.written
-	if remaining <= 0 {
-		return len(p), nil // discard, report all consumed
-	}
-	if len(p) > remaining {
-		// Write only what fits, but report all bytes as consumed
-		// to satisfy io.Writer contract (callers expect len(p) on success).
-		n, err := lw.w.Write(p[:remaining])
-		lw.written += n
-		if err != nil {
-			return n, err
-		}
-		return len(p), nil
-	}
-	n, err := lw.w.Write(p)
-	lw.written += n
-	return n, err
 }

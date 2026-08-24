@@ -3,7 +3,6 @@ package patch
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -18,9 +17,9 @@ import (
 const maxPatchSize = 10 * 1024 * 1024 // 10MB
 
 type PatchInput struct {
-	FilePath string `json:"file_path,omitempty" jsonschema:"Absolute path to the file to patch"`
-	Path     string `json:"path,omitempty" jsonschema:"Alias for file_path"`
-	Patch    string `json:"patch" jsonschema:"Unified diff text (output of the diff tool)"`
+	FilePath string      `json:"file_path,omitempty" jsonschema:"File to patch. Relative paths use the configured workspace or MCP client root"`
+	Path     string      `json:"path,omitempty" jsonschema:"Alias for file_path"`
+	Patch    string      `json:"patch" jsonschema:"Unified diff text (output of the diff tool)"`
 	DryRun   interface{} `json:"dry_run,omitempty" jsonschema:"Preview patch result without modifying the file: true or false. Default: false"`
 }
 
@@ -50,9 +49,11 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input PatchInput) (*m
 	if input.FilePath == "" {
 		return errorResult("file_path is required")
 	}
-	if !filepath.IsAbs(input.FilePath) {
-		return errorResult("file_path must be an absolute path")
+	resolvedPath, err := common.ResolveRequestPath(ctx, req, input.FilePath)
+	if err != nil {
+		return errorResult(fmt.Sprintf("cannot resolve file_path: %v", err))
 	}
+	input.FilePath = resolvedPath
 	if input.Patch == "" {
 		return errorResult("patch is required")
 	}

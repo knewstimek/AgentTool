@@ -16,28 +16,28 @@ import (
 
 type SFTPInput struct {
 	// SSH connection parameters (same as ssh tool, minus Command/Disconnect/TimeoutSec)
-	Host         string `json:"host" jsonschema:"SSH server hostname or IP address (IPv4 or IPv6),required"`
+	Host         string      `json:"host" jsonschema:"SSH server hostname or IP address (IPv4 or IPv6),required"`
 	Port         interface{} `json:"port,omitempty" jsonschema:"SSH port number. Default: 22"`
-	User         string `json:"user" jsonschema:"SSH username,required"`
-	Password     string `json:"password,omitempty" jsonschema:"Password for authentication"`
-	KeyFile      string `json:"key_file,omitempty" jsonschema:"Path to SSH private key file (e.g. ~/.ssh/id_rsa)"`
-	Passphrase   string `json:"passphrase,omitempty" jsonschema:"Passphrase for encrypted private key"`
+	User         string      `json:"user" jsonschema:"SSH username,required"`
+	Password     string      `json:"password,omitempty" jsonschema:"Password for authentication"`
+	KeyFile      string      `json:"key_file,omitempty" jsonschema:"Path to SSH private key file (e.g. ~/.ssh/id_rsa)"`
+	Passphrase   string      `json:"passphrase,omitempty" jsonschema:"Passphrase for encrypted private key"`
 	UseAgent     interface{} `json:"use_agent,omitempty" jsonschema:"Use SSH agent for authentication: true or false. Default: true if no other auth method specified"`
-	HostKeyCheck string `json:"host_key_check,omitempty" jsonschema:"Host key verification: strict, tofu (default), none"`
+	HostKeyCheck string      `json:"host_key_check,omitempty" jsonschema:"Host key verification: strict, tofu (default), none"`
 
 	// Proxy Jump
-	JumpHost       string `json:"jump_host,omitempty" jsonschema:"Jump/bastion host for ProxyJump (hostname or IP)"`
+	JumpHost       string      `json:"jump_host,omitempty" jsonschema:"Jump/bastion host for ProxyJump (hostname or IP)"`
 	JumpPort       interface{} `json:"jump_port,omitempty" jsonschema:"Jump host SSH port. Default: 22"`
-	JumpUser       string `json:"jump_user,omitempty" jsonschema:"Jump host username. Default: same as user"`
-	JumpPassword   string `json:"jump_password,omitempty" jsonschema:"Jump host password. Default: same as password"`
-	JumpKeyFile    string `json:"jump_key_file,omitempty" jsonschema:"Jump host SSH private key file. Default: same as key_file"`
-	JumpPassphrase string `json:"jump_passphrase,omitempty" jsonschema:"Jump host key passphrase. Default: same as passphrase"`
+	JumpUser       string      `json:"jump_user,omitempty" jsonschema:"Jump host username. Default: same as user"`
+	JumpPassword   string      `json:"jump_password,omitempty" jsonschema:"Jump host password. Default: same as password"`
+	JumpKeyFile    string      `json:"jump_key_file,omitempty" jsonschema:"Jump host SSH private key file. Default: same as key_file"`
+	JumpPassphrase string      `json:"jump_passphrase,omitempty" jsonschema:"Jump host key passphrase. Default: same as passphrase"`
 
 	// SFTP operation
 	Operation string `json:"operation" jsonschema:"SFTP operation: upload, download, upload_async, download_async, status, cancel, ls, stat, mkdir, rm, chmod, rename,required"`
 
 	// File paths
-	LocalPath  string `json:"local_path,omitempty" jsonschema:"Local file path (for upload/download)"`
+	LocalPath  string `json:"local_path,omitempty" jsonschema:"Local file path for upload/download. Relative paths use workspace/MCP root"`
 	RemotePath string `json:"remote_path,omitempty" jsonschema:"Remote file/directory path"`
 	// Aliases for compatibility
 	Local  string `json:"local,omitempty" jsonschema:"Alias for local_path"`
@@ -45,10 +45,10 @@ type SFTPInput struct {
 
 	// Operation-specific
 	Recursive  interface{} `json:"recursive,omitempty" jsonschema:"Recursive operation (mkdir: create parents, rm: remove directory tree): true or false. Default: false"`
-	Mode       string `json:"mode,omitempty" jsonschema:"File permission mode in octal (e.g. 0755). Used by chmod"`
-	NewPath    string `json:"new_path,omitempty" jsonschema:"New remote path (for rename operation)"`
+	Mode       string      `json:"mode,omitempty" jsonschema:"File permission mode in octal (e.g. 0755). Used by chmod"`
+	NewPath    string      `json:"new_path,omitempty" jsonschema:"New remote path (for rename operation)"`
 	Overwrite  interface{} `json:"overwrite,omitempty" jsonschema:"Overwrite existing file on upload/download: true or false. Default: false"`
-	TransferID string `json:"transfer_id,omitempty" jsonschema:"Transfer ID for status/cancel operations (returned by upload_async/download_async)"`
+	TransferID string      `json:"transfer_id,omitempty" jsonschema:"Transfer ID for status/cancel operations (returned by upload_async/download_async)"`
 }
 
 type SFTPOutput struct {
@@ -103,6 +103,13 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input SFTPInput) (*mc
 		return errorResult("invalid operation: must be upload, download, upload_async, download_async, status, cancel, ls, stat, mkdir, rm, chmod, or rename")
 	}
 	input.Operation = op
+	if (op == "upload" || op == "download" || op == "upload_async" || op == "download_async") && input.LocalPath != "" {
+		resolvedLocal, err := common.ResolveRequestPath(ctx, req, input.LocalPath)
+		if err != nil {
+			return errorResult(fmt.Sprintf("cannot resolve local_path: %v", err))
+		}
+		input.LocalPath = resolvedLocal
+	}
 
 	// Async operations don't need SFTP client upfront
 	switch op {

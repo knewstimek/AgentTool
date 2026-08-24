@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"agent-tool/common"
 	"agent-tool/tools/edit"
@@ -13,7 +12,7 @@ import (
 )
 
 type FileInfoInput struct {
-	FilePath string `json:"file_path,omitempty" jsonschema:"Absolute path to the file"`
+	FilePath string `json:"file_path,omitempty" jsonschema:"File path. Relative paths use workspace/MCP root"`
 	Path     string `json:"path,omitempty" jsonschema:"Alias for file_path"`
 }
 
@@ -28,9 +27,11 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input FileInfoInput) 
 	if input.FilePath == "" {
 		return errorResult("file_path is required")
 	}
-	if !filepath.IsAbs(input.FilePath) {
-		return errorResult("file_path must be an absolute path")
+	resolvedPath, err := common.ResolveRequestPath(ctx, req, input.FilePath)
+	if err != nil {
+		return errorResult(fmt.Sprintf("cannot resolve file_path: %v", err))
 	}
+	input.FilePath = resolvedPath
 
 	fi, err := os.Stat(input.FilePath)
 	if err != nil {

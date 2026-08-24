@@ -24,7 +24,7 @@ var errMaxFiles = errors.New("max files reached")
 type RegexReplaceInput struct {
 	Pattern     string      `json:"pattern" jsonschema:"Regular expression pattern to search for"`
 	Replacement string      `json:"replacement" jsonschema:"Replacement string. Supports $1, $2 capture groups"`
-	Path        string      `json:"path,omitempty" jsonschema:"File or directory to process (absolute path)"`
+	Path        string      `json:"path,omitempty" jsonschema:"Absolute or workspace-relative file or directory to process"`
 	FilePath    string      `json:"file_path,omitempty" jsonschema:"Alias for path"`
 	Glob        string      `json:"glob,omitempty" jsonschema:"Glob pattern to filter files when path is a directory (e.g. *.go). Only used when path is a directory"`
 	IgnoreCase  interface{} `json:"ignore_case,omitempty" jsonschema:"Case insensitive search: true or false. Default: false"`
@@ -50,9 +50,11 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input RegexReplaceInp
 	if input.Path == "" {
 		return errorResult("path is required")
 	}
-	if !filepath.IsAbs(input.Path) {
-		return errorResult("path must be an absolute path")
+	resolvedPath, err := common.ResolveRequestPath(ctx, req, input.Path)
+	if err != nil {
+		return errorResult(fmt.Sprintf("cannot resolve path: %v", err))
 	}
+	input.Path = resolvedPath
 
 	flags := ""
 	if ignoreCase {

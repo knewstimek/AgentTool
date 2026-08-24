@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func TestTruncateRunesKeepsUTF8Valid(t *testing.T) {
@@ -27,5 +29,40 @@ func TestAppendWithinRuneBudgetIsAtomic(t *testing.T) {
 	}
 	if sb.String() != "가나" || used != 2 {
 		t.Fatalf("partial fragment was appended: %q, used=%d", sb.String(), used)
+	}
+}
+
+func TestTextLineCountMatchesScanLines(t *testing.T) {
+	tests := map[string]int{
+		"":           0,
+		"one":        1,
+		"one\n":      1,
+		"one\ntwo":   2,
+		"one\ntwo\n": 2,
+		"one\n\n":    2,
+	}
+	for input, want := range tests {
+		if got := TextLineCount(input); got != want {
+			t.Errorf("TextLineCount(%q) = %d, want %d", input, got, want)
+		}
+	}
+}
+
+func TestLimitToolResultTextIsVisibleAndUTF8Safe(t *testing.T) {
+	result := &mcp.CallToolResult{Content: []mcp.Content{
+		&mcp.TextContent{Text: strings.Repeat("가", 200)},
+	}}
+	if !LimitToolResultText(result, 120) {
+		t.Fatal("expected truncation")
+	}
+	got := result.Content[0].(*mcp.TextContent).Text
+	if !utf8.ValidString(got) {
+		t.Fatal("result is not valid UTF-8")
+	}
+	if utf8.RuneCountInString(got) > 120 {
+		t.Fatalf("result exceeds limit: %d", utf8.RuneCountInString(got))
+	}
+	if !strings.Contains(got, "truncated=true") || !strings.Contains(got, "original_chars=200") {
+		t.Fatalf("missing actionable truncation metadata: %q", got)
 	}
 }

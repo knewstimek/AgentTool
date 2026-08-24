@@ -3,7 +3,6 @@ package diff
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	"agent-tool/common"
@@ -15,16 +14,18 @@ import (
 const maxDiffLines = 50000
 
 type DiffInput struct {
-	FileA        string      `json:"file_a,omitempty" jsonschema:"Absolute path to the first file"`
-	FileB        string      `json:"file_b,omitempty" jsonschema:"Absolute path to the second file"`
+	FileA string `json:"file_a,omitempty" jsonschema:"First file. Relative paths use workspace/MCP root"`
+	FileB string `json:"file_b,omitempty" jsonschema:"Second file. Relative paths use workspace/MCP root"`
 	// Aliases for compatibility
-	PathA        string      `json:"path_a,omitempty" jsonschema:"Alias for file_a"`
-	PathB        string      `json:"path_b,omitempty" jsonschema:"Alias for file_b"`
-	ContextLines interface{} `json:"context_lines,omitempty" jsonschema:"Number of context lines around changes (default 3)"`
+	PathA          string `json:"path_a,omitempty" jsonschema:"Alias for file_a"`
+	PathB          string `json:"path_b,omitempty" jsonschema:"Alias for file_b"`
+	ContextLines   int    `json:"context_lines,omitempty" jsonschema:"Number of context lines around changes. Default: 3, Max: 1000"`
+	MaxOutputChars int    `json:"max_output_chars,omitempty" jsonschema:"Maximum returned diff characters. Default: 32768, Max: 131072"`
 }
 
 type DiffOutput struct {
-	Result string `json:"result"`
+	Result    string `json:"result"`
+	Truncated bool   `json:"truncated"`
 }
 
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input DiffInput) (*mcp.CallToolResult, DiffOutput, error) {
@@ -39,15 +40,28 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input DiffInput) (*mc
 	if input.FileA == "" || input.FileB == "" {
 		return errorResult("file_a and file_b are required")
 	}
-	if !filepath.IsAbs(input.FileA) || !filepath.IsAbs(input.FileB) {
-		return errorResult("file_a and file_b must be absolute paths")
+	var err error
+	input.FileA, err = common.ResolveRequestPath(ctx, req, input.FileA)
+	if err != nil {
+		return errorResult(fmt.Sprintf("cannot resolve file_a: %v", err))
 	}
-	ctxLines, ok := common.FlexInt(input.ContextLines)
-	if !ok {
-		return errorResult("context_lines must be an integer")
+	input.FileB, err = common.ResolveRequestPath(ctx, req, input.FileB)
+	if err != nil {
+		return errorResult(fmt.Sprintf("cannot resolve file_b: %v", err))
 	}
+	ctxLines := input.ContextLines
 	if ctxLines <= 0 {
 		ctxLines = 3
+	}
+	if ctxLines > 1000 {
+		return errorResult("context_lines must be at most 1000")
+	}
+	maxOutputChars := input.MaxOutputChars
+	if maxOutputChars <= 0 {
+		maxOutputChars = common.DefaultOutputChars
+	}
+	if maxOutputChars > common.HardOutputChars {
+		return errorResult(fmt.Sprintf("max_output_chars must be at most %d", common.HardOutputChars))
 	}
 
 	// Encoding-aware reading
@@ -115,9 +129,11 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input DiffInput) (*mc
 		diff += "\n(no content difference; " + strings.Join(notes, "; ") + ")"
 	}
 
+	diff, truncated := common.TruncateRunes(diff, maxOutputChars,
+		"\n[truncated=true; reduce context_lines or compare a narrower extracted region]")
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: diff}},
-	}, DiffOutput{Result: diff}, nil
+	}, DiffOutput{Result: diff, Truncated: truncated}, nil
 }
 
 func Register(server *mcp.Server) {
@@ -126,7 +142,7 @@ func Register(server *mcp.Server) {
 		Description: `Compares two files and outputs a unified diff.
 Encoding-aware: auto-detects file encoding before comparison.
 Lines are compared with their endings normalized; files differing only in line endings or a trailing newline say so explicitly instead of returning an empty diff.
-Max 50,000 lines per file.`,
+Max 50,000 lines per file. Output defaults to 32768 characters and visibly reports truncation.`,
 	}, Handle)
 }
 
