@@ -7,10 +7,13 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"agent-tool/common"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+const maxRawOutputChunkChars = common.HardOutputChars - 1024
 
 type Spec struct {
 	Name     string
@@ -26,12 +29,15 @@ type Manager struct {
 }
 
 type Input struct {
-	Operation string         `json:"operation,omitempty" jsonschema:"Operation: list (default), describe, call, enable, disable, profile. Prefer describe/call because they work even when the MCP client ignores dynamic tool-list changes"`
-	Tools     []string       `json:"tools,omitempty" jsonschema:"Individual tool names to enable or disable"`
-	Groups    []string       `json:"groups,omitempty" jsonschema:"Tool groups to enable or disable: core, file, coding, system, remote, data, analysis, windows"`
-	Profile   string         `json:"profile,omitempty" jsonschema:"Profile for operation=profile: core, coding, remote, analysis, full"`
-	Tool      string         `json:"tool,omitempty" jsonschema:"Single tool name for operation=describe or call"`
-	Arguments map[string]any `json:"arguments,omitempty" jsonschema:"Target tool arguments for operation=call. Use operation=describe first when the schema is unknown"`
+	Operation      string         `json:"operation,omitempty" jsonschema:"Operation: list (default), describe, call, output, enable, disable, profile. Prefer describe/call because they work even when the MCP client ignores dynamic tool-list changes"`
+	Tools          []string       `json:"tools,omitempty" jsonschema:"Individual tool names to enable or disable"`
+	Groups         []string       `json:"groups,omitempty" jsonschema:"Tool groups to enable or disable: core, file, coding, system, remote, data, analysis, windows"`
+	Profile        string         `json:"profile,omitempty" jsonschema:"Profile for operation=profile: core, coding, remote, analysis, full"`
+	Tool           string         `json:"tool,omitempty" jsonschema:"Single tool name for operation=describe or call"`
+	Arguments      map[string]any `json:"arguments,omitempty" jsonschema:"Target tool arguments for operation=call. Use operation=describe first when the schema is unknown"`
+	OutputID       string         `json:"output_id,omitempty" jsonschema:"Preserved raw command output ID for operation=output"`
+	OutputOffset   int            `json:"output_offset,omitempty" jsonschema:"Character offset for operation=output paging. Default: 0"`
+	OutputMaxChars int            `json:"output_max_chars,omitempty" jsonschema:"Maximum raw-output characters returned by operation=output. Default: 32768, Max: 130048"`
 }
 
 type Output struct {
@@ -62,6 +68,7 @@ func (m *Manager) RegisterTool() {
 		Name: "toolbox",
 		Description: `Discover and call any AgentTool capability without loading every tool schema into the model context.
 Use operation=describe with tool=<name> to fetch one tool's instructions and input schema, then operation=call with tool=<name> and arguments={...} to invoke it. This gateway works even when the MCP client ignores tools/list_changed.
+Use operation=output with output_id=<raw_output_id> to retrieve bounded raw command output preserved after diagnostic compaction. Large records report next_offset for paging and expire after 30 minutes.
 Use operation=list to see active and available tools. enable/disable/profile also expose direct tool bindings on clients that refresh dynamically.
 Profiles: core (compact file/search tools), coding, remote, analysis, full.`,
 	}, m.Handle)
@@ -80,6 +87,8 @@ func (m *Manager) Handle(ctx context.Context, req *mcp.CallToolRequest, input In
 		return m.describe(input.Tool)
 	case "call":
 		return m.call(ctx, req, input.Tool, input.Arguments)
+	case "output":
+		return m.output(input.OutputID, input.OutputOffset, input.OutputMaxChars)
 	case "enable":
 		changed, err = m.change(true, input.Tools, input.Groups)
 	case "disable":
@@ -92,7 +101,7 @@ func (m *Manager) Handle(ctx context.Context, req *mcp.CallToolRequest, input In
 		}
 		changed, err = m.change(true, nil, groups)
 	default:
-		err = fmt.Errorf("operation must be list, describe, call, enable, disable, or profile")
+		err = fmt.Errorf("operation must be list, describe, call, output, enable, disable, or profile")
 	}
 	if err != nil {
 		msg := err.Error()
@@ -116,6 +125,45 @@ func (m *Manager) Handle(ctx context.Context, req *mcp.CallToolRequest, input In
 	sb.WriteString("Gateway: use operation=describe with tool=<name>, then operation=call with arguments={...}. This works even if newly enabled direct tools do not appear in the client.\n")
 	result := sb.String()
 	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: result}}}, Output{Result: result, Active: active, Changed: changed}, nil
+}
+
+func (m *Manager) output(id string, offset, maxChars int) (*mcp.CallToolResult, Output, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return gatewayError("output_id is required for operation=output")
+	}
+	if offset < 0 {
+		return gatewayError("output_offset must be non-negative")
+	}
+	if maxChars == 0 {
+		maxChars = common.DefaultOutputChars
+	}
+	if maxChars < 1 || maxChars > maxRawOutputChunkChars {
+		return gatewayError(fmt.Sprintf("output_max_chars must be between 1 and %d", maxRawOutputChunkChars))
+	}
+	record, ok := common.LoadRawOutput(id)
+	if !ok {
+		return gatewayError("raw output not found or expired")
+	}
+	runes := []rune(record.Content)
+	if offset > len(runes) {
+		return gatewayError(fmt.Sprintf("output_offset %d exceeds output length %d", offset, len(runes)))
+	}
+	end := offset + maxChars
+	if end > len(runes) {
+		end = len(runes)
+	}
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Raw command output\noutput_id: %s\nsource: %s\n", record.ID, record.Source))
+	sb.WriteString(fmt.Sprintf("created_at: %s\nexpires_at: %s\n", record.CreatedAt.UTC().Format(time.RFC3339), record.ExpiresAt.UTC().Format(time.RFC3339)))
+	sb.WriteString(fmt.Sprintf("original_bytes: %d\ntruncated: %t\nrange: %d:%d of %d characters\n", record.OriginalBytes, record.Truncated, offset, end, len(runes)))
+	if end < len(runes) {
+		sb.WriteString(fmt.Sprintf("next_offset: %d\n", end))
+	}
+	sb.WriteString("\n")
+	sb.WriteString(string(runes[offset:end]))
+	result := sb.String()
+	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: result}}}, Output{Result: result}, nil
 }
 
 func (m *Manager) describe(name string) (*mcp.CallToolResult, Output, error) {

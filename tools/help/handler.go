@@ -101,12 +101,12 @@ Relative local paths resolve against an explicit workspace, then the client's MC
 - find_tools: Discover installed dev tools (compilers, runtimes, build systems)
 - proclist: List running processes with PID, name, command line, memory (sensitive args masked)
 - prockill: Kill, suspend, or resume processes by PID or port (tree kill, signal selection, zombie handling, dry_run)
-- procexec: Execute commands as new processes (background, suspended start, timeout)
+- procexec: Execute commands as new processes (background, suspended start, timeout, diagnostic compaction)
 - envvar: Read environment variables (sensitive values masked)
 - firewall: Read firewall rules (iptables/nftables/netsh, read-only)
 - ssh: Execute commands on remote servers via SSH (IPv4/IPv6, ProxyJump, session pooling)
 - sftp: Transfer files and manage remote filesystems over SSH (upload, download, ls, stat, mkdir, rm, chmod, rename, async transfers)
-- bash: Persistent shell sessions with working directory and environment variable retention
+- bash: Persistent shell sessions with state retention and raw-retrievable diagnostic compaction
 - webfetch: Fetch web content as text/Markdown with ECH, DoH, proxy, and SSRF protection
 - websearch: Web search via Brave Search or Naver API (requires API key env vars)
 - download: Download files from URLs with ECH, DoH, proxy, and SSRF protection
@@ -393,7 +393,9 @@ Execute a command as a new process. Supports foreground, background, and suspend
 WARNING: Executes arbitrary commands on the host system.
 Use suspended=true to start in suspended state (Windows: CREATE_SUSPENDED, Linux: SIGSTOP).
 Use prockill with signal=cont to resume a suspended process.
-Parameters: command, args, cwd, env, timeout_sec, background, suspended
+Foreground output compacts repeated diagnostics by default. output_view=raw disables it.
+When compacted, retrieve the bounded original for 30 minutes with toolbox operation=output and raw_output_id.
+Parameters: command, args, cwd, env, timeout_sec, background, suspended, max_output_chars, output_view
 
 ## envvar
 Read environment variables. Get a specific one by name, or list all with filter.
@@ -436,7 +438,9 @@ Sessions are pooled (max 5, idle timeout 30 min). Uses sentinel markers for outp
 Platform: bash/sh on Unix, pwsh/git-bash/powershell/cmd on Windows (auto-detected, priority order).
 Use disconnect=true to close a session.
 Output defaults to 32768 bytes and preserves head+tail with explicit truncation metadata.
-Parameters: command, cwd (initial directory for new sessions), session_id (default: "default"), timeout_sec (default 120, max 600), disconnect
+Repeated diagnostics are compacted by default; output_view=raw disables it. When compacted,
+retrieve the bounded original for 30 minutes with toolbox operation=output and raw_output_id.
+Parameters: command, cwd (initial directory for new sessions), session_id (default: "default"), timeout_sec (default 120, max 600), output_view, disconnect
 
 ## webfetch
 Fetch content from a URL and return it as text. HTML pages are automatically converted to Markdown.

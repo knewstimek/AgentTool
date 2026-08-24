@@ -15,6 +15,7 @@ type BashInput struct {
 	Command    string      `json:"command" jsonschema:"Shell command to execute"`
 	Cwd        string      `json:"cwd,omitempty" jsonschema:"Initial working directory (only used when creating a new session)"`
 	SessionID  string      `json:"session_id,omitempty" jsonschema:"Session identifier for persistent shell. Default: default"`
+	OutputView string      `json:"output_view,omitempty" jsonschema:"Command output display: compact (default, folds repeated diagnostics) or raw"`
 	TimeoutSec interface{} `json:"timeout_sec,omitempty" jsonschema:"Command timeout in seconds (default 120, max 600). For a longer-running process, raise this up to 600 or launch it detached with procexec instead of waiting here."`
 	Timeout    interface{} `json:"timeout,omitempty" jsonschema:"Alias for timeout_sec (seconds). Used only when timeout_sec is not set."`
 	Disconnect interface{} `json:"disconnect,omitempty" jsonschema:"Close the shell session: true or false. Default: false"`
@@ -27,6 +28,10 @@ type BashOutput struct {
 	IsNew         bool   `json:"is_new"`
 	Truncated     bool   `json:"truncated"`
 	OriginalBytes int64  `json:"original_bytes,omitempty"`
+	Compacted     bool   `json:"compacted"`
+	OmittedLines  int    `json:"omitted_lines,omitempty"`
+	CompactGroups int    `json:"compact_groups,omitempty"`
+	RawOutputID   string `json:"raw_output_id,omitempty"`
 }
 
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input BashInput) (*mcp.CallToolResult, BashOutput, error) {
@@ -50,6 +55,10 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input BashInput) (*mc
 	// Validate command
 	if strings.TrimSpace(input.Command) == "" {
 		return errorResult("command is required")
+	}
+	outputView, err := common.NormalizeOutputView(input.OutputView)
+	if err != nil {
+		return errorResult(err.Error())
 	}
 
 	// Validate timeout. Accept 'timeout' as an alias when 'timeout_sec' is unset,
@@ -94,13 +103,28 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input BashInput) (*mc
 		return errorResult(fmt.Sprintf("execution failed: %v", err))
 	}
 
+	displayOutput := result.Output
+	compaction := common.OutputCompaction{Text: result.Output}
+	rawOutputID := ""
+	if outputView == "compact" {
+		compaction = common.CompactDiagnosticOutput(result.Output)
+		if compaction.Compacted {
+			displayOutput = compaction.Text
+			rawOutputID = common.PreserveRawOutput("bash", result.Output, result.Truncated, result.OriginalBytes)
+		}
+	}
+
 	out := BashOutput{
 		SessionID:     input.SessionID,
-		Output:        result.Output,
+		Output:        displayOutput,
 		ExitCode:      result.ExitCode,
 		IsNew:         isNew,
 		Truncated:     result.Truncated,
 		OriginalBytes: result.OriginalBytes,
+		Compacted:     compaction.Compacted,
+		OmittedLines:  compaction.OmittedLines,
+		CompactGroups: compaction.Groups,
+		RawOutputID:   rawOutputID,
 	}
 
 	// Format output
@@ -113,15 +137,24 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input BashInput) (*mc
 	}
 	displayCommand, _ := common.TruncateRunes(input.Command, 500, "… [command abbreviated]")
 	sb.WriteString(fmt.Sprintf("$ %s\n", displayCommand))
-	if result.Output != "" {
-		sb.WriteString(result.Output)
-		if !strings.HasSuffix(result.Output, "\n") {
+	if displayOutput != "" {
+		sb.WriteString(displayOutput)
+		if !strings.HasSuffix(displayOutput, "\n") {
 			sb.WriteString("\n")
 		}
 	}
 	sb.WriteString(fmt.Sprintf("[exit code: %d]", result.ExitCode))
 	if result.Truncated {
 		sb.WriteString(fmt.Sprintf("\n[output truncated: original_bytes=%d; retained_bytes=%d; head and tail shown]", result.OriginalBytes, maxOutputSize))
+	}
+	if compaction.Compacted {
+		sb.WriteString(fmt.Sprintf("\n[diagnostics compacted: omitted_lines=%d; groups=%d", compaction.OmittedLines, compaction.Groups))
+		if rawOutputID != "" {
+			sb.WriteString(fmt.Sprintf("; raw_output_id=%s; retrieve with toolbox operation=output", rawOutputID))
+		} else {
+			sb.WriteString("; raw output preservation unavailable")
+		}
+		sb.WriteString("]")
 	}
 	// Warn when chain operators were used in PS 5.1 (auto-transformed to prevent hang).
 	// Uses quote-aware hasChainOps to avoid false warnings on: echo "a && b"
@@ -143,6 +176,7 @@ Sessions maintain working directory, environment variables, and shell state acro
 Use session_id to manage multiple independent shell sessions.
 Set timeout_sec (or its alias timeout) in seconds, default 120, max 600. For a process that runs longer than that, launch it detached with procexec rather than blocking here.
 Output is bounded to 32768 bytes; large output keeps both the head and tail and reports original_bytes/truncated.
+Repeated diagnostic lines are compacted by default without changing exit status. Set output_view=raw to disable compaction. When compaction occurs, use toolbox operation=output with raw_output_id to retrieve the preserved bounded original for 30 minutes.
 Use disconnect=true to close a session.
 Platform: bash/sh on Unix, PowerShell/git-bash/cmd on Windows (auto-detected, best available).`,
 	}, Handle)

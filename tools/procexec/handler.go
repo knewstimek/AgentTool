@@ -40,17 +40,22 @@ type ProcExecInput struct {
 	Background     interface{} `json:"background,omitempty" jsonschema:"Start process in background and return PID immediately: true or false. Default: false"`
 	Suspended      interface{} `json:"suspended,omitempty" jsonschema:"Start process in suspended state. Windows: CREATE_SUSPENDED, Linux: SIGSTOP. Implies background=true: true or false. Default: false"`
 	MaxOutputChars int         `json:"max_output_chars,omitempty" jsonschema:"Maximum combined stdout/stderr bytes retained. Default: 32768, Max: 131072. Head and tail are preserved"`
+	OutputView     string      `json:"output_view,omitempty" jsonschema:"Command output display: compact (default, folds repeated diagnostics) or raw"`
 }
 
 type ProcExecOutput struct {
-	PID         int    `json:"pid"`
-	ExitCode    int    `json:"exit_code,omitempty"`
-	Stdout      string `json:"stdout,omitempty"`
-	Stderr      string `json:"stderr,omitempty"`
-	Status      string `json:"status"`
-	Truncated   bool   `json:"truncated"`
-	StdoutBytes int64  `json:"stdout_bytes,omitempty"`
-	StderrBytes int64  `json:"stderr_bytes,omitempty"`
+	PID           int    `json:"pid"`
+	ExitCode      int    `json:"exit_code,omitempty"`
+	Stdout        string `json:"stdout,omitempty"`
+	Stderr        string `json:"stderr,omitempty"`
+	Status        string `json:"status"`
+	Truncated     bool   `json:"truncated"`
+	StdoutBytes   int64  `json:"stdout_bytes,omitempty"`
+	StderrBytes   int64  `json:"stderr_bytes,omitempty"`
+	Compacted     bool   `json:"compacted"`
+	OmittedLines  int    `json:"omitted_lines,omitempty"`
+	CompactGroups int    `json:"compact_groups,omitempty"`
+	RawOutputID   string `json:"raw_output_id,omitempty"`
 }
 
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input ProcExecInput) (*mcp.CallToolResult, ProcExecOutput, error) {
@@ -79,6 +84,11 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input ProcExecInput) 
 	if input.MaxOutputChars < 1024 || input.MaxOutputChars > common.HardOutputChars {
 		return errorResult(fmt.Sprintf("max_output_chars must be between 1024 and %d", common.HardOutputChars))
 	}
+	outputView, err := common.NormalizeOutputView(input.OutputView)
+	if err != nil {
+		return errorResult(err.Error())
+	}
+	input.OutputView = outputView
 
 	// 3. Validate and resolve cwd
 	if input.Cwd != "" {
@@ -162,12 +172,25 @@ func execForeground(ctx context.Context, input ProcExecInput, timeoutSec int) (*
 	out := ProcExecOutput{
 		PID:         pid,
 		ExitCode:    exitCode,
-		Stdout:      proclist.SanitizeCommandLine(stdoutText),
-		Stderr:      proclist.SanitizeCommandLine(stderrText),
+		Stdout:      proclist.SanitizeOutput(stdoutText),
+		Stderr:      proclist.SanitizeOutput(stderrText),
 		Status:      "completed",
 		Truncated:   stdoutTruncated || stderrTruncated,
 		StdoutBytes: stdoutBytes,
 		StderrBytes: stderrBytes,
+	}
+	if input.OutputView == "compact" {
+		stdoutCompaction := common.CompactDiagnosticOutput(out.Stdout)
+		stderrCompaction := common.CompactDiagnosticOutput(out.Stderr)
+		if stdoutCompaction.Compacted || stderrCompaction.Compacted {
+			raw := formatRawStreams(out.Stdout, out.Stderr)
+			out.RawOutputID = common.PreserveRawOutput("procexec", raw, out.Truncated, stdoutBytes+stderrBytes)
+			out.Stdout = stdoutCompaction.Text
+			out.Stderr = stderrCompaction.Text
+			out.Compacted = true
+			out.OmittedLines = stdoutCompaction.OmittedLines + stderrCompaction.OmittedLines
+			out.CompactGroups = stdoutCompaction.Groups + stderrCompaction.Groups
+		}
 	}
 
 	var sb strings.Builder
@@ -192,6 +215,15 @@ func execForeground(ctx context.Context, input ProcExecInput, timeoutSec int) (*
 	}
 	if out.Truncated {
 		sb.WriteString(fmt.Sprintf("\n[output truncated: stdout_bytes=%d; stderr_bytes=%d; retained_bytes=%d; head and tail shown]\n", out.StdoutBytes, out.StderrBytes, input.MaxOutputChars))
+	}
+	if out.Compacted {
+		sb.WriteString(fmt.Sprintf("\n[diagnostics compacted: omitted_lines=%d; groups=%d", out.OmittedLines, out.CompactGroups))
+		if out.RawOutputID != "" {
+			sb.WriteString(fmt.Sprintf("; raw_output_id=%s; retrieve with toolbox operation=output", out.RawOutputID))
+		} else {
+			sb.WriteString("; raw output preservation unavailable")
+		}
+		sb.WriteString("]\n")
 	}
 
 	result := sb.String()
@@ -260,8 +292,31 @@ func Register(server *mcp.Server) {
 		Description: `Execute a command as a new process. Supports background execution and starting in suspended state.
 WARNING: This tool executes arbitrary commands on the host system. Use with caution.
 Use suspended=true to start a process in suspended state (Windows: CREATE_SUSPENDED, Linux: SIGSTOP).
-Use prockill with signal=cont to resume a suspended process.`,
+Use prockill with signal=cont to resume a suspended process.
+Foreground repeated diagnostics are compacted by default without changing exit status. Set output_view=raw to disable compaction. When compaction occurs, use toolbox operation=output with raw_output_id to retrieve the preserved bounded original for 30 minutes.`,
 	}, Handle)
+}
+
+func formatRawStreams(stdout, stderr string) string {
+	var sb strings.Builder
+	if stdout != "" {
+		sb.WriteString("--- stdout ---\n")
+		sb.WriteString(stdout)
+		if !strings.HasSuffix(stdout, "\n") {
+			sb.WriteString("\n")
+		}
+	}
+	if stderr != "" {
+		if sb.Len() > 0 {
+			sb.WriteString("\n")
+		}
+		sb.WriteString("--- stderr ---\n")
+		sb.WriteString(stderr)
+		if !strings.HasSuffix(stderr, "\n") {
+			sb.WriteString("\n")
+		}
+	}
+	return sb.String()
 }
 
 // mergeEnv merges user-specified env vars with the current environment.

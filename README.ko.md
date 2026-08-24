@@ -62,12 +62,12 @@ Claude Code, Codex CLI, Cursor, Windsurf, Cline, Gemini CLI 및 모든 MCP 호�
 | **FindTools** | 설치된 개발 도구 탐색 — 컴파일러, 런타임, 빌드 시스템 (Go, .NET, Node, Python, Java, Rust, C/C++ 등). PATH, 환경변수, 알려진 경로 탐색 (~/bin, snap, scoop, Homebrew, SDKMAN, nvm, fnm, pyenv) | ✅ |
 | **ProcList** | 프로세스 목록 — PID, 이름, 커맨드라인, 메모리. 민감 인자 자동 마스킹. 이름/포트 필터 | ✅ |
 | **ProcKill** | PID/포트로 프로세스 종료/일시정지/재개. 트리 킬, 시그널 선택(kill/term/hup/int/stop/cont), 좀비 처리(Linux), dry_run | ✅ |
-| **ProcExec** | 명령어를 새 프로세스로 실행. 포그라운드/백그라운드/일시정지 상태 시작 (Windows: CREATE_SUSPENDED, Linux: SIGSTOP). 타임아웃, 환경변수 | ✅ |
+| **ProcExec** | 명령어를 새 프로세스로 실행. 포그라운드/백그라운드/일시정지 상태 시작, 타임아웃·환경변수, 안전한 반복 진단 압축과 만료형 raw 출력 조회 | ✅ |
 | **EnvVar** | 환경변수 조회. 민감 값(비밀번호, 토큰) 자동 마스킹 | ✅ |
 | **Firewall** | 방화벽 규칙 조회 — iptables/nftables/firewalld (Linux), netsh (Windows). 읽기 전용 | ✅ |
 | **SSH** | 기본 32K head+tail 캡처, 원본 바이트 수, 비정상 종료 오류 의미론, 백그라운드 작업(start/status/tail/cancel). 인증 인식 풀링, 호스트 키 검증, ProxyJump, IPv6 | ✅ |
 | **SFTP** | SSH 경유 파일 전송 및 원격 파일시스템 관리. 업로드, 다운로드, ls, stat, mkdir, rm, chmod, rename. 비동기 전송(upload_async/download_async + status/cancel). SSH 세션 풀 재사용. 최대 2GB | ✅ |
-| **Bash** | 영속 셸 세션 — 작업 디렉토리, 환경변수 상태 유지. 세션 풀링 (최대 5개, 유휴 타임아웃 30분). Unix: bash/sh, Windows: PowerShell/git-bash/cmd (자동 감지). PowerShell 세션은 UTF-8 인코딩 + PATH 자동 보강 | ✅ |
+| **Bash** | 영속 셸 세션 — 작업 디렉토리·환경변수 상태 유지, 안전한 반복 진단 압축과 만료형 raw 출력 조회. 세션 풀링 (최대 5개, 유휴 타임아웃 30분). Unix: bash/sh, Windows: PowerShell/git-bash/cmd | ✅ |
 | **WebFetch** | 기본 32K/최대 128K 웹 콘텐츠 텍스트·마크다운 반환. ECH + DoH, HTML→마크다운, SSRF 차단, 프록시 지원 | ✅ |
 | **WebSearch** | Brave Search 또는 Naver API를 통한 웹 검색. API 키 환경변수 필요 (`BRAVE_SEARCH_API_KEY` 또는 `NAVER_CLIENT_ID`/`NAVER_CLIENT_SECRET`). 엔진 자동 선택, Brave 우선 | ✅ |
 | **Download** | URL에서 파일 다운로드. ECH + DoH 기본 활성. SSRF 차단. HTTP/SOCKS5 프록시. 원자적 파일 저장. 최대 2GB | ✅ |
@@ -279,7 +279,9 @@ agent-tool --fallback-encoding EUC-KR
 프로필: `core`(11개 스키마), `coding`, `remote`, `analysis`, `full`.
 실행 중에는 클라이언트와 무관하게 동작하는 `toolbox` gateway를 우선 사용합니다.
 `operation=describe`는 한 도구의 스키마를 반환하고, `operation=call`은 고정된
-toolbox binding을 통해 그 도구를 호출합니다. `enable`, `disable`, `profile`은
+toolbox binding을 통해 그 도구를 호출합니다. 명령 진단이 압축된 경우에는
+`operation=output`과 표시된 ID로 보존된 bounded raw 출력을 30분 동안 조회할 수
+있으며 큰 출력은 `next_offset`으로 이어 읽습니다. `enable`, `disable`, `profile`은
 `tools/list_changed`를 반영하는 클라이언트의 직접 binding 용도로 유지됩니다.
 
 ### 환경변수

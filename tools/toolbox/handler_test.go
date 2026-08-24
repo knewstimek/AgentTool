@@ -100,3 +100,32 @@ func TestGatewayPreservesTargetValidationErrors(t *testing.T) {
 		t.Fatalf("unexpected validation result: %s", text)
 	}
 }
+
+func TestToolboxOutputRetrievesPreservedRawCommandOutput(t *testing.T) {
+	server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "test"}, nil)
+	m := NewManager(server, nil)
+	id := common.PreserveRawOutput("bash", "warning: original\nwarning: original\n", false, 36)
+	if id == "" {
+		t.Fatal("failed to preserve test output")
+	}
+	result, _, err := m.Handle(context.Background(), nil, Input{Operation: "output", OutputID: id})
+	if err != nil || result.IsError {
+		t.Fatalf("output lookup failed: result=%v err=%v", result, err)
+	}
+	text := result.Content[0].(*mcp.TextContent).Text
+	for _, want := range []string{"source: bash", "warning: original\nwarning: original\n"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing %q in %q", want, text)
+		}
+	}
+	paged, _, err := m.Handle(context.Background(), nil, Input{
+		Operation: "output", OutputID: id, OutputMaxChars: 10,
+	})
+	if err != nil || paged.IsError {
+		t.Fatalf("paged output lookup failed: result=%v err=%v", paged, err)
+	}
+	pagedText := paged.Content[0].(*mcp.TextContent).Text
+	if !strings.Contains(pagedText, "next_offset: 10") || !strings.HasSuffix(pagedText, "warning: o") {
+		t.Fatalf("unexpected paged output: %q", pagedText)
+	}
+}

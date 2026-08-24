@@ -62,12 +62,12 @@ Local relative paths resolve against an explicit workspace, then the MCP client 
 | **FindTools** | Discover installed dev tools — compilers, runtimes, build systems (Go, .NET, Node, Python, Java, Rust, C/C++, etc.). Searches PATH, env vars, and known locations (~/bin, snap, scoop, Homebrew, SDKMAN, nvm, fnm, pyenv) | ✅ |
 | **ProcList** | List running processes — PID, name, command line, memory. Sensitive args auto-masked. Filter by name or port | ✅ |
 | **ProcKill** | Kill, suspend, or resume processes by PID or port. Tree kill, signal selection (kill/term/hup/int/stop/cont), zombie handling (Linux), dry_run | ✅ |
-| **ProcExec** | Execute commands as new processes. Foreground/background/suspended start (Windows: CREATE_SUSPENDED, Linux: SIGSTOP). Timeout, env vars | ✅ |
+| **ProcExec** | Execute commands as new processes. Foreground/background/suspended start, timeout/env vars, and safe repeated-diagnostic compaction with expiring raw-output retrieval | ✅ |
 | **EnvVar** | Read environment variables. Sensitive values (passwords, tokens) auto-masked | ✅ |
 | **Firewall** | Read firewall rules — iptables/nftables/firewalld (Linux), netsh (Windows). Read-only | ✅ |
 | **SSH** | SSH execution with 32K head+tail capture, original byte counts, proper non-zero-exit errors, and background jobs (`start/status/tail/cancel`). Auth-aware pooling, host-key verification, ProxyJump, IPv6 | ✅ |
 | **SFTP** | Transfer files and manage remote filesystems over SSH. Upload, download, ls, stat, mkdir, rm, chmod, rename. Reuses SSH session pool. Max 2 GB per transfer | ✅ |
-| **Bash** | Persistent shell sessions with working directory and environment variable retention. Session pooling (max 5, idle timeout 30 min). Unix: bash/sh, Windows: PowerShell/git-bash/cmd (auto-detected, best available). PowerShell sessions include UTF-8 encoding and PATH enhancement | ✅ |
+| **Bash** | Persistent shell sessions with working directory/environment retention, safe repeated-diagnostic compaction, and expiring raw-output retrieval. Session pooling (max 5, idle timeout 30 min). Unix: bash/sh, Windows: PowerShell/git-bash/cmd | ✅ |
 | **WebFetch** | Fetch web content as text/Markdown with a 32K default/128K max. ECH + DoH, HTML→Markdown conversion, SSRF protection, proxy support, Chrome User-Agent | ✅ |
 | **WebSearch** | Web search via Brave Search or Naver API. Requires API key env vars (`BRAVE_SEARCH_API_KEY` or `NAVER_CLIENT_ID`/`NAVER_CLIENT_SECRET`). Auto-selects engine, Brave preferred | ✅ |
 | **Download** | Download files from URLs to disk. ECH + DoH by default. SSRF protection. HTTP/SOCKS5 proxy. Atomic write. Max 2 GB | ✅ |
@@ -281,7 +281,9 @@ agent-tool --fallback-encoding EUC-KR
 Profiles are additive presets: `core` (11 schemas), `coding` (core plus broader
 file/build/shell tools), `remote`, `analysis`, and `full`. At runtime, prefer the
 client-independent `toolbox` gateway: `operation=describe` returns one tool's schema
-and `operation=call` invokes it through the stable toolbox binding. `enable`,
+and `operation=call` invokes it through the stable toolbox binding. When command
+diagnostics are compacted, `operation=output` retrieves the bounded raw output by
+its reported ID for 30 minutes and reports `next_offset` when paging is needed. `enable`,
 `disable`, and `profile` remain available for clients that honor
 `tools/list_changed`; fixed-binding clients can always keep using the gateway.
 
