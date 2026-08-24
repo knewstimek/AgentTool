@@ -31,9 +31,9 @@ type SSHInput struct {
 	TimeoutSecInt int `json:"-"`
 	JumpPortInt   int `json:"-"`
 
-	Host           string      `json:"host" jsonschema:"SSH server hostname or IP address (IPv4 or IPv6),required"`
+	Host           string      `json:"host,omitempty" jsonschema:"SSH server hostname or IP address (IPv4 or IPv6). Required for execute/start/disconnect; omit for status/tail/cancel"`
 	Port           interface{} `json:"port,omitempty" jsonschema:"SSH port number. Default: 22"`
-	User           string      `json:"user" jsonschema:"SSH username,required"`
+	User           string      `json:"user,omitempty" jsonschema:"SSH username. Required for execute/start/disconnect; omit for status/tail/cancel"`
 	Password       string      `json:"password,omitempty" jsonschema:"Password for authentication"`
 	KeyFile        string      `json:"key_file,omitempty" jsonschema:"Path to SSH private key file (e.g. ~/.ssh/id_rsa)"`
 	Passphrase     string      `json:"passphrase,omitempty" jsonschema:"Passphrase for encrypted private key"`

@@ -72,8 +72,9 @@ func helpOverview() string {
 
 agent-tool provides encoding-aware and indentation-aware file tools.
 It auto-detects file encoding and indentation style, preserving them across edits.
-The compact core profile is loaded by default. Use toolbox to list or enable
-additional file, coding, system, remote, data, analysis, and Windows tools.
+The compact core profile is loaded by default. Use toolbox operation=describe to
+load one non-core tool's instructions/schema, then operation=call to invoke it.
+This gateway works even when a client ignores dynamic tool-list changes.
 Relative local paths resolve against an explicit workspace, then the client's MCP root.
 
 ## Current Configuration
@@ -128,11 +129,11 @@ Relative local paths resolve against an explicit workspace, then the client's MC
 - analyze: Static binary analysis (21 operations: disassemble, PE/ELF/Mach-O parsing, imphash, Rich header, resources, DWARF, strings, hexdump, pattern search, entropy, overlay, binary diff, xref, function_at, call_graph, follow_ptr, rtti_dump, struct_layout, vtable_scan)
 - set_config: Change runtime settings (encoding, file size, SSRF policy, DoH/ECH toggle)
 - agent_tool_help: This help tool
-- toolbox: List, enable, or disable tool groups without loading every schema up front
+- toolbox: Describe/call any tool through one stable gateway; optionally manage direct bindings
 
 ## Quick Tips
 - Use 'agent_tool_help' with topic='encoding' for encoding setup guide
-- Use toolbox(operation='enable', groups=['remote']) before an SSH/network task
+- Use toolbox(operation='describe', tool='ssh'), then toolbox(operation='call', tool='ssh', arguments={...}) for an SSH task
 - Use 'agent_tool_help' with topic='troubleshooting' for common issues`
 }
 

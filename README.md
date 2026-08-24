@@ -28,8 +28,11 @@ Claude Code, Codex CLI, Cursor, Windsurf, Cline, Gemini CLI, and any MCP-compati
 
 The default `core` profile exposes only 11 schemas (including `toolbox`) instead of
 all 54. In a protocol-level measurement this reduced the serialized tool list from
-about 83 KB (`full`) to 17 KB. Call `toolbox` to list or enable a group only when a
-task needs it, or start with `--profile coding|remote|analysis|full`.
+about 84 KB (`full`) to 18 KB. Use `toolbox(operation="describe", tool="ssh")` to
+load one tool's instructions/schema, then invoke it through
+`toolbox(operation="call", tool="ssh", arguments={...})`. The gateway does not
+depend on dynamic tool-list refresh, so it works with fixed-binding clients such as
+Codex. You can also start with `--profile coding|remote|analysis|full`.
 
 Potentially large text responses default to 32K characters with a 128K hard ceiling.
 Truncation is always visible and pageable tools return `next_offset` or `next_cursor`.
@@ -130,7 +133,7 @@ and nothing the client can observe changes.
 1. Download the binary for your OS from [Releases](https://github.com/knewstimek/agent-tool/releases/latest)
 2. Run `agent-tool install` (or `agent-tool install claude` for a specific agent)
 3. Restart your IDE / agent
-4. Done — the compact core tools are available immediately; `toolbox` activates other groups on demand
+4. Done — the compact core tools are available immediately; `toolbox` describes and calls every other tool on demand
 
 Or just ask your AI agent to do it for you:
 > "Download agent-tool from https://github.com/knewstimek/agent-tool/releases/latest and run `agent-tool install`"
@@ -241,6 +244,10 @@ agent-tool uninstall claude   # from specific agent
 
 Approval level is independent of schema profile: installation may approve the full
 namespace while the server still starts with the token-efficient `core` profile.
+`toolbox` is intentionally not auto-approved by `--safe-approve`, because its
+`operation=call` gateway can invoke network, shell, database, and process-control
+tools. Safe-mode users should review each toolbox approval and avoid granting it a
+permanent allow rule unless they intend to trust the full AgentTool namespace.
 
 ### Manual setup
 
@@ -272,8 +279,11 @@ agent-tool --fallback-encoding EUC-KR
 ```
 
 Profiles are additive presets: `core` (11 schemas), `coding` (core plus broader
-file/build/shell tools), `remote`, `analysis`, and `full`. At runtime, use
-`toolbox` with `operation=enable`, `groups=["remote"]` or individual `tools`.
+file/build/shell tools), `remote`, `analysis`, and `full`. At runtime, prefer the
+client-independent `toolbox` gateway: `operation=describe` returns one tool's schema
+and `operation=call` invokes it through the stable toolbox binding. `enable`,
+`disable`, and `profile` remain available for clients that honor
+`tools/list_changed`; fixed-binding clients can always keep using the gateway.
 
 ### Environment Variable
 

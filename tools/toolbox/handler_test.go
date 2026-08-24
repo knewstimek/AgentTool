@@ -1,8 +1,11 @@
 package toolbox
 
 import (
+	"context"
+	"strings"
 	"testing"
 
+	"agent-tool/common"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -33,5 +36,67 @@ func TestManagerEnablesOnlyRequestedGroup(t *testing.T) {
 	}
 	if err := m.EnableProfile("core"); err != nil || registered["read"] != 1 {
 		t.Fatalf("duplicate enable = %#v, %v", registered, err)
+	}
+}
+
+type gatewayEchoInput struct {
+	Message string `json:"message" jsonschema:"Message to echo,required"`
+}
+
+type gatewayEchoOutput struct {
+	Message string `json:"message"`
+}
+
+func TestGatewayDescribesAndCallsToolWithoutClientRefresh(t *testing.T) {
+	server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "test"}, nil)
+	m := NewManager(server, []Spec{{
+		Name: "echo", Group: "remote", Register: func() {
+			common.SafeAddTool(server, &mcp.Tool{Name: "echo", Description: "Echo a message."},
+				func(_ context.Context, _ *mcp.CallToolRequest, input gatewayEchoInput) (*mcp.CallToolResult, gatewayEchoOutput, error) {
+					text := "echo: " + input.Message
+					return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}}, gatewayEchoOutput{Message: text}, nil
+				})
+		},
+	}})
+
+	describeResult, _, err := m.Handle(context.Background(), nil, Input{Operation: "describe", Tool: "echo"})
+	if err != nil || describeResult.IsError {
+		t.Fatalf("describe failed: result=%v err=%v", describeResult, err)
+	}
+	description := describeResult.Content[0].(*mcp.TextContent).Text
+	if !strings.Contains(description, `"message"`) || !strings.Contains(description, "operation=call") {
+		t.Fatalf("describe omitted schema or gateway guidance: %s", description)
+	}
+
+	req := &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "toolbox"}}
+	callResult, _, err := m.Handle(context.Background(), req, Input{
+		Operation: "call", Tool: "echo", Arguments: map[string]any{"message": "hello"},
+	})
+	if err != nil || callResult.IsError {
+		t.Fatalf("gateway call failed: result=%v err=%v", callResult, err)
+	}
+	if got := callResult.Content[0].(*mcp.TextContent).Text; got != "echo: hello" {
+		t.Fatalf("gateway result = %q", got)
+	}
+}
+
+func TestGatewayPreservesTargetValidationErrors(t *testing.T) {
+	server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "test"}, nil)
+	m := NewManager(server, []Spec{{
+		Name: "echo", Group: "remote", Register: func() {
+			common.SafeAddTool(server, &mcp.Tool{Name: "echo"},
+				func(_ context.Context, _ *mcp.CallToolRequest, input gatewayEchoInput) (*mcp.CallToolResult, gatewayEchoOutput, error) {
+					return nil, gatewayEchoOutput{}, nil
+				})
+		},
+	}})
+	req := &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "toolbox"}}
+	result, _, err := m.Handle(context.Background(), req, Input{Operation: "call", Tool: "echo"})
+	if err != nil || !result.IsError {
+		t.Fatalf("expected target validation tool error: result=%v err=%v", result, err)
+	}
+	text := result.Content[0].(*mcp.TextContent).Text
+	if !strings.Contains(text, "validation error") || !strings.Contains(text, "message") {
+		t.Fatalf("unexpected validation result: %s", text)
 	}
 }

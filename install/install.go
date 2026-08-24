@@ -444,6 +444,7 @@ var safePermissionEntries = []string{
 	"mcp__agent-tool__agent_tool_help",
 	"mcp__agent-tool__analyze",
 	"mcp__agent-tool__codegraph",
+	// toolbox excluded from safe: operation=call can proxy every unsafe tool
 }
 
 // addClaudePermission adds agent-tool entries to ~/.claude/settings.json

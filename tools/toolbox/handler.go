@@ -2,6 +2,7 @@ package toolbox
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -25,10 +26,12 @@ type Manager struct {
 }
 
 type Input struct {
-	Operation string   `json:"operation,omitempty" jsonschema:"Operation: list (default), enable, disable, profile"`
-	Tools     []string `json:"tools,omitempty" jsonschema:"Individual tool names to enable or disable"`
-	Groups    []string `json:"groups,omitempty" jsonschema:"Tool groups to enable or disable: core, file, coding, system, remote, data, analysis, windows"`
-	Profile   string   `json:"profile,omitempty" jsonschema:"Profile for operation=profile: core, coding, remote, analysis, full"`
+	Operation string         `json:"operation,omitempty" jsonschema:"Operation: list (default), describe, call, enable, disable, profile. Prefer describe/call because they work even when the MCP client ignores dynamic tool-list changes"`
+	Tools     []string       `json:"tools,omitempty" jsonschema:"Individual tool names to enable or disable"`
+	Groups    []string       `json:"groups,omitempty" jsonschema:"Tool groups to enable or disable: core, file, coding, system, remote, data, analysis, windows"`
+	Profile   string         `json:"profile,omitempty" jsonschema:"Profile for operation=profile: core, coding, remote, analysis, full"`
+	Tool      string         `json:"tool,omitempty" jsonschema:"Single tool name for operation=describe or call"`
+	Arguments map[string]any `json:"arguments,omitempty" jsonschema:"Target tool arguments for operation=call. Use operation=describe first when the schema is unknown"`
 }
 
 type Output struct {
@@ -57,8 +60,9 @@ func (m *Manager) EnableProfile(profile string) error {
 func (m *Manager) RegisterTool() {
 	common.SafeAddTool(m.server, &mcp.Tool{
 		Name: "toolbox",
-		Description: `Discover and dynamically enable AgentTool capabilities without loading every tool schema into the model context.
-Use operation=list to see active and available tools. Enable only the group or tool needed for the current task.
+		Description: `Discover and call any AgentTool capability without loading every tool schema into the model context.
+Use operation=describe with tool=<name> to fetch one tool's instructions and input schema, then operation=call with tool=<name> and arguments={...} to invoke it. This gateway works even when the MCP client ignores tools/list_changed.
+Use operation=list to see active and available tools. enable/disable/profile also expose direct tool bindings on clients that refresh dynamically.
 Profiles: core (compact file/search tools), coding, remote, analysis, full.`,
 	}, m.Handle)
 }
@@ -72,6 +76,10 @@ func (m *Manager) Handle(ctx context.Context, req *mcp.CallToolRequest, input In
 	var err error
 	switch op {
 	case "list":
+	case "describe":
+		return m.describe(input.Tool)
+	case "call":
+		return m.call(ctx, req, input.Tool, input.Arguments)
 	case "enable":
 		changed, err = m.change(true, input.Tools, input.Groups)
 	case "disable":
@@ -84,7 +92,7 @@ func (m *Manager) Handle(ctx context.Context, req *mcp.CallToolRequest, input In
 		}
 		changed, err = m.change(true, nil, groups)
 	default:
-		err = fmt.Errorf("operation must be list, enable, disable, or profile")
+		err = fmt.Errorf("operation must be list, describe, call, enable, disable, or profile")
 	}
 	if err != nil {
 		msg := err.Error()
@@ -105,8 +113,75 @@ func (m *Manager) Handle(ctx context.Context, req *mcp.CallToolRequest, input In
 	for _, group := range groups {
 		sb.WriteString(fmt.Sprintf("- %s: %s\n", group, strings.Join(available[group], ", ")))
 	}
+	sb.WriteString("Gateway: use operation=describe with tool=<name>, then operation=call with arguments={...}. This works even if newly enabled direct tools do not appear in the client.\n")
 	result := sb.String()
 	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: result}}}, Output{Result: result, Active: active, Changed: changed}, nil
+}
+
+func (m *Manager) describe(name string) (*mcp.CallToolResult, Output, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return gatewayError("tool is required for operation=describe")
+	}
+	changed, err := m.change(true, []string{name}, nil)
+	if err != nil {
+		return gatewayError(err.Error())
+	}
+	registration, ok := common.RegisteredSafeTool(m.server, name)
+	if !ok {
+		return gatewayError(fmt.Sprintf("tool %q registered without a SafeAddTool gateway handler", name))
+	}
+	schema, err := json.Marshal(registration.Tool.InputSchema)
+	if err != nil {
+		return gatewayError(fmt.Sprintf("cannot encode schema for %q: %v", name, err))
+	}
+	spec := m.specs[name]
+	result := fmt.Sprintf("Tool: %s\nGroup: %s\nDescription:\n%s\nInput schema (JSON):\n%s\nCall through toolbox: operation=call, tool=%s, arguments={...}\n",
+		name, spec.Group, registration.Tool.Description, schema, name)
+	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: result}}}, Output{
+		Result: result, Changed: changed,
+	}, nil
+}
+
+func (m *Manager) call(ctx context.Context, req *mcp.CallToolRequest, name string, arguments map[string]any) (*mcp.CallToolResult, Output, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return gatewayError("tool is required for operation=call")
+	}
+	if req == nil || req.Params == nil {
+		return gatewayError("toolbox call requires an MCP tool request context")
+	}
+	if _, err := m.change(true, []string{name}, nil); err != nil {
+		return gatewayError(err.Error())
+	}
+	registration, ok := common.RegisteredSafeTool(m.server, name)
+	if !ok {
+		return gatewayError(fmt.Sprintf("tool %q registered without a SafeAddTool gateway handler", name))
+	}
+	if arguments == nil {
+		arguments = make(map[string]any)
+	}
+	rawArguments, err := json.Marshal(arguments)
+	if err != nil {
+		return gatewayError(fmt.Sprintf("cannot encode arguments for %q: %v", name, err))
+	}
+	forwarded := *req
+	params := *req.Params
+	params.Name = name
+	params.Arguments = rawArguments
+	forwarded.Params = &params
+	result, err := registration.Handler(ctx, &forwarded)
+	if err != nil {
+		return gatewayError(fmt.Sprintf("%s gateway call failed: %v", name, err))
+	}
+	return result, Output{Result: fmt.Sprintf("called %s through toolbox", name)}, nil
+}
+
+func gatewayError(message string) (*mcp.CallToolResult, Output, error) {
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{&mcp.TextContent{Text: message}},
+		IsError: true,
+	}, Output{Result: message}, nil
 }
 
 func (m *Manager) change(enable bool, names, groups []string) ([]string, error) {

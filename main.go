@@ -174,7 +174,7 @@ File tools (read, edit, multiedit, write, grep, glob, listdir, multiread, backup
 
 Use multiread to read multiple files in a single call. Use help with a topic for detailed usage and parameter docs.
 
-The compact core profile is loaded by default. Use toolbox to enable only the file, coding, system, remote, data, analysis, or Windows group needed for the task. Large text results are bounded and report explicit continuation metadata; relative local paths use MCP roots when available.
+The compact core profile is loaded by default. For a non-core capability, use toolbox operation=describe with its tool name, then toolbox operation=call with the target arguments. This stable gateway works even when the client ignores tools/list_changed. enable/disable/profile remain optional direct-binding controls. Large text results are bounded and report explicit continuation metadata; relative local paths use MCP roots when available.
 
 Toolbox groups: core (essential edit/read/search) | file (file management/config/query helpers) | coding (shell/process/archive/source helpers) | system (OS/process/IPC tools) | remote (SSH/SFTP/HTTP/network tools) | data (JSON/YAML/TOML/MySQL/Redis) | analysis (binary/debug/codegraph/memory tools) | windows (GUI/screenshot/clipboard tools).`,
 		},

@@ -14,7 +14,7 @@ AI 코딩 에이전트(Claude Code, Cursor, Codex 등)의 내장 도구에는 �
 
 - **탭 들여쓰기 깨짐**: LLM은 공백을 출력하지만, 프로젝트는 탭을 사용. 내장 Edit는 공백을 그대로 써서 들여쓰기 스타일이 망가짐.
 - **인코딩 손상**: EUC-KR, Shift-JIS, GB18030 파일을 편집하면 조용히 UTF-8로 변환되어 레거시 프로젝트가 깨짐.
-- **도구가 너무 분산됨**: Redis CLI, MySQL/SSH 클라이언트를 따로 찾고 설정하는 과정은 번거롭고 오류가 잦음. agent-tool은 54개 도구를 한 바이너리로 통합하고 compact 프로필에서 필요할 때 활성화함.
+- **도구가 너무 분산됨**: Redis CLI, MySQL/SSH 클라이언트를 따로 찾고 설정하는 과정은 번거롭고 오류가 잦음. agent-tool은 54개 도구를 한 바이너리로 통합하고 compact 프로필과 고정 toolbox gateway로 필요할 때 호출함.
 - **리버스 엔지니어링 지원 부재**: 내장 도구로는 바이너리 디스어셈블, PE/ELF 헤더 분석, 함수 경계 탐지, 크로스 레퍼런스 검색이 불가능. agent-tool은 정적 바이너리 분석(디스어셈블리, xref, 함수 탐지), DAP 디버거, CheatEngine 스타일 메모리 도구를 포함 -- 에이전트에게 완전한 리버스 엔지니어링 능력을 부여.
 - **네트워크 검열**: 일부 국가에서 정부 수준의 웹 필터링으로 `curl`/`wget` 요청이 차단됨. agent-tool은 ECH (Encrypted Client Hello)와 DoH (DNS over HTTPS)를 기본 활성화하여 이런 제한을 우회.
 
@@ -27,8 +27,11 @@ Claude Code, Codex CLI, Cursor, Windsurf, Cline, Gemini CLI 및 모든 MCP 호�
 ## LLM 친화적 기본 동작
 
 기본 `core` 프로필은 54개 전체 스키마 대신 `toolbox`를 포함한 11개만 노출합니다.
-실제 MCP 프로토콜 측정에서 직렬화된 도구 목록은 `full` 약 83KB에서 약 17KB로
-줄었습니다. 필요할 때 `toolbox`로 그룹/개별 도구만 활성화하거나
+실제 MCP 프로토콜 측정에서 직렬화된 도구 목록은 `full` 약 84KB에서 약 18KB로
+줄었습니다. `toolbox(operation="describe", tool="ssh")`로 한 도구의 설명과
+스키마만 확인한 뒤 `toolbox(operation="call", tool="ssh", arguments={...})`로
+호출할 수 있습니다. 이 gateway는 동적 도구 목록 갱신에 의존하지 않아 Codex 같은
+고정 binding 클라이언트에서도 동작합니다. 또는
 `--profile coding|remote|analysis|full`로 시작할 수 있습니다.
 
 대용량 텍스트 결과는 기본 32K자, 절대 상한 128K이며 잘림을 숨기지 않습니다.
@@ -128,7 +131,7 @@ UTF-8로 강제 변환하지 않고, 원본 파일 인코딩을 유지합니다.
 1. [Releases](https://github.com/knewstimek/agent-tool/releases/latest)에서 OS에 맞는 바이너리 다운로드
 2. `agent-tool install` 실행 (또는 `agent-tool install claude` 등 특정 에이전트)
 3. IDE / 에이전트 재시작
-4. 끝 — 모든 도구가 권한 팝업 없이 바로 사용 가능
+4. 끝 — core 도구는 즉시 사용하고 나머지는 `toolbox` gateway로 필요할 때 호출 가능
 
 또는 AI 에이전트에게 시키세요:
 > "https://github.com/knewstimek/agent-tool/releases/latest 에서 agent-tool을 다운받고 `agent-tool install` 실행해줘"
@@ -239,6 +242,10 @@ agent-tool uninstall claude   # 특정 에이전트에서만 제거
 
 승인 수준과 스키마 프로필은 별개입니다. 전체 네임스페이스를 승인해도 서버는
 토큰 효율적인 `core` 프로필로 시작할 수 있습니다.
+`toolbox`의 `operation=call`은 네트워크·셸·DB·프로세스 제어 도구도 호출할 수
+있으므로 `--safe-approve` 자동 승인 대상에서 의도적으로 제외됩니다. Safe 모드에서는
+toolbox 승인을 매번 검토하고, 전체 AgentTool 네임스페이스를 신뢰하려는 경우가 아니면
+영구 허용하지 마세요.
 
 ### 수동 설정
 
@@ -270,8 +277,10 @@ agent-tool --fallback-encoding EUC-KR
 ```
 
 프로필: `core`(11개 스키마), `coding`, `remote`, `analysis`, `full`.
-실행 중에는 `toolbox`의 `operation=enable`, `groups=["remote"]` 또는 개별
-`tools`로 필요한 기능만 추가할 수 있습니다.
+실행 중에는 클라이언트와 무관하게 동작하는 `toolbox` gateway를 우선 사용합니다.
+`operation=describe`는 한 도구의 스키마를 반환하고, `operation=call`은 고정된
+toolbox binding을 통해 그 도구를 호출합니다. `enable`, `disable`, `profile`은
+`tools/list_changed`를 반영하는 클라이언트의 직접 binding 용도로 유지됩니다.
 
 ### 환경변수
 

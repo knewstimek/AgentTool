@@ -9,10 +9,49 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+// SafeToolRegistration lets stable gateway tools reuse the exact handler that
+// was registered with the MCP server. This is necessary for clients that keep
+// a fixed model-side tool binding even after tools/list_changed: the gateway
+// can still reach the handler without bypassing validation, coercion, panic
+// recovery, or the global output cap.
+type SafeToolRegistration struct {
+	Tool    *mcp.Tool
+	Handler mcp.ToolHandler
+}
+
+type serverSafeToolRegistry struct {
+	sync.RWMutex
+	tools map[string]SafeToolRegistration
+}
+
+var safeToolRegistries sync.Map // map[*mcp.Server]*serverSafeToolRegistry
+
+func rememberSafeTool(server *mcp.Server, tool *mcp.Tool, handler mcp.ToolHandler) {
+	value, _ := safeToolRegistries.LoadOrStore(server, &serverSafeToolRegistry{tools: make(map[string]SafeToolRegistration)})
+	registry := value.(*serverSafeToolRegistry)
+	registry.Lock()
+	registry.tools[tool.Name] = SafeToolRegistration{Tool: tool, Handler: handler}
+	registry.Unlock()
+}
+
+// RegisteredSafeTool returns a tool and its fully wrapped raw handler.
+func RegisteredSafeTool(server *mcp.Server, name string) (SafeToolRegistration, bool) {
+	value, ok := safeToolRegistries.Load(server)
+	if !ok {
+		return SafeToolRegistration{}, false
+	}
+	registry := value.(*serverSafeToolRegistry)
+	registry.RLock()
+	defer registry.RUnlock()
+	registration, ok := registry.tools[name]
+	return registration, ok
+}
 
 // SafeAddTool registers a typed tool handler with:
 //   - panic recovery (prevents server crash)
@@ -129,6 +168,7 @@ func SafeAddTool[In, Out any](s *mcp.Server, t *mcp.Tool, h mcp.ToolHandlerFor[I
 	}
 
 	s.AddTool(t, rawHandler)
+	rememberSafeTool(s, t, rawHandler)
 }
 
 // annotateFlexibleScalarTypes gives top-level interface{} fields the type the
