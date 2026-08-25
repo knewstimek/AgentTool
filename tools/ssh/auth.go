@@ -1,6 +1,9 @@
 package ssh
 
 import (
+	"bytes"
+	"crypto/x509"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -58,26 +61,58 @@ func buildAuthMethods(input SSHInput) (*authResult, error) {
 	return result, nil
 }
 
-// parseKey parses a private key, trying PEM format first, then PPK (PuTTY) format.
-// PPK fallback allows users to use PuTTY-generated keys directly without conversion.
+// parseKey parses an OpenSSH/PEM or PPK (PuTTY) private key. Keep the error
+// from the parser that recognized the input: replacing it with the PPK
+// fallback error hides actionable failures such as a missing passphrase.
 func parseKey(keyBytes []byte, passphrase string) (gossh.Signer, error) {
-	// Try PEM format first (most common: OpenSSH, ssh-keygen output)
+	// A UTF-8 BOM is not part of the PEM armor, but Windows editors commonly add
+	// one to otherwise valid text files. Removing it does not alter key data.
+	keyBytes = bytes.TrimPrefix(keyBytes, []byte{0xef, 0xbb, 0xbf})
+
+	if len(bytes.TrimSpace(keyBytes)) == 0 {
+		return nil, errors.New("private key file is empty")
+	}
+	if bytes.HasPrefix(keyBytes, []byte{0xff, 0xfe}) || bytes.HasPrefix(keyBytes, []byte{0xfe, 0xff}) {
+		return nil, errors.New("private key file is UTF-16 encoded; save it as UTF-8 or ASCII")
+	}
+	if !bytes.Contains(keyBytes, []byte{'\n'}) && bytes.Contains(keyBytes, []byte(`\n`)) {
+		return nil, errors.New(`private key contains escaped \n text instead of line breaks`)
+	}
+	if !bytes.Contains(keyBytes, []byte{'\n'}) && bytes.Contains(keyBytes, []byte{'\r'}) {
+		return nil, errors.New("private key uses bare-CR line endings; save it with LF or CRLF line endings")
+	}
+	publicKey, _, _, _, publicKeyErr := gossh.ParseAuthorizedKey(keyBytes)
+	if (publicKeyErr == nil && publicKey != nil) ||
+		bytes.Contains(keyBytes, []byte("-----BEGIN PUBLIC KEY-----")) ||
+		bytes.Contains(keyBytes, []byte("-----BEGIN SSH2 PUBLIC KEY-----")) {
+		return nil, errors.New("key_file contains an SSH public key; provide the matching private key file (usually the path without .pub)")
+	}
+
+	// ssh.ParsePrivateKey supports PEM-armored OpenSSH keys, including Ed25519.
+	// If a stale profile passphrase is supplied for a plaintext key, accept the
+	// key after verifying that it parses without a passphrase.
+	var pemErr error
 	if passphrase != "" {
-		signer, err := gossh.ParsePrivateKeyWithPassphrase(keyBytes, []byte(passphrase))
-		if err == nil {
+		var signer gossh.Signer
+		signer, pemErr = gossh.ParsePrivateKeyWithPassphrase(keyBytes, []byte(passphrase))
+		if pemErr == nil {
+			return signer, nil
+		}
+		if signer, err := gossh.ParsePrivateKey(keyBytes); err == nil {
 			return signer, nil
 		}
 	} else {
-		signer, err := gossh.ParsePrivateKey(keyBytes)
-		if err == nil {
+		var signer gossh.Signer
+		signer, pemErr = gossh.ParsePrivateKey(keyBytes)
+		if pemErr == nil {
 			return signer, nil
 		}
 	}
 
 	// Fallback: try PPK (PuTTY) format
-	ppkKey, err := putty.New(keyBytes)
-	if err != nil {
-		return nil, fmt.Errorf("key is neither valid PEM nor PPK format: %w", err)
+	ppkKey, ppkErr := putty.New(keyBytes)
+	if ppkErr != nil {
+		return nil, privateKeyParseError(keyBytes, passphrase, pemErr, ppkErr)
 	}
 
 	// Check if the key is encrypted but no passphrase was provided
@@ -101,4 +136,21 @@ func parseKey(keyBytes []byte, passphrase string) (gossh.Signer, error) {
 		return nil, fmt.Errorf("failed to create SSH signer from PPK key: %w", err)
 	}
 	return signer, nil
+}
+
+func privateKeyParseError(keyBytes []byte, passphrase string, pemErr, ppkErr error) error {
+	var missingPassphrase *gossh.PassphraseMissingError
+	if errors.As(pemErr, &missingPassphrase) {
+		return errors.New("OpenSSH/PEM private key is encrypted; passphrase is required")
+	}
+	if passphrase != "" && errors.Is(pemErr, x509.IncorrectPasswordError) {
+		return errors.New("failed to decrypt OpenSSH/PEM private key: incorrect passphrase")
+	}
+	if bytes.Contains(keyBytes, []byte("-----BEGIN OPENSSH PRIVATE KEY-----")) {
+		return fmt.Errorf("failed to parse OpenSSH private key: %w", pemErr)
+	}
+	if bytes.Contains(keyBytes, []byte("-----BEGIN ")) && bytes.Contains(keyBytes, []byte("PRIVATE KEY-----")) {
+		return fmt.Errorf("failed to parse PEM private key: %w", pemErr)
+	}
+	return fmt.Errorf("unsupported or malformed private key (OpenSSH/PEM: %v; PPK: %v)", pemErr, ppkErr)
 }
