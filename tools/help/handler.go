@@ -74,6 +74,8 @@ agent-tool provides encoding-aware and indentation-aware file tools.
 It auto-detects file encoding and indentation style, preserving them across edits.
 The compact core profile is loaded by default. Use toolbox operation=describe to
 load one non-core tool's instructions/schema, then operation=call to invoke it.
+compact=true with tool_operation limits describe to one operation; reuse its
+schema_handle to receive only an unchanged acknowledgement.
 This gateway works even when a client ignores dynamic tool-list changes.
 Relative local paths resolve against an explicit workspace, then the client's MCP root.
 
@@ -417,20 +419,26 @@ ProxyJump: use jump_host to connect through a bastion (e.g. reach IPv6-only serv
 Foreground output defaults to 32768 bytes with original byte counts. output_mode
 selects head_tail (default), head, or tail retention.
 Non-zero remote exits return IsError=true. For long commands, use background=true or
-operation=start, then operation=status/tail/cancel with job_id (tail_lines defaults to 50).
-Parameters: operation, background, job_id, tail_lines, host, port, user, password,
-key_file, passphrase, use_agent, command, disconnect, host_key_check, timeout_sec,
-max_output_chars, output_mode, jump_host, jump_port, jump_user, jump_password, jump_key_file, jump_passphrase
+	operation=start, then operation=status/tail/cancel with job_id (tail_lines defaults to 50).
+	connection_profile reads a named local ignored profile; connection_id reuses its
+	connection fields for 30 minutes. quiet suppresses banners, echo_command controls
+	command echoing, and result_only returns stdout/stderr/exit_code JSON.
+	Parameters: operation, background, job_id, tail_lines, host, port, user, password,
+	key_file, passphrase, use_agent, command, disconnect, host_key_check, timeout_sec,
+	max_output_chars, output_mode, jump_host, jump_port, jump_user, jump_password,
+	jump_key_file, jump_passphrase, connection_profile, connection_id, quiet, echo_command, result_only
 
 ## sftp
 Transfer files and manage remote filesystems over SSH (SFTP protocol).
 Reuses SSH session pool — same authentication, session reuse, and idle timeout (30 min) as ssh tool.
-Sync operations: upload (local→remote), download (remote→local), ls, stat, mkdir, rm, chmod, rename.
+	Sync operations: upload (local→remote), upload_many (up to 100 files over one session),
+	download (remote→local), ls, stat, mkdir, rm, chmod, rename.
 Async operations: upload_async, download_async (returns transfer_id), status (check progress), cancel.
 Max transfer size: 2 GB. Recursive delete limited to 10,000 items. Dangerous paths (/, /home, /etc, etc.) protected.
 Parameters: host, port, user, password, key_file, passphrase, use_agent, host_key_check,
   jump_host, jump_port, jump_user, jump_password, jump_key_file, jump_passphrase,
-  operation, local_path, remote_path, recursive, mode, new_path, overwrite, transfer_id
+	  operation, local_path, remote_path, uploads, recursive, mode, new_path, overwrite,
+	  transfer_id, connection_profile, connection_id, quiet, result_only
 
 ## bash
 Persistent shell sessions that maintain working directory, environment variables, and state across calls.

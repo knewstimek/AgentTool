@@ -14,6 +14,8 @@ import (
 	"github.com/pkg/sftp"
 )
 
+const maxUploadManyItems = 100
+
 // opUpload transfers a local file to the remote server.
 func opUpload(client *sftp.Client, input SFTPInput) (string, error) {
 	if err := validateLocalPath(input.LocalPath); err != nil {
@@ -65,6 +67,31 @@ func opUpload(client *sftp.Client, input SFTPInput) (string, error) {
 	}
 
 	return fmt.Sprintf("Uploaded %s -> %s (%s)", input.LocalPath, input.RemotePath, formatSize(written)), nil
+}
+
+// opUploadMany transfers several files over one SFTP/SSH session. Completed
+// uploads are intentionally not rolled back if a later item fails.
+func opUploadMany(client *sftp.Client, input SFTPInput) (string, int, error) {
+	if len(input.Uploads) == 0 || len(input.Uploads) > maxUploadManyItems {
+		return "", 0, fmt.Errorf("uploads must contain between 1 and %d items", maxUploadManyItems)
+	}
+	results := make([]string, 0, len(input.Uploads))
+	for i, item := range input.Uploads {
+		overwrite := input.Overwrite
+		if item.Overwrite != nil {
+			overwrite = *item.Overwrite
+		}
+		itemInput := input
+		itemInput.LocalPath = item.LocalPath
+		itemInput.RemotePath = item.RemotePath
+		itemInput.Overwrite = overwrite
+		result, err := opUpload(client, itemInput)
+		if err != nil {
+			return strings.Join(results, "\n"), len(results), fmt.Errorf("uploads[%d] failed after %d successful upload(s): %w", i, len(results), err)
+		}
+		results = append(results, result)
+	}
+	return fmt.Sprintf("Uploaded %d file(s)\n%s", len(results), strings.Join(results, "\n")), len(results), nil
 }
 
 // opDownload transfers a remote file to the local machine.

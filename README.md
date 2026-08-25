@@ -28,11 +28,14 @@ Claude Code, Codex CLI, Cursor, Windsurf, Cline, Gemini CLI, and any MCP-compati
 
 The default `core` profile exposes only 11 schemas (including `toolbox`) instead of
 all 54. In a protocol-level measurement this reduced the serialized tool list from
-about 84 KB (`full`) to 18 KB. Use `toolbox(operation="describe", tool="ssh")` to
-load one tool's instructions/schema, then invoke it through
+about 84 KB (`full`) to 18 KB. Use
+`toolbox(operation="describe", tool="ssh", compact=true, tool_operation="execute")`
+to load only one operation's fields and required list, then invoke it through
 `toolbox(operation="call", tool="ssh", arguments={...})`. The gateway does not
 depend on dynamic tool-list refresh, so it works with fixed-binding clients such as
-Codex. You can also start with `--profile coding|remote|analysis|full`.
+Codex. Describe returns a tool/version-bound `schema_handle`; sending it on a later
+describe returns a short unchanged acknowledgement when the schema is still current.
+You can also start with `--profile coding|remote|analysis|full`.
 
 Potentially large text responses default to 32K characters with a 128K hard ceiling.
 Truncation is always visible and pageable tools return `next_offset` or `next_cursor`.
@@ -282,7 +285,9 @@ agent-tool --fallback-encoding EUC-KR
 Profiles are additive presets: `core` (11 schemas), `coding` (core plus broader
 file/build/shell tools), `remote`, `analysis`, and `full`. At runtime, prefer the
 client-independent `toolbox` gateway: `operation=describe` returns one tool's schema
-and `operation=call` invokes it through the stable toolbox binding. When command
+(`compact=true` plus `tool_operation` limits it to one operation), and
+`operation=call` invokes it through the stable toolbox binding. Re-send a returned
+`schema_handle` to avoid receiving an unchanged schema again. When command
 diagnostics are compacted, `operation=output` retrieves the bounded raw output by
 its reported ID for 30 minutes and reports `next_offset` when paging is needed. `enable`,
 `disable`, and `profile` remain available for clients that honor
@@ -303,6 +308,35 @@ export AGENT_TOOL_PROFILE=coding
 ```
 
 Priority: CLI flag > environment variable > default (UTF-8).
+
+### Local SSH/SFTP connection profiles
+
+SSH and SFTP accept either `connection_profile` or a session-local `connection_id`,
+so host, user, key, and jump-host fields do not need to be repeated. Profiles are
+read from the OS user config directory at `agent-tool/connections.json`; override the
+location with `AGENT_TOOL_CONNECTION_PROFILE_FILE`. Keep this file local and explicitly
+ignored if it is placed inside a workspace.
+
+```json
+{
+  "connections": {
+    "dev": {
+      "host": "192.0.2.10",
+      "user": "builder",
+      "key_file": "/local/path/to/id_ed25519",
+      "host_key_check": "strict",
+      "trusted": true
+    }
+  }
+}
+```
+
+An initial call returns an opaque `connection_id` that remains reusable by both tools
+for 30 minutes. `trusted:true` affects only display: an allowed private-address warning
+is shown once per pooled connection instead of on every call; SSRF blocking and cloud
+metadata protection are unchanged. SSH also supports `quiet`, `echo_command`, and
+`result_only`; the last returns compact JSON centered on `stdout`, `stderr`, and
+`exit_code`. SFTP supports `quiet`, `result_only`, and `upload_many` (up to 100 files).
 
 ### Runtime Configuration
 

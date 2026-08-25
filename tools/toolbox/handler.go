@@ -2,6 +2,7 @@ package toolbox
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -22,10 +23,12 @@ type Spec struct {
 }
 
 type Manager struct {
-	mu     sync.Mutex
-	server *mcp.Server
-	specs  map[string]Spec
-	active map[string]bool
+	mu          sync.Mutex
+	server      *mcp.Server
+	specs       map[string]Spec
+	active      map[string]bool
+	schemaCache map[string][]byte
+	version     string
 }
 
 type Input struct {
@@ -38,16 +41,23 @@ type Input struct {
 	OutputID       string         `json:"output_id,omitempty" jsonschema:"Preserved raw command output ID for operation=output"`
 	OutputOffset   int            `json:"output_offset,omitempty" jsonschema:"Character offset for operation=output paging. Default: 0"`
 	OutputMaxChars int            `json:"output_max_chars,omitempty" jsonschema:"Maximum raw-output characters returned by operation=output. Default: 32768, Max: 130048"`
+	Compact        bool           `json:"compact,omitempty" jsonschema:"Return a reduced input schema: true or false. Pair with tool_operation for operation-specific fields"`
+	ToolOperation  string         `json:"tool_operation,omitempty" jsonschema:"Target tool operation for compact describe, for example execute or upload"`
+	SchemaHandle   string         `json:"schema_handle,omitempty" jsonschema:"Handle returned by an earlier describe; matching handles return only an unchanged acknowledgement"`
 }
 
 type Output struct {
-	Result  string   `json:"result"`
-	Active  []string `json:"active"`
-	Changed []string `json:"changed,omitempty"`
+	Result       string   `json:"result"`
+	Active       []string `json:"active"`
+	Changed      []string `json:"changed,omitempty"`
+	SchemaHandle string   `json:"schema_handle,omitempty"`
 }
 
-func NewManager(server *mcp.Server, specs []Spec) *Manager {
-	m := &Manager{server: server, specs: make(map[string]Spec), active: make(map[string]bool)}
+func NewManager(server *mcp.Server, specs []Spec, version ...string) *Manager {
+	m := &Manager{server: server, specs: make(map[string]Spec), active: make(map[string]bool), schemaCache: make(map[string][]byte)}
+	if len(version) > 0 {
+		m.version = strings.TrimSpace(version[0])
+	}
 	for _, spec := range specs {
 		m.specs[spec.Name] = spec
 	}
@@ -68,6 +78,7 @@ func (m *Manager) RegisterTool() {
 		Name: "toolbox",
 		Description: `Discover and call any AgentTool capability without loading every tool schema into the model context.
 Use operation=describe with tool=<name> to fetch one tool's instructions and input schema, then operation=call with tool=<name> and arguments={...} to invoke it. This gateway works even when the MCP client ignores tools/list_changed.
+For smaller descriptions, set compact=true and tool_operation=<target operation>. Re-send the returned schema_handle to get a short acknowledgement when that tool/version schema is unchanged.
 Use operation=output with output_id=<raw_output_id> to retrieve bounded raw command output preserved after diagnostic compaction. Large records report next_offset for paging and expire after 30 minutes.
 Use operation=list to see active and available tools. enable/disable/profile also expose direct tool bindings on clients that refresh dynamically.
 Profiles: core (compact file/search tools), coding, remote, analysis, full.`,
@@ -84,7 +95,7 @@ func (m *Manager) Handle(ctx context.Context, req *mcp.CallToolRequest, input In
 	switch op {
 	case "list":
 	case "describe":
-		return m.describe(input.Tool)
+		return m.describe(input.Tool, input.Compact, input.ToolOperation, input.SchemaHandle)
 	case "call":
 		return m.call(ctx, req, input.Tool, input.Arguments)
 	case "output":
@@ -166,7 +177,7 @@ func (m *Manager) output(id string, offset, maxChars int) (*mcp.CallToolResult, 
 	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: result}}}, Output{Result: result}, nil
 }
 
-func (m *Manager) describe(name string) (*mcp.CallToolResult, Output, error) {
+func (m *Manager) describe(name string, compact bool, toolOperation, knownHandle string) (*mcp.CallToolResult, Output, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return gatewayError("tool is required for operation=describe")
@@ -183,11 +194,33 @@ func (m *Manager) describe(name string) (*mcp.CallToolResult, Output, error) {
 	if err != nil {
 		return gatewayError(fmt.Sprintf("cannot encode schema for %q: %v", name, err))
 	}
+	toolOperation = strings.ToLower(strings.TrimSpace(toolOperation))
+	if compact {
+		schema, err = compactInputSchema(schema, name, toolOperation)
+		if err != nil {
+			return gatewayError(err.Error())
+		}
+	}
+	digest := sha256.Sum256(append([]byte(name+"\x00"+m.version+"\x00"+toolOperation+"\x00"), schema...))
+	handle := fmt.Sprintf("schema_%s_%x", name, digest[:8])
+	m.mu.Lock()
+	m.schemaCache[handle] = append([]byte(nil), schema...)
+	m.mu.Unlock()
+	if strings.TrimSpace(knownHandle) == handle {
+		result := fmt.Sprintf("Schema unchanged: %s. Call through toolbox with operation=call, tool=%s, arguments={...}\n", handle, name)
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: result}}}, Output{Result: result, Changed: changed, SchemaHandle: handle}, nil
+	}
 	spec := m.specs[name]
-	result := fmt.Sprintf("Tool: %s\nGroup: %s\nDescription:\n%s\nInput schema (JSON):\n%s\nCall through toolbox: operation=call, tool=%s, arguments={...}\n",
-		name, spec.Group, registration.Tool.Description, schema, name)
+	var result string
+	if compact {
+		result = fmt.Sprintf("Tool: %s\nOperation: %s\nSchema handle: %s\nInput schema (JSON):\n%s\nCall: operation=call, tool=%s, arguments={...}\n",
+			name, toolOperation, handle, schema, name)
+	} else {
+		result = fmt.Sprintf("Tool: %s\nGroup: %s\nDescription:\n%s\nSchema handle: %s\nInput schema (JSON):\n%s\nCall through toolbox: operation=call, tool=%s, arguments={...}\n",
+			name, spec.Group, registration.Tool.Description, handle, schema, name)
+	}
 	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: result}}}, Output{
-		Result: result, Changed: changed,
+		Result: result, Changed: changed, SchemaHandle: handle,
 	}, nil
 }
 

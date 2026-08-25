@@ -28,10 +28,12 @@ Claude Code, Codex CLI, Cursor, Windsurf, Cline, Gemini CLI 및 모든 MCP 호�
 
 기본 `core` 프로필은 54개 전체 스키마 대신 `toolbox`를 포함한 11개만 노출합니다.
 실제 MCP 프로토콜 측정에서 직렬화된 도구 목록은 `full` 약 84KB에서 약 18KB로
-줄었습니다. `toolbox(operation="describe", tool="ssh")`로 한 도구의 설명과
-스키마만 확인한 뒤 `toolbox(operation="call", tool="ssh", arguments={...})`로
+줄었습니다. `toolbox(operation="describe", tool="ssh", compact=true,
+tool_operation="execute")`로 한 operation에 필요한 필드와 required 목록만 확인한 뒤
+`toolbox(operation="call", tool="ssh", arguments={...})`로
 호출할 수 있습니다. 이 gateway는 동적 도구 목록 갱신에 의존하지 않아 Codex 같은
-고정 binding 클라이언트에서도 동작합니다. 또는
+고정 binding 클라이언트에서도 동작합니다. describe가 반환한 tool/version 기반
+`schema_handle`을 다음 describe에 전달하면 스키마가 그대로일 때 짧은 확인만 반환합니다. 또는
 `--profile coding|remote|analysis|full`로 시작할 수 있습니다.
 
 대용량 텍스트 결과는 기본 32K자, 절대 상한 128K이며 잘림을 숨기지 않습니다.
@@ -279,7 +281,9 @@ agent-tool --fallback-encoding EUC-KR
 
 프로필: `core`(11개 스키마), `coding`, `remote`, `analysis`, `full`.
 실행 중에는 클라이언트와 무관하게 동작하는 `toolbox` gateway를 우선 사용합니다.
-`operation=describe`는 한 도구의 스키마를 반환하고, `operation=call`은 고정된
+`operation=describe`는 한 도구의 스키마를 반환하며 `compact=true`와
+`tool_operation`을 함께 쓰면 한 operation으로 제한합니다. 반환된 `schema_handle`을
+다시 전달하면 변경 없는 스키마의 재출력을 피할 수 있습니다. `operation=call`은 고정된
 toolbox binding을 통해 그 도구를 호출합니다. 명령 진단이 압축된 경우에는
 `operation=output`과 표시된 ID로 보존된 bounded raw 출력을 30분 동안 조회할 수
 있으며 큰 출력은 `next_offset`으로 이어 읽습니다. `enable`, `disable`, `profile`은
@@ -300,6 +304,34 @@ export AGENT_TOOL_PROFILE=coding
 ```
 
 우선순위: CLI 플래그 > 환경변수 > 기본값 (UTF-8).
+
+### 로컬 SSH/SFTP connection profile
+
+SSH와 SFTP는 `connection_profile` 또는 세션 로컬 `connection_id`를 받아 host, user,
+key, jump host 필드 반복을 없앨 수 있습니다. 프로필은 OS 사용자 설정 디렉터리의
+`agent-tool/connections.json`에서 읽으며 `AGENT_TOOL_CONNECTION_PROFILE_FILE`로 위치를
+바꿀 수 있습니다. workspace 안에 둘 경우 반드시 명시적으로 ignore하고 로컬에만 보관하세요.
+
+```json
+{
+  "connections": {
+    "dev": {
+      "host": "192.0.2.10",
+      "user": "builder",
+      "key_file": "/local/path/to/id_ed25519",
+      "host_key_check": "strict",
+      "trusted": true
+    }
+  }
+}
+```
+
+첫 호출이 반환한 opaque `connection_id`는 두 도구에서 30분간 재사용할 수 있습니다.
+`trusted:true`는 표시만 바꿉니다. 허용된 사설 주소 경고를 pooled connection당 한 번만
+표시하며 SSRF 차단과 cloud metadata 보호는 그대로 유지합니다. SSH는 `quiet`,
+`echo_command`, `result_only`도 지원하며 마지막 옵션은 `stdout`, `stderr`, `exit_code`
+중심의 compact JSON을 반환합니다. SFTP는 `quiet`, `result_only`, 최대 100개 파일의
+`upload_many`를 지원합니다.
 
 ### 런타임 설정
 

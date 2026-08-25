@@ -174,7 +174,7 @@ File tools (read, edit, multiedit, write, grep, glob, listdir, multiread, backup
 
 Use multiread to read multiple files in a single call. Use help with a topic for detailed usage and parameter docs.
 
-The compact core profile is loaded by default. For a non-core capability, use toolbox operation=describe with its tool name, then toolbox operation=call with the target arguments. This stable gateway works even when the client ignores tools/list_changed. enable/disable/profile remain optional direct-binding controls. Large text results are bounded and report explicit continuation metadata; relative local paths use MCP roots when available.
+The compact core profile is loaded by default. For a non-core capability, use toolbox operation=describe with its tool name, then toolbox operation=call with the target arguments. Set compact=true and tool_operation for an operation-only schema, and reuse schema_handle when unchanged. This stable gateway works even when the client ignores tools/list_changed. enable/disable/profile remain optional direct-binding controls. Large text results are bounded and report explicit continuation metadata; relative local paths use MCP roots when available.
 
 Toolbox groups: core (essential edit/read/search) | file (file management/config/query helpers) | coding (shell/process/archive/source helpers) | system (OS/process/IPC tools) | remote (SSH/SFTP/HTTP/network tools) | data (JSON/YAML/TOML/MySQL/Redis) | analysis (binary/debug/codegraph/memory tools) | windows (GUI/screenshot/clipboard tools).`,
 		},
@@ -240,7 +240,7 @@ Toolbox groups: core (essential edit/read/search) | file (file management/config
 		{Name: "memtool", Group: "analysis", Register: func() { memtool.Register(server) }},
 		{Name: "wintool", Group: "windows", Register: func() { wintool.Register(server) }},
 	}
-	toolManager := toolbox.NewManager(server, specs)
+	toolManager := toolbox.NewManager(server, specs, Version)
 	if err := toolManager.EnableProfile(profile); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)

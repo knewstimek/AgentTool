@@ -13,3 +13,4 @@ dist/
 test_*.go
 UNRELEASED.md
 .codegraph.db*
+.gocache/

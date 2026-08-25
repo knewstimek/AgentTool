@@ -19,12 +19,13 @@ const (
 )
 
 type sessionEntry struct {
-	client      *gossh.Client
-	agentConn   net.Conn // SSH agent socket; nil if not used
-	jumpCleanup func()   // closes jump host resources; nil if no proxy
-	key         string
-	createdAt   time.Time
-	lastUsed    time.Time
+	client              *gossh.Client
+	agentConn           net.Conn // SSH agent socket; nil if not used
+	jumpCleanup         func()   // closes jump host resources; nil if no proxy
+	key                 string
+	createdAt           time.Time
+	lastUsed            time.Time
+	privateWarningShown bool
 }
 
 // close releases all resources held by this session entry.
@@ -52,6 +53,35 @@ type sessionPool struct {
 
 var pool = &sessionPool{
 	sessions: make(map[string]*sessionEntry),
+}
+
+// consumePrivateWarning returns true exactly once for the lifetime of a pooled
+// connection. It is used only for profiles explicitly marked trusted.
+func (p *sessionPool) consumePrivateWarning(key string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	entry, ok := p.sessions[key]
+	if !ok || entry.privateWarningShown {
+		return false
+	}
+	entry.privateWarningShown = true
+	return true
+}
+
+// PrivateWarningForConnection applies the trusted-profile once-per-pooled-
+// session rule. Untrusted and ad-hoc connections retain the warning on every
+// call.
+func PrivateWarningForConnection(input SSHInput, warning string) string {
+	if warning == "" || !input.TrustedProfile {
+		return warning
+	}
+	if err := validateInput(&input); err != nil {
+		return warning
+	}
+	if pool.consumePrivateWarning(sessionKey(input)) {
+		return warning
+	}
+	return ""
 }
 
 func init() {

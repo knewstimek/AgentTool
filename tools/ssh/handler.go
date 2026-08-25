@@ -2,6 +2,7 @@ package ssh
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -58,16 +59,28 @@ type SSHInput struct {
 	JumpPassword   string      `json:"jump_password,omitempty" jsonschema:"Jump host password. Default: same as password"`
 	JumpKeyFile    string      `json:"jump_key_file,omitempty" jsonschema:"Jump host SSH private key file. Default: same as key_file"`
 	JumpPassphrase string      `json:"jump_passphrase,omitempty" jsonschema:"Jump host key passphrase. Default: same as passphrase"`
+
+	ConnectionProfile string      `json:"connection_profile,omitempty" jsonschema:"Named connection from the local ignored profile file; replaces repeated host/user/key fields"`
+	ConnectionID      string      `json:"connection_id,omitempty" jsonschema:"Opaque session-local connection handle returned by an earlier SSH/SFTP call"`
+	Quiet             bool        `json:"quiet,omitempty" jsonschema:"Suppress connection/session banners: true or false. Default: false"`
+	EchoCommand       interface{} `json:"echo_command,omitempty" jsonschema:"Echo the remote command in normal output: true or false. Default: true"`
+	ResultOnly        bool        `json:"result_only,omitempty" jsonschema:"Return only compact stdout, stderr, and exit_code JSON: true or false. Default: false"`
+
+	TrustedProfile       bool   `json:"-"`
+	ResolvedConnectionID string `json:"-"`
 }
 
 type SSHOutput struct {
-	Result      string `json:"result"`
-	ExitCode    int    `json:"exit_code"`
-	Truncated   bool   `json:"truncated"`
-	StdoutBytes int64  `json:"stdout_bytes,omitempty"`
-	StderrBytes int64  `json:"stderr_bytes,omitempty"`
-	JobID       string `json:"job_id,omitempty"`
-	Status      string `json:"status,omitempty"`
+	Result       string `json:"result"`
+	Stdout       string `json:"stdout,omitempty"`
+	Stderr       string `json:"stderr,omitempty"`
+	ExitCode     int    `json:"exit_code"`
+	Truncated    bool   `json:"truncated"`
+	StdoutBytes  int64  `json:"stdout_bytes,omitempty"`
+	StderrBytes  int64  `json:"stderr_bytes,omitempty"`
+	JobID        string `json:"job_id,omitempty"`
+	Status       string `json:"status,omitempty"`
+	ConnectionID string `json:"connection_id,omitempty"`
 }
 
 func Handle(ctx context.Context, req *mcp.CallToolRequest, input SSHInput) (*mcp.CallToolResult, SSHOutput, error) {
@@ -85,7 +98,12 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input SSHInput) (*mcp
 	if op != "execute" && op != "start" {
 		return errorResult("operation must be execute, start, status, tail, or cancel")
 	}
-	// 1. Validate input
+	// 1. Resolve a local profile or reusable session-local connection handle.
+	connectionID, err := ResolveConnection(&input)
+	if err != nil {
+		return errorResult(err.Error())
+	}
+	// 2. Validate input
 	if err := validateInput(&input); err != nil {
 		return errorResult(err.Error())
 	}
@@ -124,7 +142,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input SSHInput) (*mcp
 		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: msg}},
-		}, SSHOutput{Result: msg}, nil
+		}, SSHOutput{Result: msg, ConnectionID: connectionID}, nil
 	}
 
 	// 3. Command is required for non-disconnect calls
@@ -147,7 +165,13 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input SSHInput) (*mcp
 			return errorResult(fmt.Sprintf("failed to start SSH job: %s", sanitizeError(err, input)))
 		}
 		msg := fmt.Sprintf("SSH background job started.\njob_id: %s\nstatus: running\nUse operation=status or operation=tail with this job_id; use operation=cancel to stop it.", job.id)
-		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: msg}}}, SSHOutput{Result: msg, JobID: job.id, Status: "running"}, nil
+		if !input.Quiet && !input.ResultOnly {
+			msg = fmt.Sprintf("connection_id: %s\n%s", connectionID, msg)
+		}
+		if warning := PrivateWarningForConnection(input, ssrfWarning); warning != "" {
+			msg = warning + "\n\n" + msg
+		}
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: msg}}}, SSHOutput{Result: msg, JobID: job.id, Status: "running", ConnectionID: connectionID}, nil
 	}
 
 	// 5. Execute command with timeout
@@ -165,18 +189,44 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input SSHInput) (*mcp
 	}
 
 	// 6. Format output
+	truncated := result.StdoutTruncated || result.StderrTruncated
+	if input.ResultOnly {
+		compact, marshalErr := json.Marshal(struct {
+			Stdout       string `json:"stdout"`
+			Stderr       string `json:"stderr"`
+			ExitCode     int    `json:"exit_code"`
+			ConnectionID string `json:"connection_id,omitempty"`
+			Warning      string `json:"warning,omitempty"`
+		}{result.Stdout, result.Stderr, result.ExitCode, connectionID, PrivateWarningForConnection(input, ssrfWarning)})
+		if marshalErr != nil {
+			return errorResult(fmt.Sprintf("cannot encode SSH result: %v", marshalErr))
+		}
+		output := string(compact)
+		return &mcp.CallToolResult{
+				Content: []mcp.Content{&mcp.TextContent{Text: output}}, IsError: result.ExitCode != 0,
+			}, SSHOutput{
+				Result: output, Stdout: result.Stdout, Stderr: result.Stderr, ExitCode: result.ExitCode,
+				Truncated: truncated, StdoutBytes: result.StdoutBytes, StderrBytes: result.StderrBytes,
+				ConnectionID: connectionID,
+			}, nil
+	}
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("=== SSH: %s@%s:%d ===\n", input.User, input.Host, input.PortInt))
-	if input.JumpHost != "" {
-		sb.WriteString(fmt.Sprintf("[via jump host: %s@%s:%d]\n", input.JumpUser, input.JumpHost, input.JumpPortInt))
+	if !input.Quiet {
+		sb.WriteString(fmt.Sprintf("=== SSH: %s@%s:%d ===\n", input.User, input.Host, input.PortInt))
+		if input.JumpHost != "" {
+			sb.WriteString(fmt.Sprintf("[via jump host: %s@%s:%d]\n", input.JumpUser, input.JumpHost, input.JumpPortInt))
+		}
+		if isNew {
+			sb.WriteString("[New session established]\n")
+		} else {
+			sb.WriteString("[Reusing existing session]\n")
+		}
+		sb.WriteString(fmt.Sprintf("[connection_id: %s]\n", connectionID))
+		if input.EchoCommand == nil || common.FlexBool(input.EchoCommand) {
+			displayCommand, _ := common.TruncateRunes(input.Command, 500, "… [command abbreviated]")
+			sb.WriteString(fmt.Sprintf("$ %s\n\n", displayCommand))
+		}
 	}
-	if isNew {
-		sb.WriteString("[New session established]\n")
-	} else {
-		sb.WriteString("[Reusing existing session]\n")
-	}
-	displayCommand, _ := common.TruncateRunes(input.Command, 500, "… [command abbreviated]")
-	sb.WriteString(fmt.Sprintf("$ %s\n\n", displayCommand))
 
 	if result.Stdout != "" {
 		sb.WriteString(result.Stdout)
@@ -194,19 +244,18 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input SSHInput) (*mcp
 	if result.ExitCode != 0 {
 		sb.WriteString(fmt.Sprintf("\n[Exit code: %d]", result.ExitCode))
 	}
-	truncated := result.StdoutTruncated || result.StderrTruncated
 	if truncated {
 		sb.WriteString(fmt.Sprintf("\n[output truncated: stdout_bytes=%d; stderr_bytes=%d; retained_bytes=%d; output_mode=%s]", result.StdoutBytes, result.StderrBytes, input.MaxOutputChars, input.OutputMode))
 	}
 
 	output := sb.String()
-	if ssrfWarning != "" {
+	if ssrfWarning != "" && (!input.TrustedProfile || pool.consumePrivateWarning(key)) {
 		output = ssrfWarning + "\n\n" + output
 	}
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: output}},
 		IsError: result.ExitCode != 0,
-	}, SSHOutput{Result: output, ExitCode: result.ExitCode, Truncated: truncated, StdoutBytes: result.StdoutBytes, StderrBytes: result.StderrBytes}, nil
+	}, SSHOutput{Result: output, Stdout: result.Stdout, Stderr: result.Stderr, ExitCode: result.ExitCode, Truncated: truncated, StdoutBytes: result.StdoutBytes, StderrBytes: result.StderrBytes, ConnectionID: connectionID}, nil
 }
 
 func handleJobOperation(op string, input SSHInput) (*mcp.CallToolResult, SSHOutput, error) {
@@ -268,6 +317,7 @@ func Register(server *mcp.Server) {
 Supports password and key-based authentication. SSH agent is used as fallback on Unix.
 Sessions are pooled only when host, user, authentication identity, host-key policy, and jump route all match.
 Idle sessions expire after 30 minutes. Foreground output defaults to 32768 bytes and reports truncation explicitly; output_mode selects head_tail, head, or tail retention.
+Use connection_profile for a named local profile or reuse the returned connection_id for 30 minutes. quiet suppresses banners, echo_command controls command echoing, and result_only returns compact stdout/stderr/exit_code JSON.
 For long commands, use background=true (or operation=start), then poll with operation=status/tail and job_id; operation=cancel stops the job.
 Supports IPv6 addresses and ProxyJump (jump_host) for reaching servers through bastion hosts.`,
 	}, Handle)

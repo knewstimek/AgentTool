@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"agent-tool/common"
+	"agent-tool/tools/sftp"
+	"agent-tool/tools/ssh"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -18,6 +20,65 @@ func TestProfilesStayCompactAndComposable(t *testing.T) {
 	}
 	if _, ok := profileGroups("everything-ish"); ok {
 		t.Fatal("unknown profile was accepted")
+	}
+}
+
+func TestCompactDescribeFiltersByTargetOperationAndReusesHandle(t *testing.T) {
+	server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "v1"}, nil)
+	m := NewManager(server, []Spec{
+		{Name: "ssh", Group: "remote", Register: func() { ssh.Register(server) }},
+		{Name: "sftp", Group: "remote", Register: func() { sftp.Register(server) }},
+	}, "v1")
+
+	result, out, err := m.Handle(context.Background(), nil, Input{
+		Operation: "describe", Tool: "ssh", Compact: true, ToolOperation: "execute",
+	})
+	if err != nil || result.IsError {
+		t.Fatalf("compact describe failed: result=%v err=%v", result, err)
+	}
+	text := result.Content[0].(*mcp.TextContent).Text
+	for _, want := range []string{`"command"`, `"quiet"`, `"echo_command"`, `"required":["command"]`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("compact schema omitted %s: %s", want, text)
+		}
+	}
+	for _, unwanted := range []string{`"job_id"`, "Description:\n"} {
+		if strings.Contains(text, unwanted) {
+			t.Fatalf("compact schema retained %s: %s", unwanted, text)
+		}
+	}
+	if out.SchemaHandle == "" {
+		t.Fatal("compact describe did not return a schema handle")
+	}
+	full, _, err := m.Handle(context.Background(), nil, Input{Operation: "describe", Tool: "ssh"})
+	if err != nil || full.IsError {
+		t.Fatalf("full describe failed: result=%v err=%v", full, err)
+	}
+	fullText := full.Content[0].(*mcp.TextContent).Text
+	if len(text) >= len(fullText) {
+		t.Fatalf("compact describe was not smaller: compact=%d full=%d", len(text), len(fullText))
+	}
+
+	cached, cachedOut, err := m.Handle(context.Background(), nil, Input{
+		Operation: "describe", Tool: "ssh", Compact: true, ToolOperation: "execute", SchemaHandle: out.SchemaHandle,
+	})
+	if err != nil || cached.IsError || cachedOut.SchemaHandle != out.SchemaHandle {
+		t.Fatalf("schema handle reuse failed: result=%v out=%v err=%v", cached, cachedOut, err)
+	}
+	cachedText := cached.Content[0].(*mcp.TextContent).Text
+	if !strings.Contains(cachedText, "Schema unchanged") || strings.Contains(cachedText, `"properties"`) {
+		t.Fatalf("unexpected cached response: %s", cachedText)
+	}
+
+	upload, _, err := m.Handle(context.Background(), nil, Input{
+		Operation: "describe", Tool: "sftp", Compact: true, ToolOperation: "upload",
+	})
+	if err != nil || upload.IsError {
+		t.Fatalf("upload describe failed: result=%v err=%v", upload, err)
+	}
+	uploadText := upload.Content[0].(*mcp.TextContent).Text
+	if !strings.Contains(uploadText, `"local_path"`) || !strings.Contains(uploadText, `"remote_path"`) || strings.Contains(uploadText, `"transfer_id"`) {
+		t.Fatalf("unexpected upload schema: %s", uploadText)
 	}
 }
 
