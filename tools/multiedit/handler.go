@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"agent-tool/common"
+	"agent-tool/internal/textdiff"
 	"agent-tool/tools/edit"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -150,51 +151,9 @@ Use dry_run=true to preview all changes without modifying the file.`,
 	}, Handle)
 }
 
-// dryRunPreview produces a simple unified diff between before and after.
+// dryRunPreview produces an accurate unified diff between before and after.
 func dryRunPreview(before, after, filePath string) string {
-	oldLines := strings.Split(before, "\n")
-	newLines := strings.Split(after, "\n")
-
-	prefixLen := 0
-	minLen := len(oldLines)
-	if len(newLines) < minLen {
-		minLen = len(newLines)
-	}
-	for prefixLen < minLen && oldLines[prefixLen] == newLines[prefixLen] {
-		prefixLen++
-	}
-
-	suffixLen := 0
-	for suffixLen < minLen-prefixLen &&
-		oldLines[len(oldLines)-1-suffixLen] == newLines[len(newLines)-1-suffixLen] {
-		suffixLen++
-	}
-
-	ctxStart := prefixLen - 3
-	if ctxStart < 0 {
-		ctxStart = 0
-	}
-	ctxEndOld := len(oldLines) - suffixLen + 3
-	if ctxEndOld > len(oldLines) {
-		ctxEndOld = len(oldLines)
-	}
-
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("--- %s (before)\n+++ %s (after)\n", filePath, filePath))
-	for i := ctxStart; i < prefixLen; i++ {
-		sb.WriteString(" " + oldLines[i] + "\n")
-	}
-	for i := prefixLen; i < len(oldLines)-suffixLen; i++ {
-		sb.WriteString("-" + oldLines[i] + "\n")
-	}
-	for i := prefixLen; i < len(newLines)-suffixLen; i++ {
-		sb.WriteString("+" + newLines[i] + "\n")
-	}
-	endOld := len(oldLines) - suffixLen
-	for i := endOld; i < ctxEndOld; i++ {
-		sb.WriteString(" " + oldLines[i] + "\n")
-	}
-	return sb.String()
+	return textdiff.UnifiedStrings(filePath+" (before)", filePath+" (after)", before, after, 3)
 }
 
 func errorResult(msg string) (*mcp.CallToolResult, MultiEditOutput, error) {

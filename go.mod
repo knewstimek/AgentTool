@@ -11,6 +11,7 @@ require (
 	github.com/miekg/dns v1.1.72
 	github.com/modelcontextprotocol/go-sdk v1.5.0
 	github.com/pkg/sftp v1.13.10
+	github.com/pmezard/go-difflib v1.0.0
 	github.com/redis/go-redis/v9 v9.18.0
 	github.com/saintfish/chardet v0.0.0-20230101081208-5e3ef4b5456d
 	github.com/tetratelabs/wazero v1.11.0

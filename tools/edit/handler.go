@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"agent-tool/common"
+	"agent-tool/internal/textdiff"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -181,76 +182,9 @@ func parseIndentStyleOption(s string) (IndentStyle, error) {
 	return IndentStyle{}, fmt.Errorf("expected 'tabs', 'spaces', or 'spaces-N' (e.g. spaces-4), got '%s'", s)
 }
 
-// splitDisplayLines splits on LF and strips a trailing CR so CRLF and LF files
-// render identically in a preview.
-func splitDisplayLines(s string) []string {
-	lines := strings.Split(s, "\n")
-	for i, line := range lines {
-		lines[i] = strings.TrimSuffix(line, "\r")
-	}
-	return lines
-}
-
-// dryRunPreview shows the diff between before and after in a simple diff format.
-// Includes 3 lines of context around changed lines.
+// dryRunPreview shows an accurate unified diff with three context lines.
 func dryRunPreview(before, after, filePath string) string {
-	// Split on LF and drop the CR: a preview line still carrying its CR makes
-	// the terminal overwrite the diff marker of the next line.
-	oldLines := splitDisplayLines(before)
-	newLines := splitDisplayLines(after)
-
-	// Find changed range (remove common prefix and suffix)
-	prefixLen := 0
-	minLen := len(oldLines)
-	if len(newLines) < minLen {
-		minLen = len(newLines)
-	}
-	for prefixLen < minLen && oldLines[prefixLen] == newLines[prefixLen] {
-		prefixLen++
-	}
-
-	suffixLen := 0
-	for suffixLen < minLen-prefixLen &&
-		oldLines[len(oldLines)-1-suffixLen] == newLines[len(newLines)-1-suffixLen] {
-		suffixLen++
-	}
-
-	// Calculate context range
-	ctxStart := prefixLen - 3
-	if ctxStart < 0 {
-		ctxStart = 0
-	}
-	ctxEndOld := len(oldLines) - suffixLen + 3
-	if ctxEndOld > len(oldLines) {
-		ctxEndOld = len(oldLines)
-	}
-	ctxEndNew := len(newLines) - suffixLen + 3
-	if ctxEndNew > len(newLines) {
-		ctxEndNew = len(newLines)
-	}
-
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("--- %s (before)\n+++ %s (after)\n", filePath, filePath))
-
-	// Common prefix context
-	for i := ctxStart; i < prefixLen; i++ {
-		sb.WriteString(" " + oldLines[i] + "\n")
-	}
-	// Removed lines
-	for i := prefixLen; i < len(oldLines)-suffixLen; i++ {
-		sb.WriteString("-" + oldLines[i] + "\n")
-	}
-	// Added lines
-	for i := prefixLen; i < len(newLines)-suffixLen; i++ {
-		sb.WriteString("+" + newLines[i] + "\n")
-	}
-	// Common suffix context
-	endOld := len(oldLines) - suffixLen
-	for i := endOld; i < ctxEndOld; i++ {
-		sb.WriteString(" " + oldLines[i] + "\n")
-	}
-
-	return sb.String()
+	return textdiff.UnifiedStrings(filePath+" (before)", filePath+" (after)", before, after, 3)
 }
 
 func errorResult(msg string) (*mcp.CallToolResult, EditOutput, error) {
