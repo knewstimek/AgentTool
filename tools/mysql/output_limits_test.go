@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"context"
+	"crypto/tls"
 	"database/sql"
 	"database/sql/driver"
 	"io"
@@ -9,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/go-sql-driver/mysql"
 )
 
 var registerLimitDriver sync.Once
@@ -41,6 +44,58 @@ func TestFormatValueUsesRuneLimit(t *testing.T) {
 	got := formatValue(strings.Repeat("가", 20), 10)
 	if !utf8.ValidString(got) || utf8.RuneCountInString(got) != 10 {
 		t.Fatalf("invalid bounded value %q (%d runes)", got, utf8.RuneCountInString(got))
+	}
+}
+
+func TestMySQLConnectionConfigForcesUTF8MB4(t *testing.T) {
+	cfg := mysql.NewConfig()
+	cfg.User = "user"
+	cfg.Net = "tcp"
+	cfg.Addr = "127.0.0.1:3306"
+	cfg.DBName = "database"
+
+	if err := configureCharset(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.FormatDSN(); !strings.Contains(got, "charset="+defaultCharset) {
+		t.Fatal("connection configuration does not force utf8mb4")
+	}
+}
+
+func TestMySQLTLSUsesRequestedHostForVerification(t *testing.T) {
+	cfg := mysql.NewConfig()
+	configureTLS(cfg, "database.example.com", true)
+	if cfg.TLS == nil {
+		t.Fatal("TLS configuration is nil")
+	}
+	if cfg.TLS.ServerName != "database.example.com" {
+		t.Fatalf("TLS ServerName = %q, want requested hostname", cfg.TLS.ServerName)
+	}
+	if cfg.TLS.MinVersion != tls.VersionTLS12 {
+		t.Fatalf("TLS minimum version = %d, want TLS 1.2", cfg.TLS.MinVersion)
+	}
+}
+
+func TestQueryReturnsRows(t *testing.T) {
+	tests := []struct {
+		name  string
+		query string
+		want  bool
+	}{
+		{"select", "SELECT 1", true},
+		{"leading comments", "-- inspect\n/* hint */ SELECT 1", true},
+		{"cte select", "WITH recent AS (SELECT id FROM events) SELECT * FROM recent", true},
+		{"cte update", "WITH recent AS (SELECT id FROM events) UPDATE events SET seen = 1", false},
+		{"insert returning", "INSERT INTO items(name) VALUES ('returning') RETURNING id", true},
+		{"call", "CALL report()", true},
+		{"update", "UPDATE items SET name = 'select'", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := queryReturnsRows(tt.query); got != tt.want {
+				t.Fatalf("queryReturnsRows() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 

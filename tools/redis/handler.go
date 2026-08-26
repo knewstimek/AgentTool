@@ -9,14 +9,19 @@ import (
 
 	"agent-tool/common"
 
-	goredis "github.com/redis/go-redis/v9"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	goredis "github.com/redis/go-redis/v9"
 )
 
 const (
-	defaultPort       = 6379
-	defaultTimeoutSec = 30
-	maxTimeoutSec     = 120
+	defaultPort           = 6379
+	defaultTimeoutSec     = 30
+	maxTimeoutSec         = 120
+	defaultMaxValueChars  = 200
+	hardMaxValueChars     = 10000
+	defaultMaxOutputChars = common.DefaultOutputChars
+	hardMaxOutputChars    = common.HardOutputChars
+	outputTruncatedSuffix = "\n[Output truncated]"
 )
 
 // dangerousCommands are blocked to prevent accidental data loss or server disruption.
@@ -38,14 +43,16 @@ var dangerousCommands = map[string]bool{
 }
 
 type RedisInput struct {
-	Host       string   `json:"host" jsonschema:"Redis server hostname or IP address,required"`
-	Port       interface{} `json:"port,omitempty" jsonschema:"Redis port number. Default: 6379"`
-	Password   string   `json:"password,omitempty" jsonschema:"Password for authentication"`
-	DB         interface{} `json:"db,omitempty" jsonschema:"Redis database number. Default: 0"`
-	Command    string   `json:"command" jsonschema:"Redis command (e.g. GET, SET, HGETALL),required"`
-	Args       []string `json:"args,omitempty" jsonschema:"Command arguments"`
-	TimeoutSec interface{} `json:"timeout_sec,omitempty" jsonschema:"Command timeout in seconds. Default: 30, Max: 120"`
-	TLS        interface{} `json:"tls,omitempty" jsonschema:"Use TLS encryption: true or false. Default: false"`
+	Host           string      `json:"host" jsonschema:"Redis server hostname or IP address,required"`
+	Port           interface{} `json:"port,omitempty" jsonschema:"Redis port number. Default: 6379"`
+	Password       string      `json:"password,omitempty" jsonschema:"Password for authentication"`
+	DB             interface{} `json:"db,omitempty" jsonschema:"Redis database number. Default: 0"`
+	Command        string      `json:"command" jsonschema:"Redis command (e.g. GET, SET, HGETALL),required"`
+	Args           []string    `json:"args,omitempty" jsonschema:"Command arguments"`
+	TimeoutSec     interface{} `json:"timeout_sec,omitempty" jsonschema:"Command timeout in seconds. Default: 30, Max: 120"`
+	TLS            interface{} `json:"tls,omitempty" jsonschema:"Use TLS encryption: true or false. Default: false"`
+	MaxValueChars  int         `json:"max_value_chars,omitempty" jsonschema:"Maximum characters displayed per value. Default: 200, Max: 10000"`
+	MaxOutputChars int         `json:"max_output_chars,omitempty" jsonschema:"Maximum total returned text characters. Default: 32768, Max: 131072"`
 }
 
 type RedisOutput struct {
@@ -94,6 +101,18 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input RedisInput) (*m
 	if timeoutSec > maxTimeoutSec {
 		return errorResult(fmt.Sprintf("timeout_sec exceeds maximum (%d)", maxTimeoutSec))
 	}
+	if input.MaxValueChars <= 0 {
+		input.MaxValueChars = defaultMaxValueChars
+	}
+	if input.MaxValueChars > hardMaxValueChars {
+		return errorResult(fmt.Sprintf("max_value_chars must be at most %d", hardMaxValueChars))
+	}
+	if input.MaxOutputChars <= 0 {
+		input.MaxOutputChars = defaultMaxOutputChars
+	}
+	if input.MaxOutputChars > hardMaxOutputChars {
+		return errorResult(fmt.Sprintf("max_output_chars must be at most %d", hardMaxOutputChars))
+	}
 
 	// SSRF policy: cloud metadata always blocked. Private IPs allowed by default
 	// (configurable via set_config allow_redis_private). Warning shown on every
@@ -110,20 +129,7 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input RedisInput) (*m
 
 	timeout := time.Duration(timeoutSec) * time.Second
 
-	opts := &goredis.Options{
-		Addr:         fmt.Sprintf("%s:%d", connectAddr, port),
-		Password:     input.Password,
-		DB:           db,
-		DialTimeout:  timeout,
-		ReadTimeout:  timeout,
-		WriteTimeout: timeout,
-	}
-
-	if common.FlexBool(input.TLS) {
-		opts.TLSConfig = &tls.Config{
-			MinVersion: tls.VersionTLS12,
-		}
-	}
+	opts := newRedisOptions(input, connectAddr, port, db, timeout)
 
 	client := goredis.NewClient(opts)
 	defer client.Close()
@@ -143,11 +149,12 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input RedisInput) (*m
 		return errorResult(fmt.Sprintf("Redis error: %s", sanitizeError(cmd.Err(), input.Password)))
 	}
 
-	result := formatResult(cmd)
+	result := formatResult(cmd, input.MaxValueChars, input.MaxOutputChars)
 
 	// Prepend SSRF warning if connecting to a private IP
 	if ssrfWarning != "" {
 		result = ssrfWarning + "\n\n" + result
+		result, _ = common.TruncateRunes(result, input.MaxOutputChars, outputTruncatedSuffix)
 	}
 
 	return &mcp.CallToolResult{
@@ -155,46 +162,87 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input RedisInput) (*m
 	}, RedisOutput{Result: result}, nil
 }
 
+func newRedisOptions(input RedisInput, connectAddr string, port, db int, timeout time.Duration) *goredis.Options {
+	opts := &goredis.Options{
+		Addr:         fmt.Sprintf("%s:%d", connectAddr, port),
+		Password:     input.Password,
+		DB:           db,
+		DialTimeout:  timeout,
+		ReadTimeout:  timeout,
+		WriteTimeout: timeout,
+	}
+
+	if common.FlexBool(input.TLS) {
+		opts.TLSConfig = &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			ServerName: input.Host,
+		}
+	}
+	return opts
+}
+
 // formatResult converts the Redis command result into a human-readable string.
-func formatResult(cmd *goredis.Cmd) string {
+func formatResult(cmd *goredis.Cmd, maxValueChars, maxOutputChars int) string {
 	val := cmd.Val()
 
+	var result string
 	switch v := val.(type) {
 	case nil:
-		return "(nil)\n"
+		result = "(nil)\n"
 	case string:
-		return fmt.Sprintf("\"%s\"\n", v)
+		result = fmt.Sprintf("%q\n", boundedRedisValue(v, maxValueChars))
 	case int64:
-		return fmt.Sprintf("(integer) %d\n", v)
+		result = fmt.Sprintf("(integer) %d\n", v)
 	case []interface{}:
-		return formatSlice(v)
+		return formatSlice(v, maxValueChars, maxOutputChars)
 	default:
-		return fmt.Sprintf("%v\n", v)
+		result = boundedRedisValue(fmt.Sprintf("%v", v), maxValueChars) + "\n"
 	}
+
+	result, _ = common.TruncateRunes(result, maxOutputChars, outputTruncatedSuffix)
+	return result
 }
 
 // formatSlice formats a Redis array response with indexed elements.
-func formatSlice(items []interface{}) string {
+func formatSlice(items []interface{}, maxValueChars, maxOutputChars int) string {
 	if len(items) == 0 {
 		return "(empty array)\n"
 	}
 
 	var sb strings.Builder
+	usedChars := 0
+	truncated := false
 	for i, item := range items {
+		var line string
 		switch v := item.(type) {
 		case nil:
-			sb.WriteString(fmt.Sprintf("%d) (nil)\n", i+1))
+			line = fmt.Sprintf("%d) (nil)\n", i+1)
 		case string:
-			sb.WriteString(fmt.Sprintf("%d) \"%s\"\n", i+1, v))
+			line = fmt.Sprintf("%d) %q\n", i+1, boundedRedisValue(v, maxValueChars))
 		case int64:
-			sb.WriteString(fmt.Sprintf("%d) (integer) %d\n", i+1, v))
+			line = fmt.Sprintf("%d) (integer) %d\n", i+1, v)
 		case []interface{}:
-			sb.WriteString(fmt.Sprintf("%d) (array with %d elements)\n", i+1, len(v)))
+			line = fmt.Sprintf("%d) (array with %d elements)\n", i+1, len(v))
 		default:
-			sb.WriteString(fmt.Sprintf("%d) %v\n", i+1, v))
+			line = fmt.Sprintf("%d) %s\n", i+1, boundedRedisValue(fmt.Sprintf("%v", v), maxValueChars))
+		}
+		if !common.AppendWithinRuneBudget(&sb, &usedChars, line, maxOutputChars) {
+			truncated = true
+			break
 		}
 	}
-	return sb.String()
+
+	result := sb.String()
+	if truncated {
+		result += outputTruncatedSuffix
+	}
+	result, _ = common.TruncateRunes(result, maxOutputChars, outputTruncatedSuffix)
+	return result
+}
+
+func boundedRedisValue(value string, maxValueChars int) string {
+	value, _ = common.TruncateRunes(value, maxValueChars, "…")
+	return value
 }
 
 // sanitizeError removes password from error messages.
@@ -213,7 +261,9 @@ func Register(server *mcp.Server) {
 Supports all Redis commands (GET, SET, HGETALL, LPUSH, etc.).
 Results are formatted by type: strings, integers, arrays, and nil values.
 Connection is closed after each call (no session pooling).
-Supports TLS encryption for secure connections.`,
+Supports verified TLS encryption for secure connections.
+Defaults: 200 characters per value and 32768 total output characters.
+Use max_value_chars/max_output_chars to tune bounded output.`,
 	}, Handle)
 }
 

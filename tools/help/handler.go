@@ -560,18 +560,24 @@ Execute SQL queries on a MySQL/MariaDB server.
 SELECT/SHOW/DESCRIBE/EXPLAIN queries return results as formatted table.
 Other queries (INSERT/UPDATE/DELETE) return affected rows and last insert ID.
 Connection is opened and closed per call (no session pooling).
+Connections use utf8mb4 for client, connection, and result text.
+Set tls=true to use verified TLS 1.2 or newer.
 Defaults: max_rows=1000, max_columns=100, max_value_chars=200,
 max_output_chars=32768 (max 131072). Use SQL LIMIT/OFFSET for deterministic paging.
 Parameters: host, port (default 3306), user, password, database, query,
-timeout_sec (default 30, max 120), max_rows, max_columns, max_value_chars,
-max_output_chars
+timeout_sec (default 30, max 120), tls, max_rows, max_columns,
+max_value_chars, max_output_chars
 
 ## redis
 Execute Redis commands on a Redis server.
 Supports any Redis command (GET, SET, HGETALL, etc.) via command + args.
 Results are formatted by type (string, integer, array, nil).
 Supports TLS connections. Connection is opened and closed per call.
-Parameters: host, port (default 6379), password, db (default 0), command, args (array), timeout_sec (default 30, max 120), tls
+TLS certificate verification uses the requested hostname even when SSRF-safe resolution connects to an IP address.
+Defaults: max_value_chars=200, max_output_chars=32768 (max 131072).
+Parameters: host, port (default 6379), password, db (default 0), command,
+args (array), timeout_sec (default 30, max 120), tls, max_value_chars,
+max_output_chars
 
 ## externalip
 Returns your external (public) IP address.

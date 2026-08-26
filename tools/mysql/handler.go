@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"context"
+	"crypto/tls"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -19,6 +20,7 @@ const (
 	defaultTimeoutSec     = 30
 	maxTimeoutSec         = 120
 	defaultMaxRows        = 1000
+	defaultCharset        = "utf8mb4"
 	hardMaxRows           = 10000
 	defaultMaxColumns     = 100
 	hardMaxColumns        = 1000
@@ -36,6 +38,7 @@ type MySQLInput struct {
 	Database       string      `json:"database,omitempty" jsonschema:"Database name to connect to"`
 	Query          string      `json:"query" jsonschema:"SQL query to execute,required"`
 	TimeoutSec     interface{} `json:"timeout_sec,omitempty" jsonschema:"Query timeout in seconds. Default: 30, Max: 120"`
+	TLS            interface{} `json:"tls,omitempty" jsonschema:"Use verified TLS encryption: true or false. Default: false"`
 	MaxRows        int         `json:"max_rows,omitempty" jsonschema:"Maximum rows returned by SELECT-like queries. Default: 1000, Max: 10000"`
 	MaxColumns     int         `json:"max_columns,omitempty" jsonschema:"Maximum columns displayed. Default: 100, Max: 1000"`
 	MaxValueChars  int         `json:"max_value_chars,omitempty" jsonschema:"Maximum characters displayed per cell. Default: 200, Max: 10000"`
@@ -123,30 +126,35 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input MySQLInput) (*m
 
 	timeout := time.Duration(timeoutSec) * time.Second
 
-	// Use mysql.Config struct to safely build DSN — prevents parameter injection
-	// via database/user fields containing '?', '&', '@', or ':' characters.
-	cfg := mysql.Config{
-		User:                 input.User,
-		Passwd:               input.Password,
-		Net:                  "tcp",
-		Addr:                 fmt.Sprintf("%s:%d", connectAddr, port),
-		DBName:               input.Database,
-		Timeout:              timeout,
-		ReadTimeout:          timeout,
-		WriteTimeout:         timeout,
-		ParseTime:            true,
-		MultiStatements:      false,
-		AllowNativePasswords: true,
+	// Configure the connection directly instead of relying on the server's
+	// session defaults. AgentTool queries are UTF-8, so every new connection
+	// must declare utf8mb4 before it executes user SQL.
+	cfg := mysql.NewConfig()
+	cfg.User = input.User
+	cfg.Passwd = input.Password
+	cfg.Net = "tcp"
+	cfg.Addr = fmt.Sprintf("%s:%d", connectAddr, port)
+	cfg.DBName = input.Database
+	cfg.Timeout = timeout
+	cfg.ReadTimeout = timeout
+	cfg.WriteTimeout = timeout
+	cfg.ParseTime = true
+	cfg.MultiStatements = false
+	cfg.AllowNativePasswords = true
+	configureTLS(cfg, input.Host, common.FlexBool(input.TLS))
+	if err := configureCharset(cfg); err != nil {
+		return errorResult(fmt.Sprintf("failed to configure connection charset: %s", err))
 	}
-	dsn := cfg.FormatDSN()
+
+	connector, err := mysql.NewConnector(cfg)
+	if err != nil {
+		return errorResult(fmt.Sprintf("failed to configure connection: %s", sanitizeError(err, input.Password)))
+	}
 
 	opCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	db, err := sql.Open("mysql", dsn)
-	if err != nil {
-		return errorResult(fmt.Sprintf("failed to open connection: %s", sanitizeError(err, input.Password)))
-	}
+	db := sql.OpenDB(connector)
 	defer db.Close()
 
 	// Single connection, no pooling — security best practice
@@ -158,14 +166,8 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input MySQLInput) (*m
 	}
 
 	// Detect query type to choose between Query and Exec
-	queryUpper := strings.ToUpper(strings.TrimSpace(input.Query))
-	isSelect := strings.HasPrefix(queryUpper, "SELECT") ||
-		strings.HasPrefix(queryUpper, "SHOW") ||
-		strings.HasPrefix(queryUpper, "DESCRIBE") ||
-		strings.HasPrefix(queryUpper, "EXPLAIN")
-
 	var result string
-	if isSelect {
+	if queryReturnsRows(input.Query) {
 		result, err = executeQuery(opCtx, db, input.Query, queryLimits{
 			maxRows: input.MaxRows, maxColumns: input.MaxColumns,
 			maxValueChars: input.MaxValueChars, maxOutputChars: input.MaxOutputChars,
@@ -185,6 +187,117 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input MySQLInput) (*m
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: result}},
 	}, MySQLOutput{Result: result}, nil
+}
+
+func configureCharset(cfg *mysql.Config) error {
+	return cfg.Apply(mysql.Charset(defaultCharset, ""))
+}
+
+func configureTLS(cfg *mysql.Config, host string, enabled bool) {
+	if enabled {
+		cfg.TLS = &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			ServerName: host,
+		}
+	}
+}
+
+func queryReturnsRows(query string) bool {
+	keywords := topLevelSQLKeywords(query)
+	if len(keywords) == 0 {
+		return false
+	}
+
+	statement := keywords[0]
+	if statement == "WITH" {
+		statement = ""
+		for _, keyword := range keywords[1:] {
+			switch keyword {
+			case "SELECT", "INSERT", "UPDATE", "DELETE", "REPLACE":
+				statement = keyword
+			}
+			if statement != "" {
+				break
+			}
+		}
+	}
+
+	switch statement {
+	case "SELECT", "SHOW", "DESCRIBE", "DESC", "EXPLAIN", "TABLE", "VALUES",
+		"CALL", "HELP", "ANALYZE", "CHECK", "OPTIMIZE", "REPAIR":
+		return true
+	case "INSERT", "UPDATE", "DELETE", "REPLACE":
+		for _, keyword := range keywords[1:] {
+			if keyword == "RETURNING" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func topLevelSQLKeywords(query string) []string {
+	var keywords []string
+	depth := 0
+	for i := 0; i < len(query); {
+		switch {
+		case query[i] == '#' || (query[i] == '-' && i+1 < len(query) && query[i+1] == '-'):
+			for i < len(query) && query[i] != '\n' {
+				i++
+			}
+		case query[i] == '/' && i+1 < len(query) && query[i+1] == '*':
+			i += 2
+			for i+1 < len(query) && !(query[i] == '*' && query[i+1] == '/') {
+				i++
+			}
+			if i+1 < len(query) {
+				i += 2
+			}
+		case query[i] == '\'' || query[i] == '"' || query[i] == '`':
+			quote := query[i]
+			i++
+			for i < len(query) {
+				if query[i] == '\\' && i+1 < len(query) {
+					i += 2
+					continue
+				}
+				if query[i] == quote {
+					if i+1 < len(query) && query[i+1] == quote {
+						i += 2
+						continue
+					}
+					i++
+					break
+				}
+				i++
+			}
+		case query[i] == '(':
+			depth++
+			i++
+		case query[i] == ')':
+			if depth > 0 {
+				depth--
+			}
+			i++
+		case depth == 0 && isSQLWordStart(query[i]):
+			start := i
+			for i < len(query) && isSQLWordPart(query[i]) {
+				i++
+			}
+			keywords = append(keywords, strings.ToUpper(query[start:i]))
+		default:
+			i++
+		}
+	}
+	return keywords
+}
+
+func isSQLWordStart(ch byte) bool {
+	return ch == '_' || ch >= 'A' && ch <= 'Z' || ch >= 'a' && ch <= 'z'
+}
+
+func isSQLWordPart(ch byte) bool {
+	return isSQLWordStart(ch) || ch >= '0' && ch <= '9' || ch == '$'
 }
 
 // executeQuery runs a SELECT-like query and returns formatted table output.
@@ -389,6 +502,8 @@ Supports SELECT, INSERT, UPDATE, DELETE, SHOW, DESCRIBE, and other SQL statement
 SELECT-like queries return formatted table output with column alignment.
 Non-SELECT queries return affected row count and last insert ID.
 Connection is closed after each call (no session pooling).
+Each connection uses utf8mb4 for client, connection, and result text.
+Verified TLS connections are available with tls=true.
 Defaults: 1000 rows, 100 columns, 200 characters per cell, and 32768 total output characters.
 Use max_rows/max_columns/max_value_chars/max_output_chars to tune bounded output;
 use SQL LIMIT/OFFSET for deterministic paging.`,
