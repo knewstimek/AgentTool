@@ -8,8 +8,9 @@ import (
 )
 
 type operationShape struct {
-	fields   []string
-	required []string
+	fields             []string
+	required           []string
+	requiresConnection bool
 }
 
 var connectionFields = []string{
@@ -21,18 +22,27 @@ var connectionFields = []string{
 var compactOperationShapes = map[string]map[string]operationShape{
 	"ssh": {
 		"execute": {
-			fields:   append(append([]string{}, connectionFields...), "operation", "command", "timeout_sec", "max_output_chars", "output_mode", "quiet", "echo_command", "result_only"),
-			required: []string{"command"},
+			fields:             append(append([]string{}, connectionFields...), "operation", "command", "timeout_sec", "max_output_chars", "output_mode", "quiet", "echo_command", "result_only"),
+			required:           []string{"command"},
+			requiresConnection: true,
+		},
+	},
+	"ssh_key": {
+		"convert": {
+			fields:   []string{"operation", "input_path", "output_path", "output_format", "input_passphrase", "output_passphrase", "comment", "overwrite"},
+			required: []string{"input_path", "output_path", "output_format"},
 		},
 	},
 	"sftp": {
 		"upload": {
-			fields:   append(append([]string{}, connectionFields...), "operation", "local_path", "remote_path", "overwrite", "quiet", "result_only"),
-			required: []string{"operation", "local_path", "remote_path"},
+			fields:             append(append([]string{}, connectionFields...), "operation", "local_path", "remote_path", "overwrite", "quiet", "result_only"),
+			required:           []string{"operation", "local_path", "remote_path"},
+			requiresConnection: true,
 		},
 		"upload_many": {
-			fields:   append(append([]string{}, connectionFields...), "operation", "uploads", "overwrite", "quiet", "result_only"),
-			required: []string{"operation", "uploads"},
+			fields:             append(append([]string{}, connectionFields...), "operation", "uploads", "overwrite", "quiet", "result_only"),
+			required:           []string{"operation", "uploads"},
+			requiresConnection: true,
 		},
 	},
 }
@@ -80,10 +90,12 @@ func compactInputSchema(encoded []byte, tool, operation string) ([]byte, error) 
 		if len(shape.required) > 0 {
 			result["required"] = shape.required
 		}
-		result["anyOf"] = []any{
-			map[string]any{"required": []string{"connection_id"}},
-			map[string]any{"required": []string{"connection_profile"}},
-			map[string]any{"required": []string{"host", "user"}},
+		if shape.requiresConnection {
+			result["anyOf"] = []any{
+				map[string]any{"required": []string{"connection_id"}},
+				map[string]any{"required": []string{"connection_profile"}},
+				map[string]any{"required": []string{"host", "user"}},
+			}
 		}
 	} else {
 		// Generic compact mode keeps all fields but strips verbose root metadata.

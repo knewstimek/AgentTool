@@ -14,7 +14,7 @@ Built-in tools in AI coding agents (Claude Code, Cursor, Codex, etc.) have known
 
 - **Tab indentation breaks**: LLMs output spaces, but your project uses tabs. The built-in Edit tool writes spaces as-is, corrupting your indentation style.
 - **Encoding corruption**: Editing EUC-KR, Shift-JIS, or GB18030 files silently converts them to UTF-8, breaking legacy projects.
-- **Too many separate tools**: Making the agent find, install, and configure Redis CLI, MySQL client, SSH client, etc. is tedious and error-prone. agent-tool bundles 54 tools into one binary and exposes them on demand through compact profiles.
+- **Too many separate tools**: Making the agent find, install, and configure Redis CLI, MySQL client, SSH client, etc. is tedious and error-prone. agent-tool bundles 55 tools into one binary and exposes them on demand through compact profiles.
 - **No reverse engineering support**: Built-in tools can't disassemble binaries, inspect PE/ELF headers, find function boundaries, or search cross-references. agent-tool includes static binary analysis (disassembly, xref, function detection), a DAP debugger, and CheatEngine-style memory tools -- giving your agent full reverse engineering capabilities.
 - **Network censorship**: In some countries, government-level web filtering breaks plain `curl`/`wget` requests. agent-tool uses ECH (Encrypted Client Hello) and DoH (DNS over HTTPS) by default to work around these restrictions.
 
@@ -27,7 +27,7 @@ Claude Code, Codex CLI, Cursor, Windsurf, Cline, Gemini CLI, and any MCP-compati
 ## LLM-efficient by default
 
 The default `core` profile exposes only 11 schemas (including `toolbox`) instead of
-all 54. In a protocol-level measurement this reduced the serialized tool list from
+all 55. In a protocol-level measurement this reduced the serialized tool list from
 about 84 KB (`full`) to 18 KB. Use
 `toolbox(operation="describe", tool="ssh", compact=true, tool_operation="execute")`
 to load only one operation's fields and required list, then invoke it through
@@ -69,6 +69,7 @@ Local relative paths resolve against an explicit workspace, then the MCP client 
 | **EnvVar** | Read environment variables. Sensitive values (passwords, tokens) auto-masked | ✅ |
 | **Firewall** | Read firewall rules — iptables/nftables/firewalld (Linux), netsh (Windows). Read-only | ✅ |
 | **SSH** | SSH execution with 32K head+tail capture, original byte counts, proper non-zero-exit errors, and background jobs (`start/status/tail/cancel`). Auth-aware pooling, host-key verification, ProxyJump, IPv6 | ✅ |
+| **SSHKey** | Convert local private keys between PuTTY PPK v3, traditional PEM, modern OpenSSH, and PKCS#8. Auto-detects input, supports encrypted PPK/OpenSSH output, writes mode 0600, and never returns key material | ✅ |
 | **SFTP** | Transfer files and manage remote filesystems over SSH. Upload, download, ls, stat, mkdir, rm, chmod, rename. Reuses SSH session pool. Max 2 GB per transfer | ✅ |
 | **Bash** | Persistent shell sessions with working directory/environment retention, safe repeated-diagnostic compaction, and expiring raw-output retrieval. Session pooling (max 5, idle timeout 30 min). Unix: bash/sh, Windows: PowerShell/git-bash/cmd | ✅ |
 | **WebFetch** | Fetch web content as text/Markdown with a 32K default/128K max. ECH + DoH, HTML→Markdown conversion, SSRF protection, proxy support, Chrome User-Agent | ✅ |
@@ -337,6 +338,30 @@ is shown once per pooled connection instead of on every call; SSRF blocking and 
 metadata protection are unchanged. SSH also supports `quiet`, `echo_command`, and
 `result_only`; the last returns compact JSON centered on `stdout`, `stderr`, and
 `exit_code`. SFTP supports `quiet`, `result_only`, and `upload_many` (up to 100 files).
+
+### Local SSH private-key conversion
+
+`ssh_key` converts a private-key file without sending its contents over the network or
+returning key material in the response. Input is auto-detected as PPK, PEM, PKCS#8, or
+OpenSSH. The output format is one of `ppk`, `pem`, `pkcs8`, or `openssh`.
+
+```json
+{
+  "operation": "convert",
+  "input_path": "server.pem",
+  "output_path": "server.ppk",
+  "output_format": "ppk",
+  "input_passphrase": "",
+  "output_passphrase": "",
+  "overwrite": false
+}
+```
+
+PPK output uses version 3. Passphrase-protected PPK output uses Argon2id,
+AES-256-CBC, and HMAC-SHA-256; protected OpenSSH output uses OpenSSH's modern
+encrypted format. Traditional PEM and PKCS#8 output are deliberately unencrypted;
+use `openssh` or `ppk` when output encryption is required. New files are mode 0600,
+and existing files are not replaced unless `overwrite=true`.
 
 ### Runtime Configuration
 

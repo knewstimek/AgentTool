@@ -406,9 +406,9 @@ const mcpPermissionEntry = "mcp__agent-tool__*"
 
 // safePermissionEntries lists tools that are safe to auto-approve.
 // These only access local files, metadata, or read-only system info.
-// Excluded (require manual approval): ssh, sftp, mysql, redis, httpreq,
+// Excluded (require manual approval): ssh, ssh_key, sftp, mysql, redis, httpreq,
 // webfetch, download, bash, procexec, prockill, debug — these access networks,
-// remote systems, or execute arbitrary commands.
+// remote systems, sensitive private-key material, or execute arbitrary commands.
 var safePermissionEntries = []string{
 	"mcp__agent-tool__read",
 	"mcp__agent-tool__write",

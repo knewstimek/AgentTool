@@ -53,6 +53,7 @@ import (
 	sftptool "agent-tool/tools/sftp"
 	"agent-tool/tools/sloc"
 	"agent-tool/tools/ssh"
+	"agent-tool/tools/sshkey"
 	"agent-tool/tools/sysinfo"
 	"agent-tool/tools/tlscheck"
 	"agent-tool/tools/tomlquery"
@@ -66,7 +67,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-const Version = "v0.9.5"
+const Version = "v0.9.6"
 
 func main() {
 	args := os.Args[1:]
@@ -176,7 +177,7 @@ Use multiread to read multiple files in a single call. Use help with a topic for
 
 The compact core profile is loaded by default. For a non-core capability, use toolbox operation=describe with its tool name, then toolbox operation=call with the target arguments. Set compact=true and tool_operation for an operation-only schema, and reuse schema_handle when unchanged. This stable gateway works even when the client ignores tools/list_changed. enable/disable/profile remain optional direct-binding controls. Large text results are bounded and report explicit continuation metadata; relative local paths use MCP roots when available.
 
-Toolbox groups: core (essential edit/read/search) | file (file management/config/query helpers) | coding (shell/process/archive/source helpers) | system (OS/process/IPC tools) | remote (SSH/SFTP/HTTP/network tools) | data (JSON/YAML/TOML/MySQL/Redis) | analysis (binary/debug/codegraph/memory tools) | windows (GUI/screenshot/clipboard tools).`,
+Toolbox groups: core (essential edit/read/search) | file (file management/config/query helpers) | coding (shell/process/archive/source helpers) | system (OS/process/IPC tools) | remote (SSH/SFTP/key conversion/HTTP/network tools) | data (JSON/YAML/TOML/MySQL/Redis) | analysis (binary/debug/codegraph/memory tools) | windows (GUI/screenshot/clipboard tools).`,
 		},
 	)
 
@@ -218,6 +219,7 @@ Toolbox groups: core (essential edit/read/search) | file (file management/config
 		{Name: "ipc", Group: "system", Register: func() { ipc.Register(server) }},
 
 		{Name: "ssh", Group: "remote", Register: func() { ssh.Register(server) }},
+		{Name: "ssh_key", Group: "remote", Register: func() { sshkey.Register(server) }},
 		{Name: "sftp", Group: "remote", Register: func() { sftptool.Register(server) }},
 		{Name: "webfetch", Group: "remote", Register: func() { webfetch.Register(server) }},
 		{Name: "websearch", Group: "remote", Register: func() { websearch.Register(server) }},

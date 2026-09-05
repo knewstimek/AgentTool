@@ -8,6 +8,7 @@ import (
 	"agent-tool/common"
 	"agent-tool/tools/sftp"
 	"agent-tool/tools/ssh"
+	"agent-tool/tools/sshkey"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -28,6 +29,7 @@ func TestCompactDescribeFiltersByTargetOperationAndReusesHandle(t *testing.T) {
 	m := NewManager(server, []Spec{
 		{Name: "ssh", Group: "remote", Register: func() { ssh.Register(server) }},
 		{Name: "sftp", Group: "remote", Register: func() { sftp.Register(server) }},
+		{Name: "ssh_key", Group: "remote", Register: func() { sshkey.Register(server) }},
 	}, "v1")
 
 	result, out, err := m.Handle(context.Background(), nil, Input{
@@ -79,6 +81,17 @@ func TestCompactDescribeFiltersByTargetOperationAndReusesHandle(t *testing.T) {
 	uploadText := upload.Content[0].(*mcp.TextContent).Text
 	if !strings.Contains(uploadText, `"local_path"`) || !strings.Contains(uploadText, `"remote_path"`) || strings.Contains(uploadText, `"transfer_id"`) {
 		t.Fatalf("unexpected upload schema: %s", uploadText)
+	}
+
+	keyConvert, _, err := m.Handle(context.Background(), nil, Input{
+		Operation: "describe", Tool: "ssh_key", Compact: true, ToolOperation: "convert",
+	})
+	if err != nil || keyConvert.IsError {
+		t.Fatalf("ssh_key describe failed: result=%v err=%v", keyConvert, err)
+	}
+	keyText := keyConvert.Content[0].(*mcp.TextContent).Text
+	if !strings.Contains(keyText, `"input_path"`) || !strings.Contains(keyText, `"output_format"`) || strings.Contains(keyText, `"connection_id"`) || strings.Contains(keyText, `"anyOf"`) {
+		t.Fatalf("unexpected ssh_key schema: %s", keyText)
 	}
 }
 

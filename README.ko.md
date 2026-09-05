@@ -14,7 +14,7 @@ AI 코딩 에이전트(Claude Code, Cursor, Codex 등)의 내장 도구에는 �
 
 - **탭 들여쓰기 깨짐**: LLM은 공백을 출력하지만, 프로젝트는 탭을 사용. 내장 Edit는 공백을 그대로 써서 들여쓰기 스타일이 망가짐.
 - **인코딩 손상**: EUC-KR, Shift-JIS, GB18030 파일을 편집하면 조용히 UTF-8로 변환되어 레거시 프로젝트가 깨짐.
-- **도구가 너무 분산됨**: Redis CLI, MySQL/SSH 클라이언트를 따로 찾고 설정하는 과정은 번거롭고 오류가 잦음. agent-tool은 54개 도구를 한 바이너리로 통합하고 compact 프로필과 고정 toolbox gateway로 필요할 때 호출함.
+- **도구가 너무 분산됨**: Redis CLI, MySQL/SSH 클라이언트를 따로 찾고 설정하는 과정은 번거롭고 오류가 잦음. agent-tool은 55개 도구를 한 바이너리로 통합하고 compact 프로필과 고정 toolbox gateway로 필요할 때 호출함.
 - **리버스 엔지니어링 지원 부재**: 내장 도구로는 바이너리 디스어셈블, PE/ELF 헤더 분석, 함수 경계 탐지, 크로스 레퍼런스 검색이 불가능. agent-tool은 정적 바이너리 분석(디스어셈블리, xref, 함수 탐지), DAP 디버거, CheatEngine 스타일 메모리 도구를 포함 -- 에이전트에게 완전한 리버스 엔지니어링 능력을 부여.
 - **네트워크 검열**: 일부 국가에서 정부 수준의 웹 필터링으로 `curl`/`wget` 요청이 차단됨. agent-tool은 ECH (Encrypted Client Hello)와 DoH (DNS over HTTPS)를 기본 활성화하여 이런 제한을 우회.
 
@@ -26,7 +26,7 @@ Claude Code, Codex CLI, Cursor, Windsurf, Cline, Gemini CLI 및 모든 MCP 호�
 
 ## LLM 친화적 기본 동작
 
-기본 `core` 프로필은 54개 전체 스키마 대신 `toolbox`를 포함한 11개만 노출합니다.
+기본 `core` 프로필은 55개 전체 스키마 대신 `toolbox`를 포함한 11개만 노출합니다.
 실제 MCP 프로토콜 측정에서 직렬화된 도구 목록은 `full` 약 84KB에서 약 18KB로
 줄었습니다. `toolbox(operation="describe", tool="ssh", compact=true,
 tool_operation="execute")`로 한 operation에 필요한 필드와 required 목록만 확인한 뒤
@@ -68,6 +68,7 @@ tool_operation="execute")`로 한 operation에 필요한 필드와 required 목�
 | **EnvVar** | 환경변수 조회. 민감 값(비밀번호, 토큰) 자동 마스킹 | ✅ |
 | **Firewall** | 방화벽 규칙 조회 — iptables/nftables/firewalld (Linux), netsh (Windows). 읽기 전용 | ✅ |
 | **SSH** | 기본 32K head+tail 캡처, 원본 바이트 수, 비정상 종료 오류 의미론, 백그라운드 작업(start/status/tail/cancel). 인증 인식 풀링, 호스트 키 검증, ProxyJump, IPv6 | ✅ |
+| **SSHKey** | 로컬 개인키를 PuTTY PPK v3, 전통 PEM, 최신 OpenSSH, PKCS#8 사이에서 변환. 입력 자동 감지, 암호화 PPK/OpenSSH 출력, 0600 저장을 지원하며 키 본문은 반환하지 않음 | ✅ |
 | **SFTP** | SSH 경유 파일 전송 및 원격 파일시스템 관리. 업로드, 다운로드, ls, stat, mkdir, rm, chmod, rename. 비동기 전송(upload_async/download_async + status/cancel). SSH 세션 풀 재사용. 최대 2GB | ✅ |
 | **Bash** | 영속 셸 세션 — 작업 디렉토리·환경변수 상태 유지, 안전한 반복 진단 압축과 만료형 raw 출력 조회. 세션 풀링 (최대 5개, 유휴 타임아웃 30분). Unix: bash/sh, Windows: PowerShell/git-bash/cmd | ✅ |
 | **WebFetch** | 기본 32K/최대 128K 웹 콘텐츠 텍스트·마크다운 반환. ECH + DoH, HTML→마크다운, SSRF 차단, 프록시 지원 | ✅ |
@@ -332,6 +333,30 @@ key, jump host 필드 반복을 없앨 수 있습니다. 프로필은 OS 사용�
 `echo_command`, `result_only`도 지원하며 마지막 옵션은 `stdout`, `stderr`, `exit_code`
 중심의 compact JSON을 반환합니다. SFTP는 `quiet`, `result_only`, 최대 100개 파일의
 `upload_many`를 지원합니다.
+
+### 로컬 SSH 개인키 변환
+
+`ssh_key`는 개인키 내용을 네트워크로 보내거나 응답에 노출하지 않고 로컬 파일을
+변환합니다. 입력은 PPK, PEM, PKCS#8, OpenSSH 중 하나로 자동 감지하며 출력 형식은
+`ppk`, `pem`, `pkcs8`, `openssh` 중 하나입니다.
+
+```json
+{
+  "operation": "convert",
+  "input_path": "server.pem",
+  "output_path": "server.ppk",
+  "output_format": "ppk",
+  "input_passphrase": "",
+  "output_passphrase": "",
+  "overwrite": false
+}
+```
+
+PPK 출력은 버전 3입니다. 패스프레이즈로 보호하는 PPK 출력은 Argon2id,
+AES-256-CBC, HMAC-SHA-256을 사용하고, OpenSSH 출력은 최신 암호화 형식을 사용합니다.
+전통 PEM과 PKCS#8 출력은 의도적으로 암호화하지 않으므로 출력 암호화가 필요하면
+`openssh` 또는 `ppk`를 사용하세요. 새 파일은 0600 권한으로 저장하며
+`overwrite=true`가 없으면 기존 파일을 바꾸지 않습니다.
 
 ### 런타임 설정
 

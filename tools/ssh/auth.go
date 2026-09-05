@@ -65,6 +65,22 @@ func buildAuthMethods(input SSHInput) (*authResult, error) {
 // from the parser that recognized the input: replacing it with the PPK
 // fallback error hides actionable failures such as a missing passphrase.
 func parseKey(keyBytes []byte, passphrase string) (gossh.Signer, error) {
+	cryptoKey, err := ParseRawPrivateKey(keyBytes, passphrase)
+	if err != nil {
+		return nil, err
+	}
+	signer, err := gossh.NewSignerFromKey(cryptoKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create SSH signer from private key: %w", err)
+	}
+	return signer, nil
+}
+
+// ParseRawPrivateKey parses an OpenSSH/PEM or PPK private key and returns its
+// crypto private-key value. It is exported so local key-management tools can
+// reuse exactly the same format support and actionable diagnostics as SSH and
+// SFTP authentication.
+func ParseRawPrivateKey(keyBytes []byte, passphrase string) (any, error) {
 	// A UTF-8 BOM is not part of the PEM armor, but Windows editors commonly add
 	// one to otherwise valid text files. Removing it does not alter key data.
 	keyBytes = bytes.TrimPrefix(keyBytes, []byte{0xef, 0xbb, 0xbf})
@@ -88,24 +104,24 @@ func parseKey(keyBytes []byte, passphrase string) (gossh.Signer, error) {
 		return nil, errors.New("key_file contains an SSH public key; provide the matching private key file (usually the path without .pub)")
 	}
 
-	// ssh.ParsePrivateKey supports PEM-armored OpenSSH keys, including Ed25519.
+	// ssh.ParseRawPrivateKey supports PEM-armored OpenSSH keys, including Ed25519.
 	// If a stale profile passphrase is supplied for a plaintext key, accept the
 	// key after verifying that it parses without a passphrase.
 	var pemErr error
 	if passphrase != "" {
-		var signer gossh.Signer
-		signer, pemErr = gossh.ParsePrivateKeyWithPassphrase(keyBytes, []byte(passphrase))
+		var cryptoKey any
+		cryptoKey, pemErr = gossh.ParseRawPrivateKeyWithPassphrase(keyBytes, []byte(passphrase))
 		if pemErr == nil {
-			return signer, nil
+			return cryptoKey, nil
 		}
-		if signer, err := gossh.ParsePrivateKey(keyBytes); err == nil {
-			return signer, nil
+		if cryptoKey, err := gossh.ParseRawPrivateKey(keyBytes); err == nil {
+			return cryptoKey, nil
 		}
 	} else {
-		var signer gossh.Signer
-		signer, pemErr = gossh.ParsePrivateKey(keyBytes)
+		var cryptoKey any
+		cryptoKey, pemErr = gossh.ParseRawPrivateKey(keyBytes)
 		if pemErr == nil {
-			return signer, nil
+			return cryptoKey, nil
 		}
 	}
 
@@ -131,11 +147,7 @@ func parseKey(keyBytes []byte, passphrase string) (gossh.Signer, error) {
 		return nil, fmt.Errorf("failed to parse PPK private key: %w", err)
 	}
 
-	signer, err := gossh.NewSignerFromKey(cryptoKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create SSH signer from PPK key: %w", err)
-	}
-	return signer, nil
+	return cryptoKey, nil
 }
 
 func privateKeyParseError(keyBytes []byte, passphrase string, pemErr, ppkErr error) error {

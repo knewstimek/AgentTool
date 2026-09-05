@@ -107,6 +107,7 @@ Relative local paths resolve against an explicit workspace, then the client's MC
 - envvar: Read environment variables (sensitive values masked)
 - firewall: Read firewall rules (iptables/nftables/netsh, read-only)
 - ssh: Execute commands on remote servers via SSH (IPv4/IPv6, ProxyJump, session pooling)
+- ssh_key: Convert local SSH private keys between PPK, PEM, OpenSSH, and PKCS#8
 - sftp: Transfer files and manage remote filesystems over SSH (upload, download, ls, stat, mkdir, rm, chmod, rename, async transfers)
 - bash: Persistent shell sessions with state retention and raw-retrievable diagnostic compaction
 - webfetch: Fetch web content as text/Markdown with ECH, DoH, proxy, and SSRF protection
@@ -427,6 +428,16 @@ Non-zero remote exits return IsError=true. For long commands, use background=tru
 	key_file, passphrase, use_agent, command, disconnect, host_key_check, timeout_sec,
 	max_output_chars, output_mode, jump_host, jump_port, jump_user, jump_password,
 	jump_key_file, jump_passphrase, connection_profile, connection_id, quiet, echo_command, result_only
+
+## ssh_key
+Convert a local SSH private-key file. Input is auto-detected as PPK, PEM, PKCS#8,
+or OpenSSH. Output formats: ppk (PuTTY PPK v3), pem (traditional key-specific PEM),
+openssh (modern OpenSSH), or pkcs8. RSA, ECDSA, Ed25519, and DSA are supported where
+the target format permits them. output_passphrase is supported for ppk and openssh;
+legacy encrypted PEM is intentionally not generated. The tool never returns key
+material, writes new files with mode 0600, and refuses replacement unless overwrite=true.
+Parameters: operation (convert), input_path, output_path, output_format,
+  input_passphrase, output_passphrase, comment, overwrite
 
 ## sftp
 Transfer files and manage remote filesystems over SSH (SFTP protocol).
