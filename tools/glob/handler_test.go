@@ -56,4 +56,62 @@ func TestGlobDefaultsToRelativePathsAndSkipsGeneratedDirs(t *testing.T) {
 	if len(out.Files) != 1 || out.Files[0] != "main.go" {
 		t.Fatalf("unexpected default paths: %+v", out.Files)
 	}
+	_, explicit, err := Handle(context.Background(), nil, GlobInput{Pattern: "node_modules/**/*.go", Path: root})
+	if err != nil || len(explicit.Files) != 1 || explicit.Files[0] != "node_modules/dep.go" {
+		t.Fatalf("explicit generated root was not searched: err=%v files=%+v", err, explicit.Files)
+	}
+}
+
+func TestGlobHonorsIgnoreAndGitignoreTogether(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "ignored-dir"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"keep.txt", "git-only.txt", "ignore-only.txt", "shared.txt"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "ignored-dir", "child.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("git-only.txt\nshared.txt\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".ignore"), []byte("ignore-only.txt\nignored-dir/\n!shared.txt\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		pattern       string
+		includedCount int
+	}{{"*.txt", 4}, {"**/*.txt", 5}} {
+		pattern := tc.pattern
+		_, out, err := Handle(context.Background(), nil, GlobInput{Pattern: pattern, Path: root})
+		if err != nil {
+			t.Fatalf("glob %q failed: %v", pattern, err)
+		}
+		if len(out.Files) != 2 || !containsPath(out.Files, "keep.txt") || !containsPath(out.Files, "shared.txt") {
+			t.Fatalf("glob %q did not apply combined ignore rules: %+v", pattern, out.Files)
+		}
+
+		_, included, err := Handle(context.Background(), nil, GlobInput{
+			Pattern: pattern, Path: root, IncludeIgnored: true,
+		})
+		if err != nil {
+			t.Fatalf("include_ignored glob %q failed: %v", pattern, err)
+		}
+		if len(included.Files) != tc.includedCount {
+			t.Fatalf("include_ignored glob %q returned %+v", pattern, included.Files)
+		}
+	}
+}
+
+func containsPath(paths []string, want string) bool {
+	for _, path := range paths {
+		if path == want {
+			return true
+		}
+	}
+	return false
 }

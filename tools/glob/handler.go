@@ -25,7 +25,7 @@ type GlobInput struct {
 	MaxOutputChars int    `json:"max_output_chars,omitempty" jsonschema:"Maximum returned text characters. Default: 32768, Max: 131072"`
 	Cursor         string `json:"cursor,omitempty" jsonschema:"Opaque continuation cursor returned by a previous glob call"`
 	IncludeHidden  bool   `json:"include_hidden,omitempty" jsonschema:"Traverse hidden directories. Explicit hidden roots are always searched. Default: false"`
-	IncludeIgnored bool   `json:"include_ignored,omitempty" jsonschema:"Traverse generated/vendor directories such as node_modules, vendor, target, build, and dist. Default: false"`
+	IncludeIgnored bool   `json:"include_ignored,omitempty" jsonschema:"Include paths excluded by .gitignore/.ignore or the common generated/vendor policy. Default: false"`
 }
 
 type GlobOutput struct {
@@ -175,10 +175,11 @@ func Handle(ctx context.Context, req *mcp.CallToolRequest, input GlobInput) (*mc
 }
 
 // findMatches returns recursive glob matches and a count of paths skipped by
-// the default hidden/generated directory policy or traversal errors.
+// the default hidden/generated/ignore-file policy or traversal errors.
 func findMatches(baseDir, pattern string, includeHidden, includeIgnored bool) ([]string, int, error) {
 	var matches []string
 	skipped := 0
+	ignoreRules := common.LoadRootIgnoreRules(baseDir)
 	if strings.Contains(pattern, "**") {
 		parts := strings.SplitN(pattern, "**", 2)
 		prefix := parts[0]
@@ -198,12 +199,26 @@ func findMatches(baseDir, pattern string, includeHidden, includeIgnored bool) ([
 						skipped++
 						return filepath.SkipDir
 					}
-					if !includeIgnored && isIgnoredGlobDir(info.Name()) {
+					if !includeIgnored && common.IsDefaultIgnoredDir(info.Name()) {
+						skipped++
+						return filepath.SkipDir
+					}
+				}
+				if path != baseDir && !includeIgnored {
+					rel, _ := filepath.Rel(baseDir, path)
+					if ignoreRules.Match(filepath.ToSlash(rel), true) {
 						skipped++
 						return filepath.SkipDir
 					}
 				}
 				return nil
+			}
+			if !includeIgnored {
+				rel, _ := filepath.Rel(baseDir, path)
+				if ignoreRules.Match(filepath.ToSlash(rel), false) {
+					skipped++
+					return nil
+				}
 			}
 			if suffix == "" {
 				matches = append(matches, path)
@@ -217,17 +232,58 @@ func findMatches(baseDir, pattern string, includeHidden, includeIgnored bool) ([
 		})
 		return matches, skipped, err
 	}
-	matches, err := filepath.Glob(filepath.Join(baseDir, filepath.FromSlash(pattern)))
-	return matches, skipped, err
+	rawMatches, err := filepath.Glob(filepath.Join(baseDir, filepath.FromSlash(pattern)))
+	if err != nil {
+		return nil, skipped, err
+	}
+	explicitParts := explicitGlobDirParts(pattern)
+	for _, match := range rawMatches {
+		info, statErr := os.Stat(match)
+		if statErr != nil {
+			skipped++
+			continue
+		}
+		rel, relErr := filepath.Rel(baseDir, match)
+		if relErr != nil {
+			skipped++
+			continue
+		}
+		parts := strings.Split(filepath.ToSlash(rel), "/")
+		ignoredAncestor := false
+		for i, part := range parts {
+			if i == len(parts)-1 && !info.IsDir() {
+				break
+			}
+			if i < explicitParts {
+				continue
+			}
+			if (!includeHidden && strings.HasPrefix(part, ".")) ||
+				(!includeIgnored && common.IsDefaultIgnoredDir(part)) {
+				ignoredAncestor = true
+				break
+			}
+		}
+		if ignoredAncestor || (!includeIgnored && ignoreRules.MatchPath(filepath.ToSlash(rel), info.IsDir())) {
+			skipped++
+			continue
+		}
+		matches = append(matches, match)
+	}
+	return matches, skipped, nil
 }
 
-func isIgnoredGlobDir(name string) bool {
-	switch strings.ToLower(name) {
-	case ".git", ".svn", ".hg", "node_modules", "vendor", "target", "build", "dist", "coverage", "__pycache__", ".venv", "venv":
-		return true
-	default:
-		return false
+func explicitGlobDirParts(pattern string) int {
+	parts := strings.Split(filepath.ToSlash(pattern), "/")
+	count := 0
+	for i, part := range parts {
+		if strings.ContainsAny(part, "*?[") {
+			break
+		}
+		if i < len(parts)-1 {
+			count++
+		}
 	}
+	return count
 }
 
 func globCursorSignature(searchDir string, input GlobInput, relativePaths bool) string {
@@ -260,7 +316,7 @@ func Register(server *mcp.Server) {
 		Description: `Finds files matching a glob pattern.
 Supports ** recursive matching and sorts results by modification time (newest first).
 Defaults to 200 workspace-relative paths and 32768 characters per page.
-Skips hidden and common generated/vendor directories unless explicitly included.
+Skips hidden paths and paths excluded by root .gitignore/.ignore or the common generated/vendor policy unless explicitly included.
 Returns total/has_more/truncated metadata and an opaque next_cursor.`,
 	}, Handle)
 }

@@ -282,7 +282,7 @@ and total-output budgets. context/before/after accept at most 1000 lines.
 When additional output exists, has_more=true and next_cursor continues without
 rescanning or repeating matches (cursor paging is unavailable with context lines).
 Directory search skips binary files (known extensions plus a NUL-byte content
-sniff), hidden/generated directories, and root .gitignore matches by default.
+sniff), hidden/generated directories, and root .gitignore/.ignore matches by default.
 Use include_hidden/include_ignored to opt in. Paths are relative by default.
 Parameters: pattern, path, glob, ignore_case, max_results, output_mode,
 output_format (compact default or classic), context, before, after,
@@ -290,8 +290,8 @@ max_line_chars, max_output_chars, cursor, relative_paths, include_hidden, includ
 
 ## glob
 Find files by pattern. Supports ** for recursive matching. Results are sorted and
-paged with limit/next_cursor; has_more and truncation are never silent. Generated
-and hidden directories are skipped by default. Paths are relative by default.
+paged with limit/next_cursor; has_more and truncation are never silent. Root
+.gitignore/.ignore matches and generated/hidden paths are skipped by default.
 Parameters: pattern, path, relative_paths, limit, max_output_chars, cursor,
 include_hidden, include_ignored
 

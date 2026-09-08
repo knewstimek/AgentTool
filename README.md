@@ -48,8 +48,8 @@ Local relative paths resolve against an explicit workspace, then the MCP client 
 | **Edit** | String replacement with smart indentation and encoding preservation (supports dry_run) | ✅ |
 | **Read** | Encoding-aware, line-numbered reading. Defaults to 400 lines/32K chars, reports truncation and exact `next_offset`, safely handles very long lines, optional SHA-256. Flexible offset and MCP ImageContent support | ✅ |
 | **Write** | Encoding-aware file creation/overwrite | ✅ |
-| **Grep** | Encoding-aware regex search with 32K output budget, compact file-grouped output, relative paths, `.gitignore`/generated-directory filtering, binary detection, output modes/context, and deterministic `next_cursor` paging without repeated matches | ✅ |
-| **Glob** | Sorted, bounded file matching with `**`, relative paths, generated-directory filtering, explicit `has_more`, and deterministic cursor paging | ✅ |
+| **Grep** | Encoding-aware regex search with 32K output budget, compact file-grouped output, relative paths, `.gitignore`/`.ignore`/generated-directory filtering, binary detection, output modes/context, and deterministic `next_cursor` paging without repeated matches | ✅ |
+| **Glob** | Sorted, bounded file matching with `**`, relative paths, `.gitignore`/`.ignore`/generated-directory filtering, explicit `has_more`, and deterministic cursor paging | ✅ |
 | **ListDir** | Bounded/pageable directory listing. max_entries + continuation cursor, directory/file filters, entry-name glob filters, counts-only mode, flat/tree output | ✅ |
 | **Diff** | Compare two files with unified diff output (encoding-aware). Files differing only in line endings or a trailing newline say so instead of returning an empty diff | ✅ |
 | **Patch** | Apply unified diff patch to a file (supports dry_run). Each line keeps its own ending, so a mixed CRLF/LF file is not rewritten | ✅ |

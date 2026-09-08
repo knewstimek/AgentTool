@@ -47,8 +47,8 @@ tool_operation="execute")`로 한 operation에 필요한 필드와 required 목�
 | **Edit** | 스마트 들여쓰기 + 인코딩 보존 문자열 치환 (dry_run 지원) | ✅ |
 | **Read** | 인코딩 인식 줄번호 읽기. 기본 400줄/32K자, 명시적 truncation과 정확한 `next_offset`, 초장문 행 안전 처리, 선택적 SHA-256, 이미지 ImageContent | ✅ |
 | **Write** | 인코딩 인식 파일 생성/덮어쓰기 | ✅ |
-| **Grep** | 기본 32K 예산, 파일별 compact 묶음 출력, 상대경로, `.gitignore`/생성 디렉터리 제외, 바이너리 감지, 중복 없는 결정적 `next_cursor` 페이징 | ✅ |
-| **Glob** | 정렬·제한된 `**` 검색. 상대경로, 생성 디렉터리 제외, 명시적 `has_more`, 결정적 cursor 페이징 | ✅ |
+| **Grep** | 기본 32K 예산, 파일별 compact 묶음 출력, 상대경로, `.gitignore`/`.ignore`/생성 디렉터리 제외, 바이너리 감지, 중복 없는 결정적 `next_cursor` 페이징 | ✅ |
+| **Glob** | 정렬·제한된 `**` 검색. 상대경로, `.gitignore`/`.ignore`/생성 디렉터리 제외, 명시적 `has_more`, 결정적 cursor 페이징 | ✅ |
 | **ListDir** | 출력 제한·페이징 디렉토리 목록. max_entries + continuation cursor, 디렉토리/파일 필터, 이름 glob 필터, counts-only, flat/tree 지원 | ✅ |
 | **Diff** | 두 파일 비교 (unified diff 출력, 인코딩 인식). 줄바꿈이나 끝 개행만 다른 경우 빈 diff 대신 그 사실을 명시 | ✅ |
 | **Patch** | unified diff 패치 적용 (dry_run 지원). 줄마다 자기 줄바꿈을 유지하므로 CRLF/LF 혼합 파일이 재작성되지 않음 | ✅ |

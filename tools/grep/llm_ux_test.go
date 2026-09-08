@@ -68,6 +68,50 @@ func TestDirectorySearchUsesRelativePathsAndIgnoreDefaults(t *testing.T) {
 	}
 }
 
+func TestDirectorySearchHonorsIgnoreAndGitignoreTogether(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "ignored-dir"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name := range map[string]bool{
+		"keep.txt": true, "git-only.txt": true, "ignore-only.txt": true, "shared.txt": true,
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("needle\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "ignored-dir", "child.txt"), []byte("needle\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("git-only.txt\nshared.txt\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".ignore"), []byte("ignore-only.txt\nignored-dir/\n!shared.txt\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result, _, err := Handle(context.Background(), nil, GrepInput{Pattern: "needle", Path: root})
+	if err != nil || result.IsError {
+		t.Fatalf("grep failed: %v", err)
+	}
+	text := result.Content[0].(*mcp.TextContent).Text
+	if !strings.Contains(text, "keep.txt") || !strings.Contains(text, "shared.txt") ||
+		strings.Contains(text, "git-only.txt") || strings.Contains(text, "ignore-only.txt") || strings.Contains(text, "child.txt") {
+		t.Fatalf("combined ignore rules were not applied: %q", text)
+	}
+
+	result, _, err = Handle(context.Background(), nil, GrepInput{
+		Pattern: "needle", Path: root, IncludeIgnored: true,
+	})
+	if err != nil || result.IsError {
+		t.Fatalf("include_ignored grep failed: %v", err)
+	}
+	text = result.Content[0].(*mcp.TextContent).Text
+	if !strings.Contains(text, "git-only.txt") || !strings.Contains(text, "ignore-only.txt") || !strings.Contains(text, "child.txt") {
+		t.Fatalf("include_ignored did not restore ignored files: %q", text)
+	}
+}
+
 func TestCompactOutputGroupsRepeatedFilePaths(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "many.txt")

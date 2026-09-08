@@ -52,7 +52,7 @@ type GrepInput struct {
 	MaxOutputChars int    `json:"max_output_chars,omitempty" jsonschema:"Maximum total result characters. Default: 32768, Max: 131072"`
 	RelativePaths  *bool  `json:"relative_paths,omitempty" jsonschema:"Return paths relative to the search root. Default: true for directory searches"`
 	IncludeHidden  bool   `json:"include_hidden,omitempty" jsonschema:"Search hidden directories. Explicitly provided hidden roots are always searched. Default: false"`
-	IncludeIgnored bool   `json:"include_ignored,omitempty" jsonschema:"Search common generated/vendor directories instead of skipping them. Default: false"`
+	IncludeIgnored bool   `json:"include_ignored,omitempty" jsonschema:"Search paths excluded by .gitignore/.ignore or the common generated/vendor policy. Default: false"`
 	Cursor         string `json:"cursor,omitempty" jsonschema:"Opaque continuation cursor returned by a previous grep call. Not supported with context lines"`
 }
 
@@ -591,7 +591,7 @@ type searchDirResult struct {
 	matchCount         int // total match count across all files
 	lowConfidenceCount int // number of files with low encoding detection confidence
 	skippedBinary      int // binary files not searched
-	skippedIgnored     int // hidden, generated, vendor, or .gitignore paths
+	skippedIgnored     int // hidden, generated, vendor, .gitignore, or .ignore paths
 	skippedUnreadable  int // paths that could not be read or traversed
 	displayChars       int
 	outputTruncated    bool
@@ -600,7 +600,7 @@ type searchDirResult struct {
 
 func searchDir(dir, globPattern string, re *regexp.Regexp, maxResults int, opts searchOpts, recursive bool) (searchDirResult, error) {
 	result := searchDirResult{}
-	ignoreRules := loadRootGitignore(dir)
+	ignoreRules := common.LoadRootIgnoreRules(dir)
 
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -615,13 +615,13 @@ func searchDir(dir, globPattern string, re *regexp.Regexp, maxResults int, opts 
 					result.skippedIgnored++
 					return filepath.SkipDir
 				}
-				if !opts.includeIgnored && isDefaultIgnoredDir(info.Name()) {
+				if !opts.includeIgnored && common.IsDefaultIgnoredDir(info.Name()) {
 					result.skippedIgnored++
 					return filepath.SkipDir
 				}
 				if !opts.includeIgnored && ignoreRules != nil {
 					rel, _ := filepath.Rel(dir, path)
-					if ignoreRules.match(filepath.ToSlash(rel), true) {
+					if ignoreRules.Match(filepath.ToSlash(rel), true) {
 						result.skippedIgnored++
 						return filepath.SkipDir
 					}
@@ -635,7 +635,7 @@ func searchDir(dir, globPattern string, re *regexp.Regexp, maxResults int, opts 
 		}
 		if !opts.includeIgnored && ignoreRules != nil {
 			rel, _ := filepath.Rel(dir, path)
-			if ignoreRules.match(filepath.ToSlash(rel), false) {
+			if ignoreRules.Match(filepath.ToSlash(rel), false) {
 				result.skippedIgnored++
 				return nil
 			}

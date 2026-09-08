@@ -1,4 +1,4 @@
-package grep
+package common
 
 import (
 	"bufio"
@@ -14,7 +14,9 @@ var defaultIgnoredDirs = map[string]bool{
 	"__pycache__": true, ".venv": true, "venv": true,
 }
 
-func isDefaultIgnoredDir(name string) bool {
+// IsDefaultIgnoredDir reports whether name is a common VCS, generated, or
+// dependency directory that search tools skip unless include_ignored is set.
+func IsDefaultIgnoredDir(name string) bool {
 	return defaultIgnoredDirs[strings.ToLower(name)]
 }
 
@@ -25,16 +27,30 @@ type ignorePattern struct {
 	anchored bool
 }
 
-type rootIgnoreRules struct {
+// RootIgnoreRules contains patterns from a search root's .gitignore and
+// .ignore files. Patterns from .ignore are appended last so they can override
+// matching .gitignore rules, mirroring the purpose of a search-specific ignore
+// file.
+type RootIgnoreRules struct {
 	patterns []ignorePattern
 }
 
-// loadRootGitignore deliberately reads only the search root's .gitignore.
-// This covers the dominant generated/vendor exclusions without pre-walking the
-// whole tree before grep itself starts. Nested ignore files can be added later
-// without changing the public include_ignored contract.
-func loadRootGitignore(root string) *rootIgnoreRules {
-	f, err := os.Open(filepath.Join(root, ".gitignore"))
+// LoadRootIgnoreRules reads the search root's .gitignore and .ignore files.
+// Root-only loading keeps startup proportional to the actual traversal; nested
+// ignore files can be supported separately without changing this contract.
+func LoadRootIgnoreRules(root string) *RootIgnoreRules {
+	var patterns []ignorePattern
+	for _, name := range []string{".gitignore", ".ignore"} {
+		patterns = append(patterns, loadIgnoreFile(filepath.Join(root, name))...)
+	}
+	if len(patterns) == 0 {
+		return nil
+	}
+	return &RootIgnoreRules{patterns: patterns}
+}
+
+func loadIgnoreFile(path string) []ignorePattern {
+	f, err := os.Open(path)
 	if err != nil {
 		return nil
 	}
@@ -56,20 +72,21 @@ func loadRootGitignore(root string) *rootIgnoreRules {
 			p.dirOnly = true
 			line = strings.TrimSuffix(line, "/")
 		}
+		p.anchored = strings.HasPrefix(line, "/") || strings.Contains(strings.TrimPrefix(line, "/"), "/")
 		line = strings.TrimPrefix(line, "/")
-		p.anchored = strings.Contains(line, "/")
 		p.pattern = filepath.ToSlash(line)
 		if p.pattern != "" {
 			patterns = append(patterns, p)
 		}
 	}
-	if len(patterns) == 0 {
-		return nil
-	}
-	return &rootIgnoreRules{patterns: patterns}
+	return patterns
 }
 
-func (rules *rootIgnoreRules) match(rel string, isDir bool) bool {
+// Match reports whether a path relative to the search root is ignored.
+func (rules *RootIgnoreRules) Match(rel string, isDir bool) bool {
+	if rules == nil {
+		return false
+	}
 	rel = filepath.ToSlash(rel)
 	matched := false
 	for _, pattern := range rules.patterns {
@@ -83,30 +100,42 @@ func (rules *rootIgnoreRules) match(rel string, isDir bool) bool {
 	return matched
 }
 
+// MatchPath also checks parent directories. It is useful when paths came from
+// filepath.Glob rather than a walk that could prune ignored directories.
+func (rules *RootIgnoreRules) MatchPath(rel string, isDir bool) bool {
+	if rules == nil {
+		return false
+	}
+	rel = filepath.ToSlash(rel)
+	parts := strings.Split(rel, "/")
+	for i := 1; i < len(parts); i++ {
+		if rules.Match(strings.Join(parts[:i], "/"), true) {
+			return true
+		}
+	}
+	return rules.Match(rel, isDir)
+}
+
 func matchIgnoreGlob(pattern ignorePattern, rel string) bool {
 	if pattern.anchored {
-		return globMatch(pattern.pattern, rel)
+		return ignoreGlobMatch(pattern.pattern, rel)
 	}
 	parts := strings.Split(rel, "/")
 	for i := range parts {
-		if globMatch(pattern.pattern, strings.Join(parts[i:], "/")) {
+		if ignoreGlobMatch(pattern.pattern, strings.Join(parts[i:], "/")) {
 			return true
 		}
 	}
 	return false
 }
 
-// globMatch supports the common gitignore ** forms while delegating ordinary
-// wildcard semantics to filepath.Match.
-func globMatch(pattern, name string) bool {
+// ignoreGlobMatch supports the common ignore-file ** forms while delegating
+// ordinary wildcard semantics to filepath.Match.
+func ignoreGlobMatch(pattern, name string) bool {
 	pattern = filepath.FromSlash(pattern)
 	name = filepath.FromSlash(name)
 	if !strings.Contains(pattern, "**") {
 		matched, _ := filepath.Match(pattern, name)
-		if matched {
-			return true
-		}
-		matched, _ = filepath.Match(pattern, filepath.Base(name))
 		return matched
 	}
 	if strings.HasPrefix(pattern, "**"+string(filepath.Separator)) {
