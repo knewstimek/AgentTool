@@ -36,15 +36,52 @@ type xrefResult struct {
 	line    string // formatted output line
 }
 
-// opXref finds all code locations that reference a target virtual address.
+// xrefTargetRange is an exact target when startVA == endVA, otherwise an
+// inclusive address range. Keeping the normalized VA and RVA forms avoids
+// reparsing and makes every architecture apply identical range semantics.
+type xrefTargetRange struct {
+	imageBase        uint64
+	startVA, endVA   uint64
+	startRVA, endRVA uint32
+}
+
+func (r xrefTargetRange) containsRVA(candidate int64) (uint64, bool) {
+	if candidate < 0 || uint64(candidate) > 0xFFFFFFFF {
+		return 0, false
+	}
+	rva := uint32(candidate)
+	if rva < r.startRVA || rva > r.endRVA {
+		return 0, false
+	}
+	return r.imageBase + uint64(rva), true
+}
+
+func (r xrefTargetRange) containsVA(candidate uint64) bool {
+	return candidate >= r.startVA && candidate <= r.endVA
+}
+
+func (r xrefTargetRange) isRange() bool {
+	return r.startVA != r.endVA
+}
+
+func (r xrefTargetRange) label() string {
+	if r.isRange() {
+		return fmt.Sprintf("range 0x%x-0x%x", r.startVA, r.endVA)
+	}
+	return fmt.Sprintf("0x%x", r.startVA)
+}
+
+// opXref finds all code locations that reference a target virtual address or,
+// when target_end_va is supplied, any address in the inclusive target range.
 // Supports PE, ELF, and Mach-O binaries with x86, x64, ARM64, and ARM32 architectures.
 //
 // Performance: full-scans all executable sections on every call (no caching).
 // This is fast enough in practice (10MB binary in ~10ms) because the scan is
 // simple byte-pattern matching, not instruction-level decoding. Unlike call_graph
 // which collects ALL call targets (high false-positive risk from data bytes),
-// xref matches against a specific target address, so false positives are
-// statistically negligible (~1/2^32 chance per byte).
+// Exact xref matches against a specific target address, so false positives are
+// statistically negligible (~1/2^32 chance per byte). Range-match probability
+// grows with the requested span, so callers should keep ranges task-sized.
 func opXref(input AnalyzeInput) (string, error) {
 	if input.TargetVA == "" {
 		return "", fmt.Errorf("target_va is required for xref")
@@ -53,6 +90,16 @@ func opXref(input AnalyzeInput) (string, error) {
 	targetVA, err := parseHexAddr(input.TargetVA)
 	if err != nil {
 		return "", fmt.Errorf("invalid target_va: %s", input.TargetVA)
+	}
+	targetEndVA := targetVA
+	if input.TargetEndVA != "" {
+		targetEndVA, err = parseHexAddr(input.TargetEndVA)
+		if err != nil {
+			return "", fmt.Errorf("invalid target_end_va: %s", input.TargetEndVA)
+		}
+		if targetEndVA < targetVA {
+			return "", fmt.Errorf("target_end_va 0x%x must be greater than or equal to target_va 0x%x", targetEndVA, targetVA)
+		}
 	}
 
 	// Try PE, then ELF, then Mach-O
@@ -73,7 +120,16 @@ func opXref(input AnalyzeInput) (string, error) {
 	if targetVA-bin.imageBase > 0xFFFFFFFF {
 		return "", fmt.Errorf("target_va 0x%x is too far from image base 0x%x (offset exceeds 4GB)", targetVA, bin.imageBase)
 	}
-	targetRVA := uint32(targetVA - bin.imageBase)
+	if targetEndVA-bin.imageBase > 0xFFFFFFFF {
+		return "", fmt.Errorf("target_end_va 0x%x is too far from image base 0x%x (offset exceeds 4GB)", targetEndVA, bin.imageBase)
+	}
+	target := xrefTargetRange{
+		imageBase: bin.imageBase,
+		startVA:   targetVA,
+		endVA:     targetEndVA,
+		startRVA:  uint32(targetVA - bin.imageBase),
+		endRVA:    uint32(targetEndVA - bin.imageBase),
+	}
 
 	maxRes := input.MaxResults
 	if maxRes <= 0 {
@@ -92,13 +148,13 @@ func opXref(input AnalyzeInput) (string, error) {
 		}
 		switch bin.arch {
 		case "x64":
-			refs, found = collectXref64(sec.data, sec.rva, targetRVA, bin.imageBase, maxRes, found, refs)
+			refs, found = collectXref64(sec.data, sec.rva, target, maxRes, found, refs)
 		case "x86":
-			refs, found = collectXref32(sec.data, sec.rva, targetRVA, bin.imageBase, maxRes, found, refs)
+			refs, found = collectXref32(sec.data, sec.rva, target, maxRes, found, refs)
 		case "arm64":
-			refs, found = collectXrefARM64(sec.data, sec.rva, targetRVA, bin.imageBase, maxRes, found, refs)
+			refs, found = collectXrefARM64(sec.data, sec.rva, target, maxRes, found, refs)
 		case "arm32":
-			refs, found = collectXrefARM32(sec.data, sec.rva, targetRVA, bin.imageBase, maxRes, found, refs)
+			refs, found = collectXrefARM32(sec.data, sec.rva, target, maxRes, found, refs)
 		}
 	}
 
@@ -116,7 +172,7 @@ func opXref(input AnalyzeInput) (string, error) {
 		for _, r := range refs {
 			counts[r.refType]++
 		}
-		sb.WriteString(fmt.Sprintf("%d references to 0x%x (%s):", found, targetVA, archLabel))
+		sb.WriteString(fmt.Sprintf("%d references to %s (%s):", found, target.label(), archLabel))
 		for _, typ := range []string{"CALL", "JMP", "LEA", "MOV", "PUSH", "Jcc", "BL", "B", "ADRP"} {
 			if c, ok := counts[typ]; ok {
 				sb.WriteString(fmt.Sprintf(" %d %s,", c, typ))
@@ -127,7 +183,7 @@ func opXref(input AnalyzeInput) (string, error) {
 		sb.WriteString(s)
 		sb.WriteString("\n\n")
 	} else {
-		sb.WriteString(fmt.Sprintf("Cross-references to 0x%x (%s):\n\n", targetVA, archLabel))
+		sb.WriteString(fmt.Sprintf("Cross-references to %s (%s):\n\n", target.label(), archLabel))
 	}
 
 	for _, r := range refs {
@@ -138,8 +194,10 @@ func opXref(input AnalyzeInput) (string, error) {
 		sb.WriteString("No references found.\n")
 		// Agent-first guidance: 0 direct refs to a mid-function address usually
 		// means the caller wanted the enclosing function. Point at its start.
-		if hint := xrefEnclosingHint(input.FilePath, targetVA); hint != "" {
-			sb.WriteString(hint)
+		if !target.isRange() {
+			if hint := xrefEnclosingHint(input.FilePath, targetVA); hint != "" {
+				sb.WriteString(hint)
+			}
 		}
 	}
 	sb.WriteString(fmt.Sprintf("\n(%d references found)", found))
@@ -366,8 +424,9 @@ func xrefFromMachO(f *macho.File) (*xrefBinary, error) {
 // --- x86/x64 pattern matchers (unchanged logic) ---
 
 // collectXref64 scans x64 code for references and collects typed results.
-func collectXref64(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxRes, found int, refs []xrefResult) ([]xrefResult, int) {
+func collectXref64(data []byte, secRVA uint32, targetRange xrefTargetRange, maxRes, found int, refs []xrefResult) ([]xrefResult, int) {
 	dataLen := len(data)
+	imageBase := targetRange.imageBase
 
 	for i := 0; i < dataLen && found < maxRes; i++ {
 		instrRVA := secRVA + uint32(i)
@@ -376,9 +435,9 @@ func collectXref64(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxR
 		// E8 rel32 -- CALL relative
 		if data[i] == 0xE8 && i+5 <= dataLen {
 			rel := int32(binary.LittleEndian.Uint32(data[i+1:]))
-			target := int64(instrRVA) + 5 + int64(rel)
-			if target >= 0 && target == int64(targetRVA) {
-				refs = append(refs, xrefResult{"CALL", fmt.Sprintf("  0x%x: CALL 0x%x  (E8 relative)\n", instrVA, imageBase+uint64(targetRVA))})
+			decodedRVA := int64(instrRVA) + 5 + int64(rel)
+			if decodedVA, ok := targetRange.containsRVA(decodedRVA); ok {
+				refs = append(refs, xrefResult{"CALL", fmt.Sprintf("  0x%x: CALL 0x%x  (E8 relative)\n", instrVA, decodedVA)})
 				found++
 				continue
 			}
@@ -387,9 +446,9 @@ func collectXref64(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxR
 		// E9 rel32 -- JMP relative
 		if data[i] == 0xE9 && i+5 <= dataLen {
 			rel := int32(binary.LittleEndian.Uint32(data[i+1:]))
-			target := int64(instrRVA) + 5 + int64(rel)
-			if target >= 0 && target == int64(targetRVA) {
-				refs = append(refs, xrefResult{"JMP", fmt.Sprintf("  0x%x: JMP 0x%x  (E9 relative)\n", instrVA, imageBase+uint64(targetRVA))})
+			decodedRVA := int64(instrRVA) + 5 + int64(rel)
+			if decodedVA, ok := targetRange.containsRVA(decodedRVA); ok {
+				refs = append(refs, xrefResult{"JMP", fmt.Sprintf("  0x%x: JMP 0x%x  (E9 relative)\n", instrVA, decodedVA)})
 				found++
 				continue
 			}
@@ -398,10 +457,10 @@ func collectXref64(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxR
 		// 0F 80-8F rel32 -- Jcc (conditional jump near)
 		if data[i] == 0x0F && i+6 <= dataLen && data[i+1] >= 0x80 && data[i+1] <= 0x8F {
 			rel := int32(binary.LittleEndian.Uint32(data[i+2:]))
-			target := int64(instrRVA) + 6 + int64(rel)
-			if target >= 0 && target == int64(targetRVA) {
+			decodedRVA := int64(instrRVA) + 6 + int64(rel)
+			if decodedVA, ok := targetRange.containsRVA(decodedRVA); ok {
 				name := jccNames[data[i+1]-0x80]
-				refs = append(refs, xrefResult{"Jcc", fmt.Sprintf("  0x%x: %s 0x%x  (0F %02X relative)\n", instrVA, name, imageBase+uint64(targetRVA), data[i+1])})
+				refs = append(refs, xrefResult{"Jcc", fmt.Sprintf("  0x%x: %s 0x%x  (0F %02X relative)\n", instrVA, name, decodedVA, data[i+1])})
 				found++
 				continue
 			}
@@ -417,10 +476,10 @@ func collectXref64(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxR
 				rm := modrm & 0x07
 				if mod == 0x00 && rm == 0x05 {
 					disp := int32(binary.LittleEndian.Uint32(data[i+3:]))
-					target := int64(instrRVA) + 7 + int64(disp)
-					if target >= 0 && target == int64(targetRVA) {
+					decodedRVA := int64(instrRVA) + 7 + int64(disp)
+					if decodedVA, ok := targetRange.containsRVA(decodedRVA); ok {
 						regIdx := ((rex & 0x04) << 1) | ((modrm >> 3) & 0x07)
-						refs = append(refs, xrefResult{"LEA", fmt.Sprintf("  0x%x: LEA %s, [0x%x]  (RIP-relative)\n", instrVA, x64RegName(regIdx), imageBase+uint64(targetRVA))})
+						refs = append(refs, xrefResult{"LEA", fmt.Sprintf("  0x%x: LEA %s, [0x%x]  (RIP-relative)\n", instrVA, x64RegName(regIdx), decodedVA)})
 						found++
 						continue
 					}
@@ -432,13 +491,13 @@ func collectXref64(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxR
 		if i+6 <= dataLen && data[i] == 0xFF {
 			if data[i+1] == 0x15 || data[i+1] == 0x25 {
 				disp := int32(binary.LittleEndian.Uint32(data[i+2:]))
-				target := int64(instrRVA) + 6 + int64(disp)
-				if target >= 0 && target == int64(targetRVA) {
+				decodedRVA := int64(instrRVA) + 6 + int64(disp)
+				if decodedVA, ok := targetRange.containsRVA(decodedRVA); ok {
 					op := "CALL"
 					if data[i+1] == 0x25 {
 						op = "JMP"
 					}
-					refs = append(refs, xrefResult{op, fmt.Sprintf("  0x%x: %s [0x%x]  (indirect RIP-relative)\n", instrVA, op, imageBase+uint64(targetRVA))})
+					refs = append(refs, xrefResult{op, fmt.Sprintf("  0x%x: %s [0x%x]  (indirect RIP-relative)\n", instrVA, op, decodedVA)})
 					found++
 					continue
 				}
@@ -452,12 +511,11 @@ func collectXref64(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxR
 		if data[i] == 0x68 && i+5 <= dataLen {
 			imm := int32(binary.LittleEndian.Uint32(data[i+1:]))
 			immVA := uint64(int64(imm))
-			targetFullVA := imageBase + uint64(targetRVA)
-			if immVA == targetFullVA {
+			if targetRange.containsVA(immVA) {
 				if i+5 < dataLen && data[i+5] == 0xC3 {
-					refs = append(refs, xrefResult{"PUSH", fmt.Sprintf("  0x%x: PUSH 0x%x; RET  (indirect jump via push+ret)\n", instrVA, targetFullVA)})
+					refs = append(refs, xrefResult{"PUSH", fmt.Sprintf("  0x%x: PUSH 0x%x; RET  (indirect jump via push+ret)\n", instrVA, immVA)})
 				} else {
-					refs = append(refs, xrefResult{"PUSH", fmt.Sprintf("  0x%x: PUSH 0x%x  (imm32)\n", instrVA, targetFullVA)})
+					refs = append(refs, xrefResult{"PUSH", fmt.Sprintf("  0x%x: PUSH 0x%x  (imm32)\n", instrVA, immVA)})
 				}
 				found++
 				continue
@@ -477,10 +535,10 @@ func collectXref64(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxR
 				rm := modrm & 0x07
 				if mod == 0x00 && rm == 0x05 {
 					disp := int32(binary.LittleEndian.Uint32(data[i+3:]))
-					target := int64(instrRVA) + 7 + int64(disp)
-					if target >= 0 && target == int64(targetRVA) {
+					decodedRVA := int64(instrRVA) + 7 + int64(disp)
+					if decodedVA, ok := targetRange.containsRVA(decodedRVA); ok {
 						regIdx := ((rex & 0x04) << 1) | ((modrm >> 3) & 0x07)
-						refs = append(refs, xrefResult{"MOV", fmt.Sprintf("  0x%x: MOV %s, [0x%x]  (RIP-relative)\n", instrVA, x64RegName(regIdx), imageBase+uint64(targetRVA))})
+						refs = append(refs, xrefResult{"MOV", fmt.Sprintf("  0x%x: MOV %s, [0x%x]  (RIP-relative)\n", instrVA, x64RegName(regIdx), decodedVA)})
 						found++
 						continue
 					}
@@ -497,10 +555,10 @@ func collectXref64(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxR
 				rm := modrm & 0x07
 				if mod == 0x00 && rm == 0x05 {
 					disp := int32(binary.LittleEndian.Uint32(data[i+3:]))
-					target := int64(instrRVA) + 7 + int64(disp)
-					if target >= 0 && target == int64(targetRVA) {
+					decodedRVA := int64(instrRVA) + 7 + int64(disp)
+					if decodedVA, ok := targetRange.containsRVA(decodedRVA); ok {
 						regIdx := ((rex & 0x04) << 1) | ((modrm >> 3) & 0x07)
-						refs = append(refs, xrefResult{"MOV", fmt.Sprintf("  0x%x: MOV [0x%x], %s  (RIP-relative store)\n", instrVA, imageBase+uint64(targetRVA), x64RegName(regIdx))})
+						refs = append(refs, xrefResult{"MOV", fmt.Sprintf("  0x%x: MOV [0x%x], %s  (RIP-relative store)\n", instrVA, decodedVA, x64RegName(regIdx))})
 						found++
 						continue
 					}
@@ -514,10 +572,9 @@ func collectXref64(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxR
 // collectXref32 scans x86 32-bit code for references and collects typed results.
 // x86 uses absolute addresses for data refs (A1/A3, FF 15/25, PUSH imm32),
 // unlike x64 which uses RIP-relative addressing.
-func collectXref32(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxRes, found int, refs []xrefResult) ([]xrefResult, int) {
+func collectXref32(data []byte, secRVA uint32, targetRange xrefTargetRange, maxRes, found int, refs []xrefResult) ([]xrefResult, int) {
 	dataLen := len(data)
-	// Safe: x86 PE/ELF ImageBase fits in uint32 (x86 address space is 4GB).
-	targetAbsVA := uint32(imageBase) + targetRVA
+	imageBase := targetRange.imageBase
 
 	for i := 0; i < dataLen && found < maxRes; i++ {
 		instrRVA := secRVA + uint32(i)
@@ -526,13 +583,13 @@ func collectXref32(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxR
 		// E8/E9 rel32 -- CALL/JMP relative
 		if (data[i] == 0xE8 || data[i] == 0xE9) && i+5 <= dataLen {
 			rel := int32(binary.LittleEndian.Uint32(data[i+1:]))
-			target := uint32(int64(instrRVA) + 5 + int64(rel))
-			if target == targetRVA {
+			decodedRVA := int64(instrRVA) + 5 + int64(rel)
+			if decodedVA, ok := targetRange.containsRVA(decodedRVA); ok {
 				op := "CALL"
 				if data[i] == 0xE9 {
 					op = "JMP"
 				}
-				refs = append(refs, xrefResult{op, fmt.Sprintf("  0x%x: %s 0x%x  (relative)\n", instrVA, op, imageBase+uint64(targetRVA))})
+				refs = append(refs, xrefResult{op, fmt.Sprintf("  0x%x: %s 0x%x  (relative)\n", instrVA, op, decodedVA)})
 				found++
 				continue
 			}
@@ -541,10 +598,10 @@ func collectXref32(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxR
 		// 0F 80-8F rel32 -- Jcc
 		if data[i] == 0x0F && i+6 <= dataLen && data[i+1] >= 0x80 && data[i+1] <= 0x8F {
 			rel := int32(binary.LittleEndian.Uint32(data[i+2:]))
-			target := uint32(int64(instrRVA) + 6 + int64(rel))
-			if target == targetRVA {
+			decodedRVA := int64(instrRVA) + 6 + int64(rel)
+			if decodedVA, ok := targetRange.containsRVA(decodedRVA); ok {
 				name := jccNames[data[i+1]-0x80]
-				refs = append(refs, xrefResult{"Jcc", fmt.Sprintf("  0x%x: %s 0x%x  (relative)\n", instrVA, name, imageBase+uint64(targetRVA))})
+				refs = append(refs, xrefResult{"Jcc", fmt.Sprintf("  0x%x: %s 0x%x  (relative)\n", instrVA, name, decodedVA)})
 				found++
 				continue
 			}
@@ -554,12 +611,12 @@ func collectXref32(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxR
 		// FF 25 [abs32] -- JMP  [addr] (indirect, e.g. IAT thunk/PLT)
 		if data[i] == 0xFF && i+6 <= dataLen && (data[i+1] == 0x15 || data[i+1] == 0x25) {
 			addr := binary.LittleEndian.Uint32(data[i+2:])
-			if addr == targetAbsVA {
+			if targetRange.containsVA(uint64(addr)) {
 				op := "CALL"
 				if data[i+1] == 0x25 {
 					op = "JMP"
 				}
-				refs = append(refs, xrefResult{op, fmt.Sprintf("  0x%x: %s [0x%x]  (indirect absolute)\n", instrVA, op, targetAbsVA)})
+				refs = append(refs, xrefResult{op, fmt.Sprintf("  0x%x: %s [0x%x]  (indirect absolute)\n", instrVA, op, addr)})
 				found++
 				continue
 			}
@@ -569,12 +626,12 @@ func collectXref32(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxR
 		// A3 [abs32] -- MOV [addr], EAX
 		if (data[i] == 0xA1 || data[i] == 0xA3) && i+5 <= dataLen {
 			addr := binary.LittleEndian.Uint32(data[i+1:])
-			if addr == targetAbsVA {
+			if targetRange.containsVA(uint64(addr)) {
 				op := "MOV EAX, [0x%x]"
 				if data[i] == 0xA3 {
 					op = "MOV [0x%x], EAX"
 				}
-				refs = append(refs, xrefResult{"MOV", fmt.Sprintf("  0x%x: "+op+"  (absolute)\n", instrVA, targetAbsVA)})
+				refs = append(refs, xrefResult{"MOV", fmt.Sprintf("  0x%x: "+op+"  (absolute)\n", instrVA, addr)})
 				found++
 				continue
 			}
@@ -583,11 +640,11 @@ func collectXref32(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxR
 		// 68 imm32 -- PUSH
 		if data[i] == 0x68 && i+5 <= dataLen {
 			imm := binary.LittleEndian.Uint32(data[i+1:])
-			if imm == targetAbsVA {
+			if targetRange.containsVA(uint64(imm)) {
 				if i+5 < dataLen && data[i+5] == 0xC3 {
-					refs = append(refs, xrefResult{"PUSH", fmt.Sprintf("  0x%x: PUSH 0x%x; RET  (indirect jump via push+ret)\n", instrVA, targetAbsVA)})
+					refs = append(refs, xrefResult{"PUSH", fmt.Sprintf("  0x%x: PUSH 0x%x; RET  (indirect jump via push+ret)\n", instrVA, imm)})
 				} else {
-					refs = append(refs, xrefResult{"PUSH", fmt.Sprintf("  0x%x: PUSH 0x%x  (absolute)\n", instrVA, targetAbsVA)})
+					refs = append(refs, xrefResult{"PUSH", fmt.Sprintf("  0x%x: PUSH 0x%x  (absolute)\n", instrVA, imm)})
 				}
 				found++
 				continue
@@ -605,9 +662,10 @@ func collectXref32(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxR
 //   - B  imm26: direct jump
 //   - B.cond imm19: conditional branch
 //   - ADRP+ADD/LDR: page-relative data reference (2-instruction pair)
-func collectXrefARM64(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxRes, found int, refs []xrefResult) ([]xrefResult, int) {
-	targetVA := imageBase + uint64(targetRVA)
-	targetPage := targetVA &^ 0xFFF // 4KB page
+func collectXrefARM64(data []byte, secRVA uint32, targetRange xrefTargetRange, maxRes, found int, refs []xrefResult) ([]xrefResult, int) {
+	imageBase := targetRange.imageBase
+	startPage := targetRange.startVA &^ 0xFFF
+	endPage := targetRange.endVA &^ 0xFFF
 
 	for i := 0; i+4 <= len(data) && found < maxRes; i += 4 {
 		instrRVA := secRVA + uint32(i)
@@ -617,9 +675,9 @@ func collectXrefARM64(data []byte, secRVA, targetRVA uint32, imageBase uint64, m
 		// BL imm26 -- 1001 01ii iiii iiii iiii iiii iiii iiii
 		if instr>>26 == 0x25 {
 			imm26 := int32(instr&0x03FFFFFF) << 6 >> 6 // sign-extend 26-bit
-			target := instrVA + uint64(int64(imm26)*4)
-			if target == targetVA {
-				refs = append(refs, xrefResult{"BL", fmt.Sprintf("  0x%x: BL 0x%x\n", instrVA, targetVA)})
+			decodedVA := instrVA + uint64(int64(imm26)*4)
+			if targetRange.containsVA(decodedVA) {
+				refs = append(refs, xrefResult{"BL", fmt.Sprintf("  0x%x: BL 0x%x\n", instrVA, decodedVA)})
 				found++
 				continue
 			}
@@ -628,9 +686,9 @@ func collectXrefARM64(data []byte, secRVA, targetRVA uint32, imageBase uint64, m
 		// B imm26 -- 0001 01ii iiii iiii iiii iiii iiii iiii
 		if instr>>26 == 0x05 {
 			imm26 := int32(instr&0x03FFFFFF) << 6 >> 6
-			target := instrVA + uint64(int64(imm26)*4)
-			if target == targetVA {
-				refs = append(refs, xrefResult{"B", fmt.Sprintf("  0x%x: B 0x%x\n", instrVA, targetVA)})
+			decodedVA := instrVA + uint64(int64(imm26)*4)
+			if targetRange.containsVA(decodedVA) {
+				refs = append(refs, xrefResult{"B", fmt.Sprintf("  0x%x: B 0x%x\n", instrVA, decodedVA)})
 				found++
 				continue
 			}
@@ -639,10 +697,10 @@ func collectXrefARM64(data []byte, secRVA, targetRVA uint32, imageBase uint64, m
 		// B.cond imm19 -- 0101 0100 iiii iiii iiii iiii iii0 cccc
 		if instr&0xFF000010 == 0x54000000 {
 			imm19 := int32((instr>>5)&0x7FFFF) << 13 >> 13
-			target := instrVA + uint64(int64(imm19)*4)
-			if target == targetVA {
+			decodedVA := instrVA + uint64(int64(imm19)*4)
+			if targetRange.containsVA(decodedVA) {
 				cond := arm64CondName(instr & 0x0F)
-				refs = append(refs, xrefResult{"B", fmt.Sprintf("  0x%x: B.%s 0x%x\n", instrVA, cond, targetVA)})
+				refs = append(refs, xrefResult{"B", fmt.Sprintf("  0x%x: B.%s 0x%x\n", instrVA, cond, decodedVA)})
 				found++
 				continue
 			}
@@ -655,7 +713,7 @@ func collectXrefARM64(data []byte, secRVA, targetRVA uint32, imageBase uint64, m
 			immHi := int32((instr>>5)&0x7FFFF) << 13 >> 13
 			adrpPage := (instrVA &^ 0xFFF) + uint64(int64(immHi)<<14|int64(immLo)<<12)
 
-			if adrpPage == targetPage && i+8 <= len(data) {
+			if adrpPage >= startPage && adrpPage <= endPage && i+8 <= len(data) {
 				nextInstr := binary.LittleEndian.Uint32(data[i+4:])
 				rd := instr & 0x1F
 
@@ -666,8 +724,8 @@ func collectXrefARM64(data []byte, secRVA, targetRVA uint32, imageBase uint64, m
 					if nextRd == rd && nextRn == rd {
 						imm12 := (nextInstr >> 10) & 0xFFF
 						fullAddr := adrpPage + uint64(imm12)
-						if fullAddr == targetVA {
-							refs = append(refs, xrefResult{"ADRP", fmt.Sprintf("  0x%x: ADRP+ADD -> 0x%x\n", instrVA, targetVA)})
+						if targetRange.containsVA(fullAddr) {
+							refs = append(refs, xrefResult{"ADRP", fmt.Sprintf("  0x%x: ADRP+ADD -> 0x%x\n", instrVA, fullAddr)})
 							found++
 							continue
 						}
@@ -680,8 +738,8 @@ func collectXrefARM64(data []byte, secRVA, targetRVA uint32, imageBase uint64, m
 					if nextRn == rd {
 						imm12 := (nextInstr >> 10) & 0xFFF
 						fullAddr := adrpPage + uint64(imm12)*8
-						if fullAddr == targetVA {
-							refs = append(refs, xrefResult{"ADRP", fmt.Sprintf("  0x%x: ADRP+LDR -> [0x%x]\n", instrVA, targetVA)})
+						if targetRange.containsVA(fullAddr) {
+							refs = append(refs, xrefResult{"ADRP", fmt.Sprintf("  0x%x: ADRP+LDR -> [0x%x]\n", instrVA, fullAddr)})
 							found++
 							continue
 						}
@@ -694,8 +752,8 @@ func collectXrefARM64(data []byte, secRVA, targetRVA uint32, imageBase uint64, m
 					if nextRn == rd {
 						imm12 := (nextInstr >> 10) & 0xFFF
 						fullAddr := adrpPage + uint64(imm12)*4
-						if fullAddr == targetVA {
-							refs = append(refs, xrefResult{"ADRP", fmt.Sprintf("  0x%x: ADRP+LDR -> [0x%x]\n", instrVA, targetVA)})
+						if targetRange.containsVA(fullAddr) {
+							refs = append(refs, xrefResult{"ADRP", fmt.Sprintf("  0x%x: ADRP+LDR -> [0x%x]\n", instrVA, fullAddr)})
 							found++
 							continue
 						}
@@ -713,8 +771,8 @@ func collectXrefARM64(data []byte, secRVA, targetRVA uint32, imageBase uint64, m
 // ARM32 instructions are fixed 4 bytes. Key patterns:
 //   - BL imm24: direct call (+/-32MB range)
 //   - B  imm24: direct jump
-func collectXrefARM32(data []byte, secRVA, targetRVA uint32, imageBase uint64, maxRes, found int, refs []xrefResult) ([]xrefResult, int) {
-	targetVA := imageBase + uint64(targetRVA)
+func collectXrefARM32(data []byte, secRVA uint32, targetRange xrefTargetRange, maxRes, found int, refs []xrefResult) ([]xrefResult, int) {
+	imageBase := targetRange.imageBase
 
 	for i := 0; i+4 <= len(data) && found < maxRes; i += 4 {
 		instrRVA := secRVA + uint32(i)
@@ -727,13 +785,13 @@ func collectXrefARM32(data []byte, secRVA, targetRVA uint32, imageBase uint64, m
 		if opBits == 0x0B || opBits == 0x0A {
 			imm24 := int32(instr&0x00FFFFFF) << 8 >> 8 // sign-extend 24-bit
 			// ARM32: PC = instrAddr + 8 (pipeline offset)
-			target := instrVA + 8 + uint64(int64(imm24)*4)
-			if target == targetVA {
+			decodedVA := instrVA + 8 + uint64(int64(imm24)*4)
+			if targetRange.containsVA(decodedVA) {
 				op := "B"
 				if opBits == 0x0B {
 					op = "BL"
 				}
-				refs = append(refs, xrefResult{op, fmt.Sprintf("  0x%x: %s 0x%x\n", instrVA, op, targetVA)})
+				refs = append(refs, xrefResult{op, fmt.Sprintf("  0x%x: %s 0x%x\n", instrVA, op, decodedVA)})
 				found++
 				continue
 			}

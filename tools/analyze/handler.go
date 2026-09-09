@@ -51,7 +51,8 @@ type AnalyzeInput struct {
 	Pattern string `json:"pattern,omitempty" jsonschema:"Hex byte pattern with ?? wildcards (e.g. '4D 5A ?? ?? 50 45'). For pattern_search"`
 
 	// xref parameters
-	TargetVA string `json:"target_va,omitempty" jsonschema:"Target virtual address to find references to (hex). For xref operation."`
+	TargetVA    string `json:"target_va,omitempty" jsonschema:"Target virtual address to find references to, or inclusive range start when target_end_va is set (hex). For xref operation."`
+	TargetEndVA string `json:"target_end_va,omitempty" jsonschema:"Optional inclusive end of the target address range (hex). Omit for an exact-address xref."`
 
 	// bin_diff parameters
 	FilePathB string `json:"file_path_b,omitempty" jsonschema:"Second file for bin_diff. Relative paths use workspace/MCP root"`
@@ -229,7 +230,7 @@ entropy (Shannon entropy per section),
 bin_diff (two-file byte comparison), resource_info (PE resources and version info),
 imphash (PE import hash for malware classification), rich_header (PE build tool fingerprint),
 overlay_detect (detect appended data after last section), dwarf_info (debug symbol info),
-xref (find all code references to a target address in PE/ELF/Mach-O; supports x86/x64/ARM64/ARM32),
+xref (find all code references to a target address or optional inclusive range in PE/ELF/Mach-O; supports x86/x64/ARM64/ARM32),
 function_at (find function boundaries via PE .pdata or heuristic prologue/epilogue scan),
 call_graph (static call graph from a root function; PE/ELF/Mach-O, x86/x64/ARM64/ARM32),
 follow_ptr (follow pointer chain in PE with symbol annotation, circular reference detection),

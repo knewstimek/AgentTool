@@ -632,7 +632,7 @@ Static binary analysis tool with 21 operations:
 - rich_header: PE Rich header -- build tool fingerprinting
 - overlay_detect: Detect data appended after last section
 - dwarf_info: DWARF debug info (compilation units, functions, types)
-- xref: Find code references to target address (PE/ELF/Mach-O, x86/x64/ARM64/ARM32)
+- xref: Find code references to a target address or inclusive range (PE/ELF/Mach-O, x86/x64/ARM64/ARM32)
 - function_at: Find function boundaries (.pdata or heuristic)
 - call_graph: Static call graph from root function (PE/ELF/Mach-O, x86/x64/ARM64/ARM32)
 - follow_ptr: Follow pointer chain with symbol annotation (PE). Detects circular pointer references
@@ -641,7 +641,7 @@ Static binary analysis tool with 21 operations:
 - vtable_scan: Scan PE .rdata for all MSVC vtables with RTTI (auto-discovers C++ classes)
 Parameters: operation, file_path, offset, count, mode, arch (x86/arm),
   base_addr, min_length, max_results, length, section, pattern, file_path_b,
-  va, target_va, stop_at_ret, result_offset, max_output_chars
+  va, target_va, target_end_va, stop_at_ret, result_offset, max_output_chars
 Use topic='analyze' for detailed guide with examples.
 
 ## set_config
@@ -872,9 +872,12 @@ Extract DWARF debug information from PE, ELF, or Mach-O binaries.
     - "Binary appears stripped" if no DWARF data found
 
 ### xref
-Find all code locations that reference a target address (PE, ELF, Mach-O).
+Find all code locations that reference a target address or inclusive address range
+(PE, ELF, Mach-O).
   analyze(operation="xref", file_path="/path/to/binary",
           target_va="0x140001000")
+  analyze(operation="xref", file_path="/path/to/binary",
+          target_va="0x140020000", target_end_va="0x140020fff")
 
   Scans executable sections for instruction patterns that reference the target:
     x64: E8/E9 (CALL/JMP relative), 0F 8x (Jcc), LEA/MOV [rip+disp32],
@@ -885,7 +888,8 @@ Find all code locations that reference a target address (PE, ELF, Mach-O).
     ARM32: BL, B (with PC+8 pipeline offset)
 
   Parameters:
-    target_va: Virtual address to find references to (hex, required)
+    target_va: Virtual address to find references to, or range start (hex, required)
+    target_end_va: Inclusive range end (hex, optional; exact-address search when omitted)
     max_results: Maximum results (default: 200, max: 1000)
 
   Auto-detects format (PE/ELF/Mach-O) and architecture from binary headers.
